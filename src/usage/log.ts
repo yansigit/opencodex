@@ -41,6 +41,7 @@ export type AttemptRecoveryKind =
   | "transient-5xx"
   | "connection-reset"
   | "oauth-401"
+  | "key-401"
   | "key-429"
   | "rate-limit-429"
   | "anthropic-oauth-429"
@@ -56,9 +57,14 @@ export type AttemptRecoveryKind =
   | "cursor-overflow-remint"
   | "cursor-invalid-argument";
 
+/** Request-time upstream credential class, never a credential or account identifier. */
+export type UsageCredentialSource = "grok-oauth" | "xai-api-key";
+
 export interface PersistedUsageAttempt {
   ordinal: number;
   provider: string;
+  /** Absent on historic attempts and routes whose subscription attribution is unknown. */
+  credentialSource?: UsageCredentialSource;
   model: string;
   adapter: string;
   status: number;
@@ -292,6 +298,7 @@ const ATTEMPT_RECOVERY_KINDS = new Set<AttemptRecoveryKind>([
   "transient-5xx",
   "connection-reset",
   "oauth-401",
+  "key-401",
   "key-429",
   "rate-limit-429",
   "anthropic-oauth-429",
@@ -440,6 +447,10 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
   return {
     ordinal: attempt.ordinal as number,
     provider: attempt.provider,
+    ...(attempt.provider === "xai"
+      && (attempt.credentialSource === "grok-oauth" || attempt.credentialSource === "xai-api-key")
+      ? { credentialSource: attempt.credentialSource }
+      : {}),
     model: attempt.model,
     adapter: attempt.adapter,
     status: attempt.status,
@@ -737,6 +748,15 @@ let managementUsageReadInflight: {
   startedAt: number;
   abort: AbortController;
 } | null = null;
+
+/** Test seam for the same-ledger shrink branch without mutating an open Windows file. */
+export function setManagementUsageReadOpenedSizeForTests(openedSize: number): void {
+  if (!Number.isSafeInteger(openedSize) || openedSize < 0) {
+    throw new RangeError("management usage opened size must be a non-negative safe integer");
+  }
+  if (!managementUsageReadInflight) throw new Error("no management usage read is in flight");
+  managementUsageReadInflight.openedSize = openedSize;
+}
 
 /**
  * Append-tolerant snapshot of the last management read.

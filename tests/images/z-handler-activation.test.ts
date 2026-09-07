@@ -88,6 +88,13 @@ beforeAll(async () => {
 
   mock.module("../../src/web-search/index", () => ({
     buildWebSearchTool: () => ({ name: "web_search", parameters: { type: "object", properties: {} } }),
+    mediaBridgeWillRun: (
+      hasMediaPlan: boolean,
+      hasWebSearchPlan: boolean,
+      adapterRunsTurn: boolean,
+      isStreaming = true,
+    ) => hasMediaPlan && isStreaming && (!hasWebSearchPlan || adapterRunsTurn),
+    resolveCcaInTurnGrounding: () => undefined,
     WEB_SEARCH_TOOL_NAME: "web_search",
     extractHostedWebSearch: (tools: unknown[]) => {
       if (!Array.isArray(tools)) return undefined;
@@ -106,9 +113,6 @@ beforeAll(async () => {
     },
     planWebSearch: () => mockWsPlan,
     shouldResolveOpenAiWebSearchSidecar: () => false,
-    mediaBridgeWillRun: (hasMediaPlan: boolean, hasWebSearchPlan: boolean, adapterRunsTurn: boolean, isStreaming = true) =>
-      hasMediaPlan && isStreaming && (!hasWebSearchPlan || adapterRunsTurn),
-    resolveCcaInTurnGrounding: () => undefined,
   }));
 
   ({ handleResponses } = await import("../../src/server/responses"));

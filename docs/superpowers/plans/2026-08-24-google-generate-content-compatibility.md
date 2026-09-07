@@ -29,7 +29,7 @@ candidates take precedence and absent feedback retains the generic error.
 
 Focused verification:
 
-- `bun test tests/google-hardening.test.ts tests/google-vertex-stream.test.ts`
+- `bun test tests/adapters/google/google-hardening.test.ts tests/adapters/google/google-vertex-stream.test.ts`
 
 ## Task 2: Normalize adjacent Google user contents
 
@@ -40,7 +40,7 @@ model turn.
 
 Focused verification:
 
-- `bun test tests/google-empty-content.test.ts`
+- `bun test tests/adapters/google/google-empty-content.test.ts`
 
 ## Task 3: Add the strict Google provider-options extension
 
@@ -63,7 +63,7 @@ Reject CCA and non-Google routes before transport. Preserve
 Focused verification:
 
 - Parser/schema tests near existing Responses request tests.
-- `bun test tests/google-hardening.test.ts tests/google-wire-compiler.test.ts`
+- `bun test tests/adapters/google/google-hardening.test.ts tests/adapters/google/google-wire-compiler.test.ts`
 
 ## Task 4: Documentation and branch verification
 

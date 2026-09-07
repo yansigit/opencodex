@@ -15,7 +15,7 @@ kalır; bkz. [Web Kontrol Paneli](/tr/guides/web-dashboard/).
 Yayınlanan paketi kurun ve `ocx`'in `PATH` üzerinde olduğunu doğrulayın:
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @yansigit/opencodex
 ocx --version
 ```
 
@@ -130,5 +130,4 @@ ocx service install
 opencodex'i yerel makinenin ötesine açmadan önce
 [Yapılandırma](/tr/reference/configuration/) içindeki uzaktan erişim kurallarını
 okuyun.
-
 

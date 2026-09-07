@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { isDeepStrictEqual } from "node:util";
 
 /**
  * Codex parses a catalog entry's `input_modalities` as a closed enum, and one out-of-enum
@@ -151,6 +152,7 @@ import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostR
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
 import { mutateManagementConfig, saveManagementConfig, type ManagementContext } from "./context";
 import { listManagementModelRows, loadExportModels } from "./model-rows";
+import { initialModelSelectionPending } from "../../providers/initial-model-selection";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 import {
   hasModelPreset,
@@ -174,10 +176,10 @@ function summarizeExportedModels(client: ExportClientId, document: unknown): { m
 
 type ModelMutationValue =
   | { config: OcxConfig; alias?: string | null; aliases?: Record<string, string>; selected?: string[] }
-  | { error: string; conflicts?: Array<{ alias: string; heldBy: string }>; status?: number };
+  | { error: string; code?: string; conflicts?: Array<{ alias: string; heldBy: string }>; status?: number };
 
-function providerDiscoveryFingerprint(provider: OcxProviderConfig): string {
-  return JSON.stringify(provider);
+function providerDiscoveryFingerprint(provider: OcxProviderConfig): OcxProviderConfig {
+  return structuredClone(provider);
 }
 
 function adoptCommittedConfig(target: OcxConfig, source: OcxConfig): void {
@@ -198,8 +200,16 @@ function applyModelVisibility(
   provider: string,
   enabled: boolean,
   rawTargets: unknown[],
-): { ok: true; disabled: string[] } | { ok: false; error: string } {
+): { ok: true; disabled: string[] } | { ok: false; error: string; status?: number; code?: string } {
   const providerConfig = hasOwnProvider(config.providers, provider) ? config.providers[provider] : undefined;
+  if (initialModelSelectionPending(providerConfig)) {
+    return {
+      ok: false,
+      error: "Initial model discovery is pending. Refresh the model list and retry.",
+      status: 409,
+      code: "initial_model_selection_pending",
+    };
+  }
   const isVirtualComboNamespace = provider === COMBO_NAMESPACE && !preservesPhysicalComboProvider(config);
   if (!providerConfig && provider !== "openai" && !isVirtualComboNamespace) {
     return { ok: false, error: "unknown model visibility provider" };
@@ -221,7 +231,10 @@ function applyModelVisibility(
     }
     const id = value.id.trim();
     const native = value.native === true;
-    if (!id || (provider === "openai") !== native || (native && !supportedNative.has(id))) {
+    const configuredOpenAiCustom = provider === "openai" && !native && providerConfig
+      && (config.customModels ?? []).some(model => model.provider === provider && model.modelId === id);
+    if (!id || (native && (provider !== "openai" || !supportedNative.has(id)))
+      || (provider === "openai" && !native && !configuredOpenAiCustom)) {
       return { ok: false, error: "invalid model visibility target" };
     }
     const key = `${native ? "native" : "routed"}:${id}`;
@@ -297,6 +310,17 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
   // bypass this seam with a dynamic config import — doing so replaced a user's
   // ~/.opencodex/config.json with the `existing-uuid` test fixture.
   const persistConfig = (candidate: OcxConfig) => saveManagementConfig(deps, candidate);
+  const convergeVisibleCatalogs = async () => {
+    const catalogRefresh = await convergeCodexCatalog();
+    const refresh = deps.refreshOwnedCatalogIntegrations
+      ?? (await import("../../integrations/catalog-refresh")).refreshOwnedCatalogIntegrations;
+    const clientIntegrations = await refresh({
+      config,
+      port: Number(url.port) || config.port,
+      models: () => loadExportModels(config),
+    });
+    return { catalogRefresh, clientIntegrations };
+  };
 
   if (url.pathname === "/api/model-discovery" && req.method === "GET") {
     const providers = Object.fromEntries(Object.entries(config.providers).map(([name, provider]) => [
@@ -664,8 +688,7 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     const disabled = Array.isArray(body.models) ? body.models.filter((m): m is string => typeof m === "string") : [];
     config.disabledModels = disabled;
     persistConfig(config);
-    const catalogRefresh = await convergeCodexCatalog();
-    return jsonResponse({ ok: true, disabled, catalogRefresh });
+    return jsonResponse({ ok: true, disabled, ...await convergeVisibleCatalogs() });
   }
 
   // One user-facing visibility switch spans two persisted filters: a provider allowlist and the
@@ -681,23 +704,31 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     if (!scope || !provider || !isValidProviderName(provider) || typeof body.enabled !== "boolean" || !Array.isArray(body.targets)) {
       return jsonResponse({ error: "invalid model visibility request" }, 400);
     }
+    if (initialModelSelectionPending(config.providers[provider])) {
+      return jsonResponse({
+        error: "Initial model discovery is pending. Refresh the model list and retry.",
+        code: "initial_model_selection_pending",
+      }, 409);
+    }
 
     const outcome = mutateManagementConfig<
-      { config: OcxConfig; disabled: string[] } | { error: string }
+      { config: OcxConfig; disabled: string[] } | { error: string; status?: number; code?: string }
     >(deps, fresh => {
       const applied = applyModelVisibility(fresh, scope, provider, body.enabled as boolean, body.targets as unknown[]);
-      if (!applied.ok) return { changed: false, value: { error: applied.error } };
+      if (!applied.ok) return { changed: false, value: { error: applied.error, status: applied.status, code: applied.code } };
       return {
         changed: true,
         value: { config: structuredClone(fresh), disabled: applied.disabled },
       };
     });
     if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-    if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, 400);
+    if ("error" in outcome.value) return jsonResponse({
+      error: outcome.value.error,
+      ...(outcome.value.code ? { code: outcome.value.code } : {}),
+    }, outcome.value.status ?? 400);
     adoptCommittedConfig(config, outcome.value.config);
     const disabled = outcome.value.disabled;
-    const catalogRefresh = await convergeCodexCatalog();
-    return jsonResponse({ ok: true, scope, provider, enabled: body.enabled, disabled, catalogRefresh });
+    return jsonResponse({ ok: true, scope, provider, enabled: body.enabled, disabled, ...await convergeVisibleCatalogs() });
   }
 
   if (url.pathname === "/api/custom-models" && req.method === "GET") {
@@ -895,32 +926,58 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     if (mode !== "preset" && mode !== "all" && mode !== "custom") {
       return jsonResponse({ error: "mode must be preset, all, or custom" }, 400);
     }
+    if (mode === "preset" && !hasModelPreset(provider)) {
+      return jsonResponse({ error: `no model preset is shipped for provider '${provider}'` }, 400);
+    }
     const target = config.providers[provider];
+    if (initialModelSelectionPending(target)) {
+      return jsonResponse({ error: "Initial model discovery is pending. Refresh the model list and retry.", code: "initial_model_selection_pending" }, 409);
+    }
     if (mode === "all") {
       const outcome = mutateManagementConfig<ModelMutationValue>(deps, fresh => {
         const target = fresh.providers[provider];
         if (!target) return { changed: false, value: { error: "unknown provider" } };
+        if (initialModelSelectionPending(target)) {
+          return { changed: false, value: {
+            error: "Initial model discovery is pending. Refresh the model list and retry.",
+            code: "initial_model_selection_pending",
+            status: 409,
+          } };
+        }
         // Same effect as today's empty-list PUT: no allowlist, no marker to reconcile.
         delete target.selectedModels;
         delete target.modelPreset;
         return { changed: true, value: { config: structuredClone(fresh) } };
       });
       if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-      if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, 404);
+      if ("error" in outcome.value) return jsonResponse({
+        error: outcome.value.error,
+        ...(outcome.value.code ? { code: outcome.value.code } : {}),
+      }, outcome.value.status ?? 404);
       adoptCommittedConfig(config, outcome.value.config);
-      return jsonResponse({ ok: true, provider, mode, selected: [], catalogRefresh: await convergeCodexCatalog() });
+      return jsonResponse({ ok: true, provider, mode, selected: [], ...await convergeVisibleCatalogs() });
     }
     if (mode === "custom") {
       const outcome = mutateManagementConfig<ModelMutationValue>(deps, fresh => {
         const target = fresh.providers[provider];
         if (!target) return { changed: false, value: { error: "unknown provider" } };
+        if (initialModelSelectionPending(target)) {
+          return { changed: false, value: {
+            error: "Initial model discovery is pending. Refresh the model list and retry.",
+            code: "initial_model_selection_pending",
+            status: 409,
+          } };
+        }
         // Keep whatever is selected; only the marker changes, so a user can pin their edits
         // without the proxy re-materializing over them.
         target.modelPreset = { ...(target.modelPreset ?? {}), mode: "custom" };
         return { changed: true, value: { config: structuredClone(fresh), selected: [...(target.selectedModels ?? [])] } };
       });
       if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-      if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, 404);
+      if ("error" in outcome.value) return jsonResponse({
+        error: outcome.value.error,
+        ...(outcome.value.code ? { code: outcome.value.code } : {}),
+      }, outcome.value.status ?? 404);
       adoptCommittedConfig(config, outcome.value.config);
       return jsonResponse({ ok: true, provider, mode, selected: outcome.value.selected });
     }
@@ -940,7 +997,7 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       const outcome = mutateManagementConfig<ModelMutationValue>(deps, fresh => {
         const target = fresh.providers[provider];
         if (!target) return { changed: false, value: { error: "unknown provider" } };
-        if (providerDiscoveryFingerprint(target) !== admittedProviderFingerprint) {
+        if (!isDeepStrictEqual(providerDiscoveryFingerprint(target), admittedProviderFingerprint)) {
           return { changed: false, value: { error: "provider changed during model discovery; retry", status: 409 } };
         }
         target.modelPreset = {
@@ -966,7 +1023,7 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     const outcome = mutateManagementConfig<ModelMutationValue>(deps, fresh => {
       const target = fresh.providers[provider];
       if (!target) return { changed: false, value: { error: "unknown provider" } };
-      if (providerDiscoveryFingerprint(target) !== admittedProviderFingerprint) {
+      if (!isDeepStrictEqual(providerDiscoveryFingerprint(target), admittedProviderFingerprint)) {
         return { changed: false, value: { error: "provider changed during model discovery; retry", status: 409 } };
       }
       target.selectedModels = presetIds;
@@ -986,7 +1043,7 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       mode: "preset",
       appliedVersion: preset.version,
       selected: presetIds,
-      catalogRefresh: await convergeCodexCatalog(),
+      ...await convergeVisibleCatalogs(),
     });
   }
   if (url.pathname === "/api/selected-models" && req.method === "PUT") {
@@ -996,12 +1053,22 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     if (!provider || !hasOwnProvider(config.providers, provider)) {
       return jsonResponse({ error: "unknown provider" }, provider ? 404 : 400);
     }
+    if (initialModelSelectionPending(config.providers[provider])) {
+      return jsonResponse({ error: "Initial model discovery is pending. Refresh the model list and retry.", code: "initial_model_selection_pending" }, 409);
+    }
     const models = Array.isArray(body.models)
       ? [...new Set(body.models.filter((m): m is string => typeof m === "string"))]
       : [];
     const outcome = mutateManagementConfig<ModelMutationValue>(deps, fresh => {
       const target = fresh.providers[provider];
       if (!target) return { changed: false, value: { error: "unknown provider" } };
+      if (initialModelSelectionPending(target)) {
+        return { changed: false, value: {
+          error: "Initial model discovery is pending. Refresh the model list and retry.",
+          code: "initial_model_selection_pending",
+          status: 409,
+        } };
+      }
       // Empty list clears the allowlist (provider reverts to exposing all models).
       if (models.length > 0) target.selectedModels = models;
       else delete target.selectedModels;
@@ -1012,10 +1079,12 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       return { changed: true, value: { config: structuredClone(fresh) } };
     });
     if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-    if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, 404);
+    if ("error" in outcome.value) return jsonResponse({
+      error: outcome.value.error,
+      ...(outcome.value.code ? { code: outcome.value.code } : {}),
+    }, outcome.value.status ?? 404);
     adoptCommittedConfig(config, outcome.value.config);
-    const catalogRefresh = await convergeCodexCatalog();
-    return jsonResponse({ ok: true, provider, selected: models, catalogRefresh });
+    return jsonResponse({ ok: true, provider, selected: models, ...await convergeVisibleCatalogs() });
   }
   return null;
 }

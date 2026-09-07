@@ -29,10 +29,10 @@
 - Modify: `src/adapters/google.ts`
 - Modify: `src/server/auth-cors.ts`
 - Modify: `src/server/management/provider-routes.ts`
-- Test: `tests/aistudio-credentials.test.ts`
-- Test: `tests/google-aistudio-adapter.test.ts`
-- Test: `tests/google-aistudio-stream.test.ts`
-- Test: `tests/google-aistudio-status.test.ts`
+- Test: `tests/adapters/google/aistudio-credentials.test.ts`
+- Test: `tests/adapters/google/google-aistudio-adapter.test.ts`
+- Test: `tests/adapters/google/google-aistudio-stream.test.ts`
+- Test: `tests/adapters/google/google-aistudio-status.test.ts`
 
 **Interfaces:**
 - Produces: `AiStudioCredentialResolution = { kind: "ready"; cookieHeader: string; source: "provider-api-key" | "provider-header" | "session"; fingerprint: string } | { kind: "missing"; reason: string } | { kind: "invalid"; reason: string }`.
@@ -40,7 +40,7 @@
 - Produces: dashboard field `aiStudioAuthState: "connected" | "checking" | "needs_reauth" | "unsupported"`; retain `hasAiStudioSession` for compatibility and remove `aiStudioRelayActive`.
 
 - [ ] Write failing credential tests for each source, priority, case-insensitive header lookup, arbitrary strings, missing `SAPISID`, and control characters; assert fingerprints are stable SHA-256 values without exposing cookie text.
-- [ ] Run `bun test tests/aistudio-credentials.test.ts` and confirm failures are caused by the missing resolver.
+- [ ] Run `bun test tests/adapters/google/aistudio-credentials.test.ts` and confirm failures are caused by the missing resolver.
 - [ ] Implement the resolver by reusing session loading and cookie validation; do not add a class or dependency.
 - [ ] Run the credential test green.
 - [ ] Write failing adapter/status tests proving direct transport ignores an active relay, status never accepts arbitrary `apiKey`, HTML/redirect/401/403 map to reauthentication, and 429/5xx/network failures remain non-auth failures.
@@ -58,9 +58,9 @@
 - Modify: `gui/src/components/provider-workspace/ProviderOverview.tsx`
 - Modify: `gui/src/provider-workspace/catalog.ts`
 - Modify: `gui/src/i18n/*.ts`
-- Test: `tests/aistudio-native-webkit.test.ts`
-- Test: `tests/aistudio-login-cli.test.ts`
-- Test: `tests/google-aistudio-status.test.ts`
+- Test: `tests/adapters/google/aistudio-native-webkit.test.ts`
+- Test: `tests/adapters/google/aistudio-login-cli.test.ts`
+- Test: `tests/adapters/google/google-aistudio-status.test.ts`
 - Test: `gui/tests/aistudio-workspace-status.test.tsx`
 
 **Interfaces:**
@@ -93,10 +93,10 @@
 - Modify: `integrations/aistudio-extension/popup.js`
 - Modify: `integrations/aistudio-extension/popup.html`
 - Modify: `integrations/aistudio-extension/README.md`
-- Test: `tests/aistudio-bridge-endpoint.test.ts`
-- Test: `tests/aistudio-extension.test.ts`
-- Test: `tests/google-aistudio-discovery.test.ts`
-- Test: `tests/google-aistudio-quota.test.ts`
+- Test: `tests/adapters/google/aistudio-bridge-endpoint.test.ts`
+- Test: `tests/adapters/google/aistudio-extension.test.ts`
+- Test: `tests/adapters/google/google-aistudio-discovery.test.ts`
+- Test: `tests/adapters/google/google-aistudio-quota.test.ts`
 - Delete: `tests/aistudio-ws-hub.test.ts`
 - Delete: `tests/google-aistudio-relay-adapter.test.ts`
 
@@ -120,9 +120,9 @@
 - Modify: `docs-site/src/content/docs/reference/adapters.md`
 - Modify: directly affected AI Studio provider guides and translations discovered by `rg -l "AI Studio|aistudio" docs-site/src/content/docs`
 - Modify: `docs/superpowers/specs/aistudio-web-provider-spec.md` only to mark the newer design as superseding its relay architecture
-- Rename: `tests/google-aistudio-e2e-smoke.test.ts` to `tests/google-aistudio-integration.test.ts`
+- Rename: `tests/google-aistudio-e2e-smoke.test.ts` to `tests/adapters/google/google-aistudio-integration.test.ts`
 - Modify: `scripts/live-smoke.ts` only if existing scenarios cannot exercise the required direct AI Studio cases
-- Test: `tests/google-aistudio-integration.test.ts`
+- Test: `tests/adapters/google/google-aistudio-integration.test.ts`
 
 **Interfaces:**
 - Documents: native macOS login, direct `v1internal` session transport, extraction-only Brave extension, static models, local-only quota reporting, and 410 relay migration.
@@ -132,6 +132,6 @@
 - [ ] Run the integration test red for the removed-relay expectation, then make only the minimum fixture/harness changes needed for direct transport and run it green.
 - [ ] Update English and translated docs so none retain active-tab, userscript, offscreen-relay, official API-key fallback, live discovery, or upstream-quota claims.
 - [ ] Run `cd docs-site && bun install --frozen-lockfile && bun run build`.
-- [ ] Run the focused AI Studio test set, `bun run typecheck`, `bun run test`, `cd gui && bun test tests && bun run lint && bun run lint:i18n && bun run build`, `bun run privacy:scan`, and `bun test tests/core-lab-boundary.test.ts`.
+- [ ] Run the focused AI Studio test set, `bun run typecheck`, `bun run test`, `cd gui && bun test tests && bun run lint && bun run lint:i18n && bun run build`, `bun run privacy:scan`, and `bun test tests/lab/core-lab-boundary.test.ts`.
 - [ ] On macOS, run `bun scripts/live-smoke.ts --provider google-aistudio --force --json` against the branch-local proxy after native login; record streaming, tool-call round trip, comprehensive/freeform schema, and subagent-spawn results separately. If credentials or provider availability block live verification, report that fact without weakening deterministic gates.
 - [ ] Commit as `docs(aistudio): document native direct-session workflow`.

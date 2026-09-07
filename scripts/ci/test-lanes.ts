@@ -6,58 +6,112 @@ export const SERIAL_TEST_FILES = [
   // This is the single source of truth for tests that must not share a parallel
   // worker pool. The normal CI serial job and scripts/test.ts full-suite planner
   // both consume it, so promotion/nightly runs cannot silently lose quarantine.
-  "tests/aistudio-native-webkit.test.ts",
-  "tests/anthropic-image-normalize.test.ts",
-  "tests/claude-native-passthrough.test.ts",
-  "tests/claude-management-api.test.ts",
-  "tests/codex-app-server-processes.test.ts",
+  "tests/adapters/google/aistudio-native-webkit.test.ts",
+  "tests/adapters/anthropic/anthropic-image-normalize.test.ts",
+  "tests/claude-integration/claude-native-passthrough.test.ts",
+  "tests/claude-integration/claude-management-api.test.ts",
+  // Uses real multi-second streaming and inactivity deadlines. The macOS
+  // promotion pool delayed both sides past their test-level bounds.
+  "tests/clients/remote-catalog.test.ts",
+  "tests/codex-integration/codex-app-server-processes.test.ts",
   // Spawns multiple real `ocx start` children. Under the general Windows pool,
   // four Bun test processes can starve a healthy child past its readiness
   // watchdog even though it is still alive. Keep the end-to-end assertions;
   // isolate their process scheduling from unrelated shard load.
-  "tests/codex-composed-acceptance.test.ts",
-  "tests/codex-journal.test.ts",
-  "tests/codex-prompt-route.test.ts",
-  "tests/codex-shim.test.ts",
-  "tests/codex-transition-state-race.test.ts",
-  "tests/config-save-boundary.test.ts",
-  "tests/cursor-images.test.ts",
-  "tests/cursor-native-exec-shell.test.ts",
-  "tests/issue-452-empty-503.test.ts",
-  "tests/kiro-images.test.ts",
-  "tests/native-main-owner-lifetime.test.ts",
-  "tests/openai-provider-option-e2e.test.ts",
-  "tests/ocx-launcher-runtime.test.ts",
-  "tests/release-helper.test.ts",
-  "tests/request-decompress.test.ts",
-  "tests/responses-stateless-dangling-call-repair.test.ts",
-  "tests/server-auth.test.ts",
+  "tests/codex-integration/codex-composed-acceptance.test.ts",
+  // Exercises repeated catalog convergence against a synthetic Codex runtime.
+  // On a fully loaded macOS promotion runner its 30s featured-model deadline
+  // expired, while the same exact commit passed in the isolated dev push.
+  "tests/codex-integration/codex-convergence-account-selectors.test.ts",
+  // Proves production write-lock contention through many real Bun children.
+  // Run it after the general pool so unrelated process pressure cannot consume
+  // the bounded child startup budgets or let a holder expire before a contender.
+  "tests/codex-integration/codex-inject-write-lock.test.ts",
+  "tests/codex-integration/codex-journal.test.ts",
+  "tests/codex-integration/codex-prompt-route.test.ts",
+  "tests/codex-integration/codex-shim.test.ts",
+  "tests/codex-integration/codex-transition-state-race.test.ts",
+  // Proves the cross-process SQLite mutation lock with real Bun children. On a
+  // loaded Windows worker, child startup and teardown can exceed the test's
+  // bounded five-second ownership waits even though the lock behavior passes.
+  "tests/config/config-mutation-lock.test.ts",
+  "tests/config/config-save-boundary.test.ts",
+  "tests/providers/cursor/cursor-images.test.ts",
+  "tests/providers/cursor/cursor-native-exec-shell.test.ts",
+  "tests/codex-integration/issue-452-empty-503.test.ts",
+  "tests/providers/kiro/kiro-images.test.ts",
+  "tests/codex-integration/native-main-owner-lifetime.test.ts",
+  "tests/adapters/openai/openai-provider-option-e2e.test.ts",
+  "tests/cli/ocx-launcher-runtime.test.ts",
+  // Starts nested Bun and git processes from three disposable repositories. On a
+  // loaded macOS full-suite pool the first child remained blocked until the
+  // 15-minute suite watchdog, while this file completes in under a second alone.
+  "tests/ci-workflows/privacy-scan.test.ts",
+  "tests/ci-workflows/release-helper.test.ts",
+  // Uses real worker inactivity periods to classify periodic activity. On the
+  // loaded promotion pool, scheduler stalls crossed its bounded observation
+  // window and changed the expected blocked/inconclusive outcome.
+  "tests/lab/lab-fabric-task.test.ts",
+  // Classifies 30ms first-byte and inactivity deadlines against a local server;
+  // pool stalls can turn an inactivity timeout into a first-byte timeout.
+  "tests/lab/lab-live-pinned-timeouts.test.ts",
+  "tests/usage/request-decompress.test.ts",
+  // Drives a sustained real-time debounce to prove writes cannot be starved.
+  // Keep its 60s product invariant, but remove unrelated suite contention.
+  "tests/usage/quota-reset-seen-store.test.ts",
+  "tests/responses/responses-stateless-dangling-call-repair.test.ts",
+  "tests/server/server-auth.test.ts",
+  // Proves heartbeats cover a real 1.5s retry wait inside a 5s test budget.
+  // The loaded macOS pool consumed that margin without a product failure.
+  "tests/server/terminal-guard-server.test.ts",
   // Relays a real 50 MiB WebSocket frame to prove the production ceiling. On a
   // loaded macOS pool this exhausted its 15s internal deadline while the same
   // runner completed it in ~5.6s without contention.
-  "tests/server-live.test.ts",
-  "tests/server-search.test.ts",
-  "tests/shutdown-launcher.test.ts",
-  "tests/storage-policy-job-responsive.test.ts",
-  "tests/storage-restore-job-responsive.test.ts",
-  "tests/test-runner.test.ts",
-  "tests/update-stop-first.test.ts",
+  "tests/server/server-live.test.ts",
+  "tests/server/server-search.test.ts",
+  "tests/service/shutdown-launcher.test.ts",
+  "tests/storage/storage-policy-job-responsive.test.ts",
+  "tests/storage/storage-restore-job-responsive.test.ts",
+  // Holds the real shared mutation slot across short observation windows; pool
+  // scheduling can release the holder before the contender is dispatched.
+  "tests/storage/storage-mutation-race.test.ts",
+  // Waits for a real background policy worker to settle and prove process
+  // cleanup. Parallel macOS pressure can starve that worker past its 20s guard.
+  "tests/storage/storage-worker-lifecycle.test.ts",
+  "tests/ci-workflows/test-runner.test.ts",
+  "tests/update/update-stop-first.test.ts",
+  // Calls the real trusted PowerShell process-time probe, whose production
+  // five-second timeout intentionally degrades to null. Parallel Windows load
+  // can consume that whole budget and turn the integration assertion flaky.
+  "tests/windows/windows-popup-fix.test.ts",
+  // These suites share the interval-based overlay reconciler singleton and
+  // OPENCODEX_HOME. Parallel files can stop or reset the process-wide poller
+  // while a sibling is waiting for an observation, so isolate the whole family.
+  "tests/usage/user-cost-overlay-coderabbit-regressions.test.ts",
+  "tests/usage/user-cost-overlay-live-reconcile.test.ts",
+  "tests/usage/user-cost-overlay-provider-delete.test.ts",
+  // Proves a deliberately stalled response body is cut off inside a one-second
+  // contract. Isolate it so unrelated macOS workers cannot consume that budget.
+  "tests/web-search/web-search-timeout-contract.test.ts",
+  // Streams raw progress on 12ms intervals inside a 1s test-level deadline.
+  // It repeatedly crossed that deadline only in the loaded macOS pool.
+  "tests/web-search/web-search.test.ts",
   // Builds and parses 500,001 JSONL entries to prove the entry cap. It reached
   // the 30s test budget under pool contention and completes in ~5s in isolation.
-  "tests/usage-log.test.ts",
+  "tests/usage/usage-log.test.ts",
 ] as const;
 
 export const DEDICATED_TEST_FILES = [
-  "tests/api-storage-policy-already-running.test.ts",
-  "tests/api-storage-policy-mutation-busy.test.ts",
-  "tests/api-storage-policy-put-race.test.ts",
-  "tests/api-storage-policy-run.test.ts",
-  "tests/api-storage-policy.test.ts",
-  "tests/api-storage.test.ts",
-  "tests/api-usage.test.ts",
+  "tests/storage/api-storage-policy-already-running.test.ts",
+  "tests/storage/api-storage-policy-mutation-busy.test.ts",
+  "tests/storage/api-storage-policy-put-race.test.ts",
+  "tests/storage/api-storage-policy-run.test.ts",
+  "tests/storage/api-storage-policy.test.ts",
+  "tests/storage/api-storage.test.ts",
+  "tests/server/api-usage.test.ts",
 ] as const;
 export const STORAGE_TEST_FILES = DEDICATED_TEST_FILES.slice(0, 6);
-export const API_TEST_FILES = ["tests/api-usage.test.ts"] as const;
+export const API_TEST_FILES = ["tests/server/api-usage.test.ts"] as const;
 
 const laneNames = ["general", "serial", "dedicated", "dedicated-storage", "dedicated-api"] as const;
 export type TestLane = (typeof laneNames)[number];
@@ -118,13 +172,13 @@ export function validateLaneManifest(inventory: string[]): {
   for (const path of reserved) {
     if (!normalized.includes(path)) throw new Error(`lane manifest path is missing: ${path}`);
   }
-  const serialByBasename = new Map(
-    serial.map(path => [path.slice(path.lastIndexOf("/") + 1), path]),
+  const reservedByBasename = new Map(
+    [...serial, ...dedicated].map(path => [path.slice(path.lastIndexOf("/") + 1), path]),
   );
   for (const path of normalized) {
-    const serialPath = serialByBasename.get(path.slice(path.lastIndexOf("/") + 1));
-    if (serialPath && path !== serialPath) {
-      throw new Error(`lane manifest path collides with serial basename: ${path} and ${serialPath}`);
+    const reservedPath = reservedByBasename.get(path.slice(path.lastIndexOf("/") + 1));
+    if (reservedPath && path !== reservedPath) {
+      throw new Error(`lane manifest path collides with reserved basename: ${path} and ${reservedPath}`);
     }
   }
   return {

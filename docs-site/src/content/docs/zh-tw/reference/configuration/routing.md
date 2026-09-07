@@ -17,7 +17,7 @@ description: 預設供應商選擇、模型解析順序、combo 別名、目標�
 
 opencodex 依此順序解析請求的模型：
 
-1. 設定中的 `policy/<id>` 或 routing-profile 別名：執行政策評估器並路由所選候選項。無法解析的 `policy/<id>` 會往下落到後續規則。
+1. 設定中的 `policy/<id>` 或 routing-profile 別名：執行政策評估器並路由所選候選項。無法解析的 `policy/<id>` 不會往下落到後續規則，而是在本機失敗。
 2. 設定的 `<account-selector>/<native-openai-model>` 命名空間：透過所映射的已儲存 Codex 帳號精確路由。無效或不可用的精確目標會 fail closed。
 3. 標準 `combo/<id>` 或設定的 combo 別名。標準 id 先於別名比對。
 4. 前綴指名已設定供應商的明確 `<provider>/<model>` 命名空間。

@@ -32,16 +32,12 @@ export function decideV2NativeParentOverride(args: {
     !args.parsed
     || (collabSurface(args.parsed) !== "v2"
       && !(args.parsed._compactionRequest === true && config.multiAgentMode === "v2"))
-  )) {
-    return { kind: "skip" };
-  }
+  )) return { kind: "skip" };
   if (isThreadSpawnRequest(headers) || headers.has("x-openai-subagent")) return { kind: "skip" };
   if (!isCanonicalOpenAiForwardProvider(sourceRoute.provider)) return { kind: "skip" };
 
   const targetModel = config.v2NativeParentOverride.model?.trim();
-  if (!targetModel) {
-    return { kind: "reject", message: "v2NativeParentOverride requires a configured model" };
-  }
+  if (!targetModel) return { kind: "reject", message: "v2NativeParentOverride requires a configured model" };
   let route: RouteResult;
   try {
     route = routeModel(config, targetModel, args.targetEvidence);

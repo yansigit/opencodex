@@ -1,11 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { repoPath } from "../helpers/repo-root";
 
-const workflowText = readFileSync(resolve(
-  import.meta.dir,
-  "../../.github/workflows/fork-auto-release.yml",
-), "utf8");
+const workflowText = readFileSync(repoPath(".github/workflows/fork-auto-release.yml"), "utf8");
 const workflow = Bun.YAML.parse(workflowText) as {
   on?: {
     workflow_run?: {

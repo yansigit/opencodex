@@ -11,13 +11,93 @@ export interface ProviderQuotaReportView {
   source?: string;
   updatedAt?: number;
   quota?: unknown;
+  /**
+   * Server-set: the row was observed in-band on a streaming turn, never probed.
+   * Exempt from the freshness bound below, and rendered with its observation age.
+   */
+  observed?: boolean;
   aggregation?: unknown;
+}
+
+/**
+ * How old a PROBED report may be before it stops being shown.
+ *
+ * A probed provider re-reads on its own TTL, so a row past this bound means the probe
+ * is failing, and rendering it would present a dead number as live.
+ */
+export const QUOTA_REPORT_MAX_AGE_MS = 30 * 60_000;
+
+/**
+ * Narrow one wire row, dropping a probed report that has gone stale.
+ *
+ * Observed rows (passive providers such as `meta-muse`, whose usage arrives only inside
+ * a streaming response) are exempt: their age is expected and is surfaced to the reader
+ * instead of being used to delete the only measurement that exists. This lives here, in
+ * the pure-derivation module, rather than inside the shell component so it can be tested
+ * directly — the shell exports only its component, so a predicate defined there is
+ * reachable only through a full DOM render.
+ */
+export function freshQuotaReport(value: unknown, now: number): ProviderQuotaReportView | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (typeof row.updatedAt !== "number" || !Number.isFinite(row.updatedAt)) return null;
+  // A non-boolean value is treated as absent rather than rejected: the field is advisory,
+  // and a strict reject would turn an unknown future value into a vanished row.
+  const observed = row.observed === true;
+  if (!observed && now - row.updatedAt >= QUOTA_REPORT_MAX_AGE_MS) return null;
+  if (!("quota" in row)) return null;
+  if (row.label !== undefined && typeof row.label !== "string") return null;
+  if (row.source !== undefined && typeof row.source !== "string") return null;
+  return {
+    ...(typeof row.label === "string" ? { label: row.label } : {}),
+    ...(typeof row.source === "string" ? { source: row.source } : {}),
+    updatedAt: row.updatedAt,
+    quota: row.quota,
+    // Must be carried: this function rebuilds field-by-field and also re-validates the
+    // session cache, so an unpropagated flag would drop the row on the next page load.
+    ...(observed ? { observed: true } : {}),
+    ...(row.aggregation !== undefined ? { aggregation: row.aggregation } : {}),
+  };
+}
+
+/** Re-validate a cached provider→report map, dropping rows that are no longer showable. */
+export function freshQuotaReportRecord(
+  value: unknown,
+  now = Date.now(),
+): Record<string, ProviderQuotaReportView> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const out: Record<string, ProviderQuotaReportView> = {};
+  for (const [provider, raw] of Object.entries(value)) {
+    const report = freshQuotaReport(raw, now);
+    if (provider.trim() && report) out[provider] = report;
+  }
+  return out;
+}
+
+/** Narrow a `/api/provider-quotas` response body into the keyed view map. */
+export function freshQuotaReportsFromResponse(
+  value: unknown,
+  now = Date.now(),
+): Record<string, ProviderQuotaReportView> {
+  if (!Array.isArray(value)) return {};
+  const out: Record<string, ProviderQuotaReportView> = {};
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const provider = (raw as Record<string, unknown>).provider;
+    const report = freshQuotaReport(raw, now);
+    if (typeof provider === "string" && provider.trim() && report) out[provider] = report;
+  }
+  return out;
+}
+
+/** Observation timestamp to display beside the bars, or undefined for a probed row. */
+export function observedAtFromReport(report?: ProviderQuotaReportView): number | undefined {
+  return report?.observed === true && typeof report.updatedAt === "number" ? report.updatedAt : undefined;
 }
 
 export interface CapacityWindowView {
   usedPercent: number;
   incomplete?: boolean;
-  includedAccounts?: number;
   excludedAccounts?: number;
   nextRecoveryAt?: number;
   nextRecoveryPercent?: number;
@@ -26,7 +106,6 @@ export interface CapacityWindowView {
 export interface ProviderCapacityAggregationView {
   presentation: "aggregate" | "effective-account-fallback" | "coverage-only";
   incomplete: boolean;
-  includedAccounts: number;
   excludedAccounts: number;
   unknownPlanAccounts: number;
   partialWindowAccounts: number;
@@ -93,14 +172,9 @@ function quotaFromUnknown(quota: unknown, fallbackUpdatedAt?: number): AccountQu
         ...(typeof creditsRaw?.unlimited === "boolean" ? { unlimited: creditsRaw.unlimited } : {}),
       }
     : undefined;
-  const fiveHourPercent = finite(q.fiveHourPercent) ?? finite(q.shortPercent);
-  const fiveHourResetAt = finite(q.fiveHourResetAt) ?? finite(q.shortResetAt);
   const out: AccountQuota = {
-    ...(fiveHourPercent !== undefined ? { fiveHourPercent } : {}),
-    ...(fiveHourResetAt !== undefined ? { fiveHourResetAt } : {}),
-    ...(finite(q.shortPercent) !== undefined ? { shortPercent: q.shortPercent as number } : {}),
-    ...(finite(q.shortResetAt) !== undefined ? { shortResetAt: q.shortResetAt as number } : {}),
-    ...(finite(q.shortWindowSeconds) !== undefined ? { shortWindowSeconds: q.shortWindowSeconds as number } : {}),
+    ...(finite(q.fiveHourPercent) !== undefined ? { fiveHourPercent: q.fiveHourPercent as number } : {}),
+    ...(finite(q.fiveHourResetAt) !== undefined ? { fiveHourResetAt: q.fiveHourResetAt as number } : {}),
     ...(finite(q.weeklyPercent) !== undefined ? { weeklyPercent: q.weeklyPercent as number } : {}),
     ...(finite(q.weeklyResetAt) !== undefined ? { weeklyResetAt: q.weeklyResetAt as number } : {}),
     ...(finite(q.monthlyPercent) !== undefined ? { monthlyPercent: q.monthlyPercent as number } : {}),
@@ -123,6 +197,15 @@ export function accountQuotaFromReport(report?: ProviderQuotaReportView): Accoun
   return quotaFromUnknown(report?.quota, report?.updatedAt);
 }
 
+/** A pool total is never a substitute for the selected account's own reading. */
+export function currentAccountQuotaReport(report?: ProviderQuotaReportView): ProviderQuotaReportView | undefined {
+  if (!report) return undefined;
+  if (report.aggregation === undefined) return report;
+  const aggregation = capacityAggregationFromReport(report);
+  const quota = aggregation?.currentAccount?.quota ?? null;
+  return { ...report, aggregation: undefined, quota, updatedAt: quota?.updatedAt };
+}
+
 function capacityWindow(value: unknown): CapacityWindowView | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const row = value as Record<string, unknown>;
@@ -131,7 +214,6 @@ function capacityWindow(value: unknown): CapacityWindowView | undefined {
   return {
     usedPercent,
     ...(typeof row.incomplete === "boolean" ? { incomplete: row.incomplete } : {}),
-    ...(finite(row.includedAccounts) !== undefined ? { includedAccounts: row.includedAccounts as number } : {}),
     ...(finite(row.excludedAccounts) !== undefined ? { excludedAccounts: row.excludedAccounts as number } : {}),
     ...(finite(row.nextRecoveryAt) !== undefined ? { nextRecoveryAt: row.nextRecoveryAt as number } : {}),
     ...(finite(row.nextRecoveryPercent) !== undefined ? { nextRecoveryPercent: row.nextRecoveryPercent as number } : {}),
@@ -146,7 +228,6 @@ export function capacityAggregationFromReport(report?: ProviderQuotaReportView):
   if (row.kind !== "capacity-weighted-v1" || row.scope !== "routable-known") return null;
   const excludedAccounts = finite(row.excludedAccounts);
   const unknownPlanAccounts = finite(row.unknownPlanAccounts);
-  const includedAccounts = finite(row.includedAccounts) ?? 0;
   if (excludedAccounts === undefined || unknownPlanAccounts === undefined || typeof row.incomplete !== "boolean") return null;
   const currentRaw = row.currentAccount && typeof row.currentAccount === "object" && !Array.isArray(row.currentAccount)
     ? row.currentAccount as Record<string, unknown>
@@ -171,7 +252,6 @@ export function capacityAggregationFromReport(report?: ProviderQuotaReportView):
   return {
     presentation,
     incomplete: row.incomplete,
-    includedAccounts,
     excludedAccounts,
     unknownPlanAccounts,
     partialWindowAccounts: finite(row.partialWindowAccounts) ?? 0,

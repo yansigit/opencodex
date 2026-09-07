@@ -4,3 +4,4 @@
 - Admin squash-merge → `1c8278b4d` on `dev`; ancestry proven. #3227 closed as landed via maintainer.
 - Reviewer (xai/grok-4.6) pass: the three reasons are proxy-minted transport faults; commit boundary untouched; 502 attempt accounted.
 - Checks: 88 pass / 0 fail on the PR head, after rebase, and on the landed `dev` tip (receipt); typecheck, privacy:scan.
+

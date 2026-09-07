@@ -83,14 +83,10 @@ export function routedConfig(
 
 export function codexHeaders(accountId = "acct-caller", extra: HeadersInit = {}): Headers {
   const headers = new Headers(extra);
-  if (!headers.has("authorization")) {
-    headers.set("authorization", `Bearer ${fakeChatGptJwt(accountId)}`);
-  }
-  if (!headers.has("chatgpt-account-id")) {
-    headers.set("chatgpt-account-id", accountId);
-  }
-  if (!headers.has("originator")) headers.set("originator", "codex_cli_rs");
-  if (!headers.has("x-openai-subagent")) headers.set("x-openai-subagent", "collab_spawn");
+  headers.set("authorization", `Bearer ${fakeChatGptJwt(accountId)}`);
+  headers.set("chatgpt-account-id", accountId);
+  headers.set("originator", "codex_cli_rs");
+  headers.set("x-openai-subagent", "collab_spawn");
   return headers;
 }
 
@@ -151,7 +147,7 @@ export async function post(
   input: unknown[],
   headers: HeadersInit = {},
   abortSignal?: AbortSignal,
-  options: { tools?: unknown[]; translatorBudget?: TranslatorBudget } = {},
+  options: { tools?: unknown[]; translatorBudget?: TranslatorBudget; promptCacheKeyIsSharedCohort?: boolean } = {},
 ): Promise<Response> {
   return handleResponses(new Request("http://localhost/v1/responses", {
     method: "POST",
@@ -160,7 +156,11 @@ export async function post(
       ...Object.fromEntries(new Headers(headers)),
     },
     body: JSON.stringify({ model, input, stream: false, ...(options.tools ? { tools: options.tools } : {}) }),
-  }), config, { model: "", provider: "" }, { abortSignal, translatorBudget: options.translatorBudget });
+  }), config, { model: "", provider: "" }, {
+    abortSignal,
+    translatorBudget: options.translatorBudget,
+    promptCacheKeyIsSharedCohort: options.promptCacheKeyIsSharedCohort,
+  });
 }
 
 export function encryptedInput(options: {

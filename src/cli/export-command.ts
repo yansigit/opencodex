@@ -68,13 +68,6 @@ type ExportProxyModelRow = OpencodeProxyModelRow & {
   defaultReasoningEffort?: string;
 };
 
-/** Same authoritativeness rule the serializers apply, for the degraded-count line. */
-function hasContextLimit(model: ExportModel): boolean {
-  return typeof model.contextWindow === "number"
-    && Number.isFinite(model.contextWindow)
-    && model.contextWindow > 0;
-}
-
 /**
  * Export rows from proxy `/api/models` rows.
  *
@@ -106,6 +99,7 @@ export function exportModelsFromProxyRows(
       id: entry.id ?? entry.namespaced,
     };
     if (entry.native) model.native = true;
+    if (entry.fastRowAvailable !== undefined) model.fastRowAvailable = entry.fastRowAvailable;
     if (entry.displayName) model.displayName = entry.displayName;
     if (entry.contextWindow !== undefined) model.contextWindow = entry.contextWindow;
     if (entry.reasoningEfforts && entry.reasoningEfforts.length > 0) {
@@ -177,12 +171,14 @@ export async function handleExportCommand(argv: string[], deps: ExportCommandDep
     rejectArgs(args, USAGE);
 
     const spec = EXPORT_CLIENTS[client];
-    const config = (deps.configImpl ?? loadConfig)();
     const root = await runtimeBaseUrl(deps);
     const rows = await runtimeRequest<ExportProxyModelRow[]>("/api/models", {}, { ...deps, baseUrl: root });
     if (!Array.isArray(rows)) {
       throw new RuntimeApiError("Management API returned an unexpected /api/models payload.", 502, rows);
     }
+    // Discovery can persist pending -> ready selection. Read from the caller's
+    // config source after the response, rather than filtering with a stale snapshot.
+    const config = (deps.configImpl ?? loadConfig)();
     const models = exportModelsFromProxyRows(rows, config);
     // The text is the client's OWN format — YAML, TOML and JSON5 clients would
     // otherwise receive a JSON rendering their parser reads differently.
@@ -195,7 +191,7 @@ export async function handleExportCommand(argv: string[], deps: ExportCommandDep
     // stderr, so `--json` stdout stays a standalone JSON document.
     if (out !== undefined && wantsJson) console.error(`Wrote ${out}`);
 
-    const degraded = models.filter(model => !hasContextLimit(model)).length;
+    const { modelCount, modelsWithoutLimits } = spec.summarize(clientConfig);
     // `--json` keeps emitting the DOCUMENT at the top level as JSON for scripts;
     // `--out` is the path that writes the selected client's native format.
     // Format metadata rides in the human lines below.
@@ -206,7 +202,7 @@ export async function handleExportCommand(argv: string[], deps: ExportCommandDep
       `Destination: ${spec.destination(process.env)}`,
       "Merge this generated configuration into that file; do not replace it.",
       `Before launching: ${spec.exportHint}`,
-      `${models.length} model${models.length === 1 ? "" : "s"}; ${degraded} omit context limits (the client applies its own defaults).`,
+      `${modelCount} model${modelCount === 1 ? "" : "s"}; ${modelsWithoutLimits} omit context limits (the client applies its own defaults).`,
     ]);
   });
 }

@@ -13,14 +13,7 @@
  */
 
 const ECHO_MARKERS = ["[Tool Result]", "[Tool Error]", "[tool_result]"] as const;
-
-export type EchoDialect = "marked" | "neutral";
-
-const NEUTRAL_PREFIXES = ["Tool output for ", "Tool error for "] as const;
-const NEUTRAL_HEADER_REGEX =
-  /^Tool (?:output|error) for [^\r\n()]{1,256} \(call_id: [^\r\n,()]{1,512}, is_error: (?:true|false)\):/;
-
-const MAX_SNIFF_BYTES = 1_024;
+const MAX_SNIFF_BYTES = 40;
 /** Mid-stream observer: max leading whitespace on a line before matching disarms. */
 const MAX_MIDSTREAM_LINE_INDENT = 128;
 /** Mid-stream observer: post-marker window watched for call-id corruption. */
@@ -36,117 +29,12 @@ const encoder = new TextEncoder();
 
 export class CursorToolResultEchoError extends Error {
   readonly code = "cursor_tool_result_echo";
-  constructor(
-    public readonly marker: string,
-    public readonly dialect: EchoDialect = "marked",
-    public readonly offset: number = 0,
-  ) {
+  constructor(marker: string) {
     super(
       "Cursor external model echoed the replayed tool-result envelope (\"" + marker
       + "\") instead of continuing the task.",
     );
     this.name = "CursorToolResultEchoError";
-  }
-}
-
-export class CursorReplayEnvelopeDetectedError extends Error {
-  readonly code = "cursor_replay_envelope_detected";
-  constructor(public readonly dialect: EchoDialect, public readonly offset: number) {
-    super(`Cursor external model echoed a replayed tool-result envelope (${dialect} dialect at offset ${offset}) after visible output.`);
-    this.name = "CursorReplayEnvelopeDetectedError";
-  }
-}
-
-export const CURSOR_DUPLICATE_TOOL_RETRY_CONTINUATION_TEXT =
-  "The latest successful tool invocation is already completed in the history. Do not repeat that same invocation. Continue with the next distinct step or answer the user.";
-
-export class CursorDuplicateCompletedToolCallError extends Error {
-  readonly code = "cursor_duplicate_completed_tool_call";
-  constructor() {
-    super("Cursor external model repeated the exact tool invocation whose successful result it just received.");
-    this.name = "CursorDuplicateCompletedToolCallError";
-  }
-}
-
-type HeaderDecision =
-  | { kind: "candidate" }
-  | { kind: "safe" }
-  | { kind: "echo"; dialect: EchoDialect; marker: string };
-
-function classifyHeaderPrefix(buffer: string, allowLeadingWhitespace = false): HeaderDecision {
-  const indent = (allowLeadingWhitespace ? /^\s*/ : /^[ \t]*/).exec(buffer)?.[0].length ?? 0;
-  if (indent > MAX_MIDSTREAM_LINE_INDENT) return { kind: "safe" };
-  const probe = buffer.slice(indent);
-  for (const marker of ECHO_MARKERS) {
-    if (probe.startsWith(marker)) return { kind: "echo", dialect: "marked", marker };
-    if (marker.startsWith(probe)) return { kind: "candidate" };
-  }
-  for (const prefix of NEUTRAL_PREFIXES) {
-    if (prefix.startsWith(probe)) return { kind: "candidate" };
-  }
-  if (NEUTRAL_PREFIXES.some(prefix => probe.startsWith(prefix))) {
-    if (NEUTRAL_HEADER_REGEX.test(probe)) {
-      return { kind: "echo", dialect: "neutral", marker: probe.match(/^Tool (?:output|error)/)?.[0] ?? "Tool output" };
-    }
-    if (!probe.includes("\n") && probe.length <= 1_024) return { kind: "candidate" };
-  }
-  return { kind: "safe" };
-}
-
-/**
- * Line-boundary guard shared by turn-start and mid-stream replay detection.
- * It withholds only bytes that can still form one of our serializer-owned headers.
- */
-export class CursorEnvelopeEchoGuard {
-  private pending = "";
-  private offset = 0;
-  private lineStart = 0;
-  private checkingLineStart = true;
-  private turnStart = true;
-  private scanned = 0;
-
-  feed(textDelta: string): string {
-    if (!textDelta) return "";
-    if (this.scanned > MAX_MIDSTREAM_SCAN_LENGTH) return this.finish() + textDelta;
-    let output = "";
-    for (const char of textDelta) {
-      this.scanned += 1;
-      if (!this.checkingLineStart) {
-        output += char;
-        this.offset += encoder.encode(char).byteLength;
-        if (char === "\n") {
-          this.checkingLineStart = true;
-          this.lineStart = this.offset;
-        }
-        continue;
-      }
-      this.pending += char;
-      const decision = classifyHeaderPrefix(this.pending, this.turnStart);
-      if (decision.kind === "echo") {
-        if (this.turnStart) {
-          throw new CursorToolResultEchoError(decision.marker, decision.dialect, 0);
-        }
-        throw new CursorReplayEnvelopeDetectedError(decision.dialect, this.lineStart);
-      }
-      if (decision.kind === "candidate") continue;
-      output += this.pending;
-      this.offset += encoder.encode(this.pending).byteLength;
-      this.turnStart = false;
-      this.checkingLineStart = this.pending.endsWith("\n");
-      if (this.checkingLineStart) this.lineStart = this.offset;
-      this.pending = "";
-    }
-    return output;
-  }
-
-  finish(): string {
-    const tail = this.pending;
-    this.pending = "";
-    this.offset += encoder.encode(tail).byteLength;
-    this.turnStart = false;
-    this.checkingLineStart = true;
-    this.lineStart = this.offset;
-    return tail;
   }
 }
 
@@ -300,12 +188,16 @@ export class CursorEnvelopeEchoSniffer {
     if (this.done) return { kind: "flush" };
     this.buffered += textDelta;
     this.byteCount += encoder.encode(textDelta).byteLength;
-    const decision = classifyHeaderPrefix(this.buffered.replace(/^\r?\n/, ""));
-    if (decision.kind === "echo") {
-      this.done = true;
-      return { kind: "echo", marker: decision.marker };
+    const probe = this.buffered.replace(/^\s+/, "");
+    for (const marker of ECHO_MARKERS) {
+      if (probe.startsWith(marker)) {
+        this.done = true;
+        return { kind: "echo", marker };
+      }
     }
-    const stillPrefix = decision.kind === "candidate";
+    const stillPrefix = ECHO_MARKERS.some(marker =>
+      probe.length < marker.length && marker.startsWith(probe),
+    );
     if (stillPrefix && this.byteCount <= MAX_SNIFF_BYTES && this.buffered.length < MAX_HOLD_BYTES) {
       return { kind: "hold" };
     }

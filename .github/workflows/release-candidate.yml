@@ -75,7 +75,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Test release-candidate contracts
-        run: bun test tests/release-candidate.test.ts tests/fork/release-candidate-workflow.test.ts
+        run: bun test tests/ci-workflows/release-candidate.test.ts tests/fork/release-candidate-workflow.test.ts
 
       - name: Build GUI and package assets
         run: bun run build:gui

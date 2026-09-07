@@ -7,3 +7,4 @@ so failover persists references only. Deviation from the suggestion to split wri
 second PR: the write path here is a server-side store/restore that verifies read-back before
 touching config, which removes the plaintext-rewrite hazard the reviewer flagged; the dashboard
 control is what is deferred.
+

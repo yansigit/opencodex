@@ -16,7 +16,7 @@ description: 기본 provider 선택, model 해석 순서, combo 별칭, 대상 �
 
 opencodex는 요청된 model을 다음 순서로 해석합니다:
 
-1. 설정된 `policy/<id>` 또는 routing-profile 별칭입니다. policy evaluator를 실행해 선택된 후보로 routing합니다. 해석되지 않은 `policy/<id>`는 후속 규칙으로 넘어갑니다.
+1. 설정된 `policy/<id>` 또는 routing-profile 별칭입니다. policy evaluator를 실행해 선택된 후보로 routing합니다. 해석되지 않은 `policy/<id>`는 후속 규칙으로 넘어가지 않고 로컬에서 실패합니다.
 2. 설정된 `<account-selector>/<native-openai-model>` 네임스페이스입니다. 매핑된 저장 Codex 계정으로만 routing하며, exact target이 잘못되었거나 사용할 수 없으면 fail closed합니다.
 3. 정규화된 `combo/<id>` 또는 설정된 combo 별칭입니다. 정규화된 id가 별칭보다 먼저 적용됩니다.
 4. 접두사가 설정된 provider를 가리키는 명시적 `<provider>/<model>` 네임스페이스입니다.

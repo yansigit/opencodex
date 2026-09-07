@@ -4,28 +4,26 @@
  */
 import { Fragment, useMemo, useState } from "react";
 import { useT, useI18n } from "../../i18n/shared";
-import QuotaBars from "../QuotaBars";
 import type { WorkspaceItem } from "../../provider-workspace/catalog";
-import { formatRelativeTime, relativeTimeLabelsFromT, formatRequestCount, formatTokenCount, formatCostUsd } from "../../provider-workspace/usage";
-import { accountQuotaFromReport, formatQuotaSourceLabel, type ProviderQuotaReportView } from "../../provider-workspace/report";
-import type { ProviderUsageTotals, ProviderModelUsageRow, ProviderAccountUsageRow, OAuthAccountRow } from "./types";
+import { formatRequestCount, formatTokenCount, formatCostUsd } from "../../provider-workspace/usage";
+import type { ProviderQuotaReportView } from "../../provider-workspace/report";
+import type { AccountQuotaReading, ProviderUsageTotals, ProviderModelUsageRow } from "./types";
+import ProviderCurrentQuota from "./ProviderCurrentQuota";
 
-export default function ProviderUsage({ item, usageTotals, quotaReport, modelUsage, accounts, accountUsage }: {
+export default function ProviderUsage({ item, usageTotals, quotaReport, currentQuotaReading, quotaIdentity, modelUsage, onRefreshQuota }: {
   item: WorkspaceItem;
   usageTotals?: ProviderUsageTotals;
   quotaReport?: ProviderQuotaReportView;
+  currentQuotaReading?: AccountQuotaReading;
+  quotaIdentity?: string;
   modelUsage?: ProviderModelUsageRow[];
-  accounts?: OAuthAccountRow[];
-  accountUsage?: ProviderAccountUsageRow[];
+  /** Force a fresh quota read; omitted when the page cannot drive one. */
+  onRefreshQuota?: () => Promise<boolean>;
 }) {
   const t = useT();
   const { locale } = useI18n();
-  const timeLabels = relativeTimeLabelsFromT(t);
   const hasUsage = usageTotals?.requests !== undefined;
-  const quota = accountQuotaFromReport(quotaReport);
   const [expandedModel, setExpandedModel] = useState<string | null>(null);
-  const [selectedAccountId, setSelectedAccountId] = useState<string>("all");
-  void item;
 
   const sortedModels = useMemo(() => {
     if (!modelUsage?.length) return [];
@@ -45,76 +43,23 @@ export default function ProviderUsage({ item, usageTotals, quotaReport, modelUsa
     return hasCost ? total : undefined;
   }, [sortedModels]);
 
-  const selectedAccountRow = useMemo(() => {
-    if (selectedAccountId === "all" || !accountUsage) return null;
-    return accountUsage.find(a => a.accountLogLabel === selectedAccountId);
-  }, [selectedAccountId, accountUsage]);
-
-  const displayedCost = useMemo(() => {
-    if (selectedAccountId !== "all") {
-      return selectedAccountRow?.estimatedCostUsd;
-    }
-    return providerCost;
-  }, [selectedAccountId, selectedAccountRow, providerCost]);
-
-  const displayedRequests = useMemo(() => {
-    if (selectedAccountId !== "all") {
-      return selectedAccountRow?.requests;
-    }
-    return usageTotals?.requests;
-  }, [selectedAccountId, selectedAccountRow, usageTotals]);
-
-  const displayedTokens = useMemo(() => {
-    if (selectedAccountId !== "all") {
-      return selectedAccountRow?.totalTokens;
-    }
-    return usageTotals?.totalTokens;
-  }, [selectedAccountId, selectedAccountRow, usageTotals]);
-
   return (
     <div className="pws-section">
       <div className="pws-usage-block">
-        <div className="pws-section-head">
-          <h3 className="pws-section-title">{t("pws.usageLast30d")}</h3>
-          {accounts && accounts.length > 1 && (
-            <div className="usage-segmented" role="tablist" aria-label={t("pws.tab.accounts")}>
-              <button
-                type="button"
-                className={`usage-segmented-btn ${selectedAccountId === "all" ? "active" : ""}`}
-                onClick={() => setSelectedAccountId("all")}
-              >
-                {t("pws.allAccounts") || "All accounts"}
-              </button>
-              {accounts.map(acc => {
-                const label = acc.alias || acc.email || acc.id.slice(0, 8);
-                const isActive = selectedAccountId === acc.id;
-                return (
-                  <button
-                    key={acc.id}
-                    type="button"
-                    className={`usage-segmented-btn ${isActive ? "active" : ""}`}
-                    onClick={() => setSelectedAccountId(acc.id)}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
+        <h3 className="pws-section-title">{t("pws.usageLast30d")}</h3>
         {hasUsage ? (
           <>
             <div className="pws-usage-metrics pws-usage-metrics-3" role="group" aria-label={t("pws.usageLast30d")}>
               <div className="pws-usage-metric">
-                <span className="pws-usage-metric-value mono">{formatCostUsd(displayedCost, locale)}</span>
+                <span className="pws-usage-metric-value mono">{formatCostUsd(providerCost, locale)}</span>
                 <span className="muted pws-usage-metric-label">{t("pws.estimatedCost")}</span>
               </div>
               <div className="pws-usage-metric">
-                <span className="pws-usage-metric-value">{formatRequestCount(displayedRequests, locale)}</span>
+                <span className="pws-usage-metric-value">{formatRequestCount(usageTotals?.requests, locale)}</span>
                 <span className="muted pws-usage-metric-label">{t("pws.metricRequests")}</span>
               </div>
               <div className="pws-usage-metric">
-                <span className="pws-usage-metric-value">{formatTokenCount(displayedTokens, locale)}</span>
+                <span className="pws-usage-metric-value">{formatTokenCount(usageTotals?.totalTokens, locale)}</span>
                 <span className="muted pws-usage-metric-label">{t("pws.metricTokens")}</span>
               </div>
             </div>
@@ -155,6 +100,9 @@ export default function ProviderUsage({ item, usageTotals, quotaReport, modelUsa
                           >
                             {row.model}
                           </button>
+                          {row.hasUnresolvedRequestedModel && (
+                            <div className="muted pws-model-attribution">{t("pws.unresolvedRequestedModel")}</div>
+                          )}
                         </td>
                         <td className="num mono">{formatCostUsd(row.estimatedCostUsd, locale)}</td>
                         <td className="num mono">{formatTokenCount(row.totalTokens, locale)}</td>
@@ -190,28 +138,7 @@ export default function ProviderUsage({ item, usageTotals, quotaReport, modelUsa
         </div>
       )}
 
-      <div className="pws-usage-block">
-        <h3 className="pws-section-title">{t("pws.rateLimits")}</h3>
-        {quota ? (
-          <>
-            <QuotaBars quota={quota} plan={null} threshold={80} t={t} layout="stacked" />
-            <dl className="pws-kv pws-usage-meta">
-              {quotaReport?.source?.trim() && (
-                <div className="pws-kv-row">
-                  <dt>{t("pws.stats.source")}</dt>
-                  <dd>{formatQuotaSourceLabel(quotaReport.source)}</dd>
-                </div>
-              )}
-              <div className="pws-kv-row">
-                <dt>{t("pws.stats.quotaUpdated")}</dt>
-                <dd>{formatRelativeTime(quotaReport?.updatedAt, timeLabels)}</dd>
-              </div>
-            </dl>
-          </>
-        ) : (
-          <p className="muted">{t("pws.quotaUnavailable")}</p>
-        )}
-      </div>
+      <ProviderCurrentQuota key={`${item.name}:${quotaIdentity ?? ""}`} report={quotaReport} reading={currentQuotaReading} onRefreshQuota={onRefreshQuota} />
     </div>
   );
 }

@@ -5,3 +5,4 @@
 - Reviewer Cicero (xai/grok-4.6) pass; local red-green on the carry worktree (test fails without the src hunk, 60 pass with).
 - Checks: subagent-model-fallback focused file, typecheck, privacy:scan.
 - Non-blocking caveat recorded: entitlement filtering still uses the null initial chain (`core.ts:2945`); the first synthetic candidate `gpt-5.5` is ungated.
+

@@ -20,7 +20,7 @@ runs helper features around provider requests.
 | `oauthOpenBrowser?` | `boolean` | `true` | Whether a login may open a browser on the machine running the proxy. Absent and `true` both open, so an existing install is unchanged; only an explicit `false` declines. Decline when you need the authorization link in a different browser profile, or when the dashboard is not on the proxy's machine — the login still starts and the URL is still returned and displayed. `POST /api/oauth/login` and `POST /api/codex-auth/login` accept a per-request `openBrowser` boolean that overrides this, and the dashboard exposes the same choice beside the login button. Device-code flows never open a browser either way. |
 | `connectTimeoutMs?` | `number` | `200000` | Per-attempt DNS/TCP/TLS/final-header deadline; it ends before body generation. |
 | `shutdownTimeoutMs?` | `number` | `5000` | Graceful drain deadline before active turns are aborted. |
-| `websockets?` | `boolean` | `false` | Advertise and admit the client-facing Responses WebSocket path. False keeps clients on HTTP/SSE. Idle sockets close after 255 seconds; writes that exceed the bounded backpressure budget close with code 1009. Canonical ChatGPT upstream WS is separately opt-in: a set provider `wsUpstream` takes precedence (`true` enables, `false` disables); when omitted, `OCX_CODEX_WS_UPSTREAM=true` or `1` enables it, while `false`/`0`, absent, or invalid values keep HTTP/SSE. |
+| `websockets?` | `boolean` | `false` | Advertise and admit the client-facing Responses WebSocket path. False keeps clients on HTTP/SSE; it does not disable an eligible canonical ChatGPT upstream WS optimization. Complete-input requests may reuse an upstream connection within the same selected credential, account, thread and turn; changed handshake policy or missing identity keeps requests on separate connections. This does not trim HTTP input or create previous-response IDs. |
 | `corsAllowOrigins?` | `string[]` | `[]` | Additional exact origins allowed by CORS. Loopback origins are always allowed. Authority-based browser extension origins such as `chrome-extension://<extension-id>` are supported; `*` is not a wildcard. Firefox and Safari regenerate the extension UUID (per install / per browser launch), so update the entry when the origin changes. |
 | `apiKeys?` | `OcxApiKey[]` | `[]` | Generated `ocx_…` data-plane credentials accepted on non-loopback binds. Dashboard-managed; management routes require the separate admin token. |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` | disabled | Opt-in archived-session cleanup policy. Never enabled implicitly. |
@@ -51,6 +51,56 @@ If an older development build changed resume-history metadata before backup supp
 It force-relabels every user-message `opencodex` row, including legitimate dedicated-provider
 history; review the full-scope warning in the lifecycle reference before running it.
 
+## Codex quota network diagnostics
+
+The main Codex account row may include `quotaRefresh` when a quota fetch was
+attempted. This describes that fetch, not remaining quota, model access or
+permission to retry. Cached reads and rows without a fetch may omit it; absence
+does not mean success. A `null` quota value means unavailable, not zero quota.
+
+To request fresh data and display only the diagnostic in PowerShell:
+
+```powershell
+$quotaReport = ocx account list openai --quota --refresh --json | ConvertFrom-Json
+$quotaReport.accounts |
+    ForEach-Object { if ($_.quotaRefresh) { $_.quotaRefresh } } |
+    ConvertTo-Json -Depth 3
+```
+
+If no diagnostic is present, this projection produces no diagnostic object. Share
+only these fields when comparing network modes, rather than the full account list.
+
+| `quotaRefresh.status` | Meaning |
+| --- | --- |
+| `ok` | The fetch completed and a quota object was parsed. |
+| `not_reported` | The response contained no usable quota object. |
+| `http_error` | The upstream returned an HTTP failure; `httpStatus` contains its status code. |
+| `timeout` | The quota fetch timed out. |
+| `network_error` | The request failed before a classified HTTP response. |
+| `invalid_response` | The response was not a usable quota document. |
+| `internal_error` | An internal refresh step failed. |
+
+Only `http_error` includes `httpStatus`. Other statuses do not imply HTTP 0 or an
+account entitlement problem.
+
+### Which proxy path is used?
+
+The running proxy service fetches quota. It uses its own environment, not the
+interactive shell that later runs `ocx account list`. Configure the service's
+proxy setting or environment, then restart it; changing variables in another
+terminal does not update an already running service.
+
+An unset `proxy` leaves inherited proxy variables unchanged. An explicit HTTP(S)
+proxy URL fills `HTTP_PROXY` and `HTTPS_PROXY` only where they are unset.
+`"proxy": "auto"` reads the Windows static WinINET proxy once at startup; existing
+proxy environment variables take precedence. Auto discovery does not resolve
+PAC/WPAD, SOCKS-only settings or live proxy changes. Use a supported static HTTP
+proxy setting or an explicit HTTP(S) proxy URL when needed.
+
+Compare the diagnostic on the same machine and account under the two network
+modes. A successful TUN test alone does not identify why the service's HTTP proxy
+path failed, and does not establish a general fix.
+
 ## Remote access
 
 The default `127.0.0.1` bind is loopback-only. A non-loopback address such as `0.0.0.0` requires
@@ -69,7 +119,7 @@ access. Configure the listener and export the data-plane token before starting:
 }
 ```
 
-```sh
+```bash
 export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
 ocx start
 ```
@@ -276,6 +326,94 @@ either `target.reduceToBytes` or `target.removeOldestPercent`. `mode` defaults t
 Configure it on the Storage page or with `GET`/`PUT /api/storage/cleanup-policy`; trigger a manual run
 with `POST /api/storage/cleanup-policy/run`.
 
+## Quota-reset notifications (`quotaResetNotify`)
+
+Off by default. When the section is absent, no detection runs, no timer starts, and no state
+file is written.
+
+Enable it to be told when a usage window resets — both the scheduled rollover you can predict
+and an out-of-band reset you cannot:
+
+```json
+{
+  "quotaResetNotify": {
+    "enabled": true,
+    "webhookUrl": "https://hooks.slack.com/services/...",
+    "kinds": ["scheduled", "surprise"],
+    "pollSeconds": 900
+  }
+}
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Master switch. Also requires at least one sink, below. |
+| `kinds` | both | `scheduled` (the deadline passed) or `surprise` (quota returned early). |
+| `pollSeconds` | `900` | Idle poll interval; floor 600. `0` observes live traffic only. |
+| `webhookUrl` | — | `https` POST target for the event JSON. Treated as a secret. |
+| `allowPrivateNetwork` | `false` | Permit a loopback or private-network webhook target. |
+| `timeoutMs` | `5000` | Webhook timeout. |
+| `command` | — | Argv array run with the event JSON on stdin. |
+
+`enabled: true` with neither `webhookUrl` nor `command` resolves to off: an enabled subsystem
+with nowhere to deliver is a misconfiguration, not a half-on state.
+
+The floor is 600 seconds because a faster poll cannot see anything new: observation is bounded
+by the 10-minute per-account cache, so a shorter interval only adds load to a quota endpoint
+that rate-limits. A configured value is adopted on the next tick without a restart.
+
+Set `pollSeconds` to `0` only if you accept that a reset happening while the proxy is idle is
+noticed on the next request rather than when it happens. The poll exists because the overnight
+case is the one worth knowing about.
+
+### The delivered event
+
+```json
+{
+  "type": "quota_reset",
+  "kind": "surprise",
+  "scope": "codex",
+  "accountTag": "k3f9x2ab",
+  "window": "weekly",
+  "percentBefore": 96,
+  "percentAfter": 4,
+  "previousResetAt": 1772000000000,
+  "resetAt": 1772400000000,
+  "detectedAt": 1771900000000
+}
+```
+
+`accountTag` is a per-install salted hash, not an account identifier: it distinguishes your
+accounts from each other without telling the receiver who they are. No email, token, path, or
+URL is ever included.
+
+`detectedAt` is when the proxy NOTICED, not when the reset happened. Observation is bounded by
+the 5-minute provider cache and the 10-minute per-account cache, so the reset instant can only
+be bracketed between two observations.
+
+### Security notes
+
+`webhookUrl` is a credential — for Slack and Discord, holding the URL is sufficient to post —
+so it is redacted by `ocx config show` and excluded from `ocx config export`.
+
+A webhook target that resolves to a private or loopback address is refused unless you set
+`allowPrivateNetwork: true`. The proxy can reach hosts your browser cannot, including cloud
+metadata endpoints, so the default assumes an external receiver.
+
+`webhookUrl` must use `https`. The payload and the URL itself are both sensitive, and an
+`http` target would put them in cleartext; an `http` value is rejected when the config is
+written rather than downgraded silently.
+
+A redirect is refused rather than followed. The destination check above validates the URL you
+configured, so following a `3xx` would deliver the payload somewhere unvalidated — a public
+endpoint could bounce the POST to loopback or a metadata address. Configure the final URL
+directly; a redirected delivery reports `blocked-destination`.
+
+`command` is an argv array and is never passed through a shell, so its values cannot become a
+shell-injection surface. Delivery is attempted once; there is no retry.
+
+Read recent detections with `ocx provider resets` or `GET /api/quota-resets`.
+
 ## Claude Code (`claudeCode`)
 
 These settings govern `/v1/messages`, `/v1/messages/count_tokens`, the `ocx claude` launcher, and the Claude dashboard page.
@@ -290,7 +428,6 @@ These settings govern `/v1/messages`, `/v1/messages/count_tokens`, the `ocx clau
 | `claudeCode.classifierFallbacks?` | `string[]` | unset | Ordered classifier targets used when `classifierModel` is not set. Same qualified `provider/model` form; the first usable entry wins. An explicit `modelMap` entry for the classifier model still outranks both. |
 | `claudeCode.subagentEffort?` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | inherit | Effort written to generated `~/.claude/agents/ocx-*.md`; separate from Codex guidance and proxy caps. Restart through `ocx claude` to regenerate. |
 | `claudeCode.compatibility?` | `"shadow" \| "enforce"` | `enforce` | Compatibility gate for routed Claude ingress: `enforce` rejects unsupported requests before upstream activity with `400 invalid_request_error`; `shadow` records ordinary incompatibilities without rejecting, but signed-thinking ownership and other safety invariants still fail closed. |
-
 
 Auto auth selects subscription when stored Claude auth is found, proxy when none is found, and
 subscription with a warning when detection is inconclusive. See
@@ -321,6 +458,7 @@ and model id (never request bodies, credentials, or account identifiers). A fixt
 its absolute error is within `max(32 tokens, 20%)`; the weighted aggregate must remain within
 10%. Routed `/v1/messages/count_tokens` remains a local approximation for routed models; only
 native Anthropic requests with an `sk-ant-` credential pass through to Anthropic.
+
 ## Shadow calls
 
 Codex uses small helper models for tasks such as titles and commit messages. Enable
@@ -400,3 +538,19 @@ Remote `https:` images and failed or empty descriptions are not cached.
 
 Anthropic OAuth sidecars reuse opencodex's existing Claude Code OAuth fingerprint. Soak-test the
 intended account and workload.
+
+## Remote Hub keys and defaults
+
+`runtimeRole` defaults to `standalone`. A hub uses `hub.managementPublicOrigin`, loopback-only `hub.managementIngress` (`enabled:false` when absent), and exact `remoteGui.allowedTailscaleUsers` (empty when absent). A client data key lives in `service-api-token`, never `config.json`; rotation may temporarily create `service-api-token.prev`. Usage stores are not mirrored.
+
+| Key | Type | Default when absent | What it does |
+| --- | --- | --- | --- |
+| `hub.managementPublicOrigin` | string | unset | The canonical browser-reachable management origin a hub advertises, for example the HTTPS origin Tailscale Serve prints. It is what `/readyz` reports as `managementUrl` while `runtimeRole` is `hub`; with it unset the hub falls back to whatever origin each request arrived on, so a client behind a different frontend can be handed an address it cannot reach. |
+| `hub.managementIngress` | `{enabled:false}` or `{enabled:true, port}` | `{enabled:false}` | An extra management-only listener for a local HTTPS frontend. The hostname is not configurable: when enabled the socket always binds `127.0.0.1`, and only GUI, session-bootstrap, and management API routes are admitted. Data-plane routes are rejected before dispatch. |
+| `remoteGui.allowedTailscaleUsers` | string[] | `[]` (empty — nobody) | Exact Tailscale login identities allowed to be issued an automatic remote GUI session. The `Tailscale-User-Login` header is trusted **only** on the separate management ingress; an empty list means no remote identity can mint a session, which is the safe default rather than an oversight. Identities are compared exactly, so a typo silently denies access. |
+| `remoteGui.allowInsecureHttp` | boolean | unset | **Retired — has no effect.** It once permitted a one-time pairing exchange over non-loopback plaintext HTTP. A pairing grant now crosses loopback or authenticated HTTPS only. The key is still parsed so an existing `config.json` keeps loading (the schema is strict, and dropping the key outright would make an older config fail to load entirely); a persisted `true` is reported once and then ignored. Remove it from your config. |
+
+A hub that is reachable from a browser needs `hub.managementPublicOrigin` and at least one entry
+in `remoteGui.allowedTailscaleUsers`. Setting the origin without the user list produces a hub that
+advertises itself correctly and then refuses every session; setting the user list without the
+origin produces sessions pointed at whichever origin the request happened to use.

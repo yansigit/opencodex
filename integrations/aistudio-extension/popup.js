@@ -5,7 +5,7 @@ async function harvestSession() {
 
   // 1. Query Google cookies
   const allCookies = await chrome.cookies.getAll({ domain: "google.com" });
-  const relevantCookies = allCookies.map(c => ({
+  const relevantCookies = filterAiStudioCookies(allCookies).map(c => ({
     name: c.name,
     value: c.value,
     domain: c.domain,

@@ -22,8 +22,8 @@ beforeEach(() => {
     document: { configurable: true, value: win.document },
     window: { configurable: true, value: win },
     navigator: { configurable: true, value: win.navigator },
+    IS_REACT_ACT_ENVIRONMENT: { configurable: true, writable: true, value: true },
   });
-  (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   host = win.document.createElement("div") as unknown as HTMLElement;
   win.document.body.appendChild(host as never);
 });

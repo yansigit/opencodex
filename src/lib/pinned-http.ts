@@ -173,10 +173,7 @@ function pinnedHttpRequest(
               failBody(new PinnedHttpError("output_byte_limit", `${context} exceeds ${maxBytes} byte cap`));
               return;
             }
-            try {
-              controller.enqueue(buffer);
-              if ((controller.desiredSize ?? 0) <= 0) response.pause();
-            } catch { /* closed */ }
+            try { controller.enqueue(buffer); } catch { /* closed */ }
           });
           response.on("end", () => {
             if (bodySettled) return;
@@ -186,9 +183,6 @@ function pinnedHttpRequest(
           response.on("error", (error: Error) => {
             failBody(error);
           });
-        },
-        pull() {
-          response.resume();
         },
         cancel() {
           req?.destroy();

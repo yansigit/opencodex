@@ -1,20 +1,20 @@
 /**
  * Declared inventory of every reachable management route.
  *
- * DECLARED, not harvested. A grep cannot see this surface: 18 routes are registered
+ * DECLARED, not harvested. A grep cannot see this surface: some routes are registered
  * through a regex, an `endsWith`, a `pathname.slice`, a prefix decode, a path constant, or a
  * negated `pathname !== "…"` guard, and two of those are live routes whose only textual
  * trace is the negated form. For `GET /api/storage` an equality scan finds solely the dead
  * shadowed copy in `logs-usage-routes.ts` and never the live one.
  *
  * This module is pure DATA and must stay that way. It is imported by
- * `src/server/management-api.ts`, which `tests/core-lab-boundary.test.ts` protects: a user
+ * `src/server/management-api.ts`, which `tests/lab/core-lab-boundary.test.ts` protects: a user
  * with one provider and no Lab must execute no Lab code. Route paths are strings, so
  * declaring `/api/lab/status` here creates no module edge. Never import a handler, and
  * never import anything from `src/lab/`. The `module` field names the owning file as text
  * for exactly this reason.
  *
- * Reconciliation lives in `tests/management-route-registry.test.ts`, which resolves
+ * Reconciliation lives in `tests/server/management-route-registry.test.ts`, which resolves
  * `(method, path)` pairs from source and fails loudly on a route whose method it cannot
  * determine. Adding a route without declaring it here fails that test.
  */
@@ -26,6 +26,8 @@ export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD";
  * can check, not a way to quiet the parity test.
  */
 export type ExemptionReason =
+  /** Invalidates dashboard state; the CLI reads the underlying resource directly. */
+  | "gui-invalidation"
   /** Requires a dashboard browser session. Includes the user-consent star boundary. */
   | "session-only"
   /** Deliberately returns 405; there is nothing to drive. */
@@ -36,6 +38,8 @@ export type ExemptionReason =
   | "test-seam"
   /** The CLI reaches the same data through a local transport instead of HTTP. */
   | "local-transport"
+  /** Older clients use this alias; the current CLI drives its declared replacement. */
+  | "compatibility-alias"
   /** Unreachable in the live dispatch order; delete rather than expose. */
   | "dead"
   /**
@@ -139,6 +143,19 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "PUT", path: "/api/subagent-models", module: "server/management/agent-settings-routes", mutates: true },
   { method: "PUT", path: "/api/subagent-roles", module: "server/management/agent-settings-routes", mutates: true },
   { method: "PUT", path: "/api/v2", module: "server/management/agent-settings-routes", mutates: true },
+  // server/management/aside-profile-routes
+  { method: "GET", path: "/api/client-integrations/aside", module: "server/management/aside-profile-routes", mutates: false, mechanism: "path-constant", exempt: { reason: "compatibility-alias", why: "Legacy Aside status alias; the current CLI reads the same aggregate through GET /api/client-integrations/aside/profiles." } },
+  { method: "PUT", path: "/api/client-integrations/aside", module: "server/management/aside-profile-routes", mutates: true, mechanism: "path-constant", exempt: { reason: "compatibility-alias", why: "Legacy Aside toggle alias; the current CLI uses PUT /api/client-integrations/aside/profiles so older servers cannot mistake a bulk request for a current-account toggle." } },
+  { method: "GET", path: "/api/client-integrations/aside/profiles", module: "server/management/aside-profile-routes", mutates: false, mechanism: "path-constant" },
+  { method: "PUT", path: "/api/client-integrations/aside/profiles", module: "server/management/aside-profile-routes", mutates: true, mechanism: "path-constant" },
+  { method: "POST", path: "/api/client-integrations/aside/sync", module: "server/management/aside-profile-routes", mutates: true },
+  { method: "GET", path: "/api/client-integrations/aside/profiles/{profileId}", module: "server/management/aside-profile-routes", mutates: false, mechanism: "prefix-decode" },
+  { method: "PUT", path: "/api/client-integrations/aside/profiles/{profileId}", module: "server/management/aside-profile-routes", mutates: true, mechanism: "prefix-decode" },
+  { method: "GET", path: "/api/client-integrations/aside/profiles/journal", module: "server/management/aside-profile-routes", mutates: false, mechanism: "prefix-decode" },
+  { method: "DELETE", path: "/api/client-integrations/aside/profiles/journal", module: "server/management/aside-profile-routes", mutates: true, mechanism: "prefix-decode", exempt: { reason: "deferred-verb", why: "Aside history deletion uses the dashboard journal cleanup; the CLI has history and restore but no deletion verb yet.", owner: "260904_priority65_closeout WP7", ownerDoc: "devlog/_plan/260904_priority65_closeout/060_wp7_rollback_journal_crud.md" } },
+  { method: "GET", path: "/api/client-integrations/aside/profiles/{profileId}/journal", module: "server/management/aside-profile-routes", mutates: false, mechanism: "prefix-decode" },
+  { method: "DELETE", path: "/api/client-integrations/aside/profiles/{profileId}/journal", module: "server/management/aside-profile-routes", mutates: true, mechanism: "prefix-decode", exempt: { reason: "deferred-verb", why: "Aside profile history deletion uses the dashboard journal cleanup; the CLI has scoped history and restore but no deletion verb yet.", owner: "260904_priority65_closeout WP7", ownerDoc: "devlog/_plan/260904_priority65_closeout/060_wp7_rollback_journal_crud.md" } },
+  { method: "POST", path: "/api/client-integrations/aside/profiles/{profileId}/restore", module: "server/management/aside-profile-routes", mutates: true, mechanism: "prefix-decode" },
   // server/management/codex-prompt-routes
   { method: "GET", path: "/api/codex-prompt", module: "server/management/codex-prompt-routes", mutates: false },
   { method: "GET", path: "/api/codex-prompt/text", module: "server/management/codex-prompt-routes", mutates: false },
@@ -173,6 +190,7 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   // server/management/integration-routes
   { method: "GET", path: "/api/client-integrations", module: "server/management/integration-routes", mutates: false },
   { method: "GET", path: "/api/client-integrations/journal", module: "server/management/integration-routes", mutates: false },
+  { method: "DELETE", path: "/api/client-integrations/journal", module: "server/management/integration-routes", mutates: true, exempt: { reason: "deferred-verb", why: "Retiring one rollback row is a dashboard-local cleanup; the CLI verb that would drive it is owed by a later work-phase and is not implemented here.", owner: "260904_priority65_closeout WP7", ownerDoc: "devlog/_plan/260904_priority65_closeout/060_wp7_rollback_journal_crud.md" } },
   { method: "POST", path: "/api/client-integrations/restore", module: "server/management/integration-routes", mutates: true },
   // server/management/lab-automation-routes
   { method: "GET", path: "/api/lab/automation", module: "server/management/lab-automation-routes", mutates: false, exempt: { reason: "local-transport", why: "ocx lab reads the same rows from the local SQLite projection; src/cli/lab.ts imports ../lab/query directly and never fetches /api/lab." } },
@@ -244,6 +262,7 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "GET", path: "/api/key-providers", module: "server/management/oauth-account-routes", mutates: false },
   { method: "GET", path: "/api/keys", module: "server/management/oauth-account-routes", mutates: false },
   { method: "GET", path: "/api/oauth/accounts", module: "server/management/oauth-account-routes", mutates: false },
+  { method: "GET", path: "/api/accounts/events", module: "server/management/oauth-account-routes", mutates: false, exempt: { reason: "gui-invalidation", why: "Dashboard selection invalidation stream; CLI account commands read the authoritative account/key resources directly rather than subscribing to browser refresh notifications." } },
   { method: "GET", path: "/api/oauth/accounts/pool", module: "server/management/oauth-account-routes", mutates: false },
   { method: "GET", path: "/api/oauth/providers", module: "server/management/oauth-account-routes", mutates: false },
   { method: "GET", path: "/api/oauth/status", module: "server/management/oauth-account-routes", mutates: false },
@@ -281,6 +300,8 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "PUT", path: "/api/provider-context-caps", module: "server/management/provider-routes", mutates: true },
   // server/management/replit-provider-routes
   { method: "POST", path: "/api/providers/replit-pair", module: "server/management/replit-provider-routes", mutates: true },
+  // server/management/quota-reset-routes
+  { method: "GET", path: "/api/quota-resets", module: "server/management/quota-reset-routes", mutates: false, mechanism: "negated-guard" },
   // server/management/request-history-routes
   { method: "GET", path: "/api/request-history", module: "server/management/request-history-routes", mutates: false },
   // server/management/routing-analytics-routes
@@ -306,7 +327,7 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "GET", path: "/api/system/memory", module: "server/management/system-routes", mutates: false },
   { method: "GET", path: "/api/system/windows-replace-retries", module: "server/management/system-routes", mutates: false },
   { method: "POST", path: "/api/system/restart", module: "server/management/system-routes", mutates: true },
-  // --- Routes an equality scan of their own file cannot see (18). ---
+  // --- Further routes an equality scan of their own file cannot see. ---
   // Each carries `mechanism`; the reconciliation test counts these separately.
   { method: "GET", path: "/api/storage", module: "server/management/storage-log-guard-routes", mutates: false, mechanism: "negated-guard" },
   { method: "GET", path: "/api/routing-analytics", module: "server/management/routing-analytics-routes", mutates: false, mechanism: "negated-guard" },

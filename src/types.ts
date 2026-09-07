@@ -4,6 +4,7 @@
 export type { OcxTool, OcxToolChoice } from "./types/tools";
 export {
   CODE_MODE_EXEC_TOOL_NAME,
+  dottedToolName,
   namespacedToolName,
   normalizeDeclaredToolName,
   toolChoiceAliases,
@@ -14,6 +15,7 @@ export {
   modelInList,
   isAllowedToolChoice,
   toolChoiceToolPredicate,
+  declaresCodeModeExec,
 } from "./types/tools";
 
 export type { UpstreamHttpVersion, ReasoningSummaryDelivery, CodexAccountMode } from "./types/wire";
@@ -63,8 +65,8 @@ export type {
   OcxCustomModel,
   OcxApiKeyEntry,
   OcxClientIntegrationsConfig,
-  OcxSubagentRole,
   OcxConfigRebaseProvenance,
+  OcxSubagentRole,
   OcxServerTlsConfig,
   OcxHubConfig,
   OcxRemoteGuiConfig,

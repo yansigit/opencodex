@@ -18,6 +18,7 @@ import type { OcxProviderConfig } from "../types";
 import { findLiveProxy } from "../server/proxy-liveness";
 import { syncModelsToCodex } from "../codex/sync";
 import { codexAccountNamespaceProviderCollisionError } from "../codex/account-namespace-match";
+import { modelSelectionGuidance, modelSelectionNextSteps } from "./model-selection-guidance";
 
 // ---------------------------------------------------------------------------
 // Arg helpers
@@ -205,6 +206,7 @@ async function handleAdd(args: string[]): Promise<void> {
     provConfig.apiKeyTransport = apiKeyTransport;
   }
 
+  const { initializeProviderModelSelection } = await import("../providers/initial-model-selection");
   if (allowPrivateNetwork) provConfig.allowPrivateNetwork = true;
   const saved = mutateProviderConfig(config => {
     const namespaceCollision = codexAccountNamespaceProviderCollisionError(config.codexAccountNamespaces, name);
@@ -214,16 +216,22 @@ async function handleAdd(args: string[]): Promise<void> {
     const next = structuredClone(provConfig);
     // A --force overwrite rotates the key/endpoint but must not drop a user-configured price overlay.
     if (existingProvider?.modelCosts !== undefined && next.modelCosts === undefined) next.modelCosts = existingProvider.modelCosts;
+    initializeProviderModelSelection(name, next, existingProvider, config);
     config.providers[name] = next;
     if (setDefault) config.defaultProvider = name;
     validateProviderConfig(config);
-    return { changed: JSON.stringify(existingProvider) !== JSON.stringify(next) || (setDefault && config.defaultProvider === name), value: { provider: next, defaultProvider: config.defaultProvider } };
+    return {
+      changed: JSON.stringify(existingProvider) !== JSON.stringify(next)
+        || (setDefault && config.defaultProvider === name),
+      value: { provider: next, defaultProvider: config.defaultProvider },
+    };
   });
   provConfig = saved.provider;
 
   if (wantsJson) {
     console.log(JSON.stringify({
       action: "added",
+      modelSelection: modelSelectionNextSteps(name),
       provider: name,
       adapter: provConfig.adapter,
       baseUrl: provConfig.baseUrl,
@@ -252,6 +260,7 @@ async function handleAdd(args: string[]): Promise<void> {
 
   const registryLabel = registryEntry ? ` (${registryEntry.label})` : "";
   console.log(`✅ Provider "${name}"${registryLabel} added.`);
+  for (const line of modelSelectionGuidance(name)) console.log(line);
   if (setDefault) console.log(`   Set as default provider.`);
   if (registryEntry?.authKind === "oauth") {
     console.log(`   Authenticate with: ocx login ${name}`);
@@ -297,7 +306,10 @@ function handleRemove(args: string[]): void {
     delete config.providers[name];
     const droppedCustomModels = dropProviderCustomModels(config, name);
     validateProviderConfig(config);
-    return { changed: true, value: { droppedCustomModels, providers: Object.keys(config.providers), defaultProvider: config.defaultProvider } };
+    return {
+      changed: true,
+      value: { droppedCustomModels, providers: Object.keys(config.providers), defaultProvider: config.defaultProvider },
+    };
   });
   const { droppedCustomModels } = saved;
 
@@ -424,6 +436,7 @@ Subcommands:
   set-default <name>    Change the default provider
   selected <name>       Show or set the provider model allowlist
   quota                 Show provider quota reports
+  resets                Show recently detected quota resets
   presets               List GUI provider presets
   account-mode <mode>   Set OpenAI Codex pool/direct mode
 
@@ -435,6 +448,8 @@ Examples:
     (gateway key via REPLIT_GATEWAY_KEY, --stdin, or --gateway-key-file; never argv)
   ocx provider show anthropic --json
   ocx provider set-default anthropic
+  ocx provider edit xai --xai-chat on   # opt Grok 4.5/4.6 into Chat Completions
+  ocx provider edit xai --xai-chat off  # use Responses again
   ocx provider remove my-ollama`;
 
 export async function handleProviderCommand(args: string[]): Promise<void> {

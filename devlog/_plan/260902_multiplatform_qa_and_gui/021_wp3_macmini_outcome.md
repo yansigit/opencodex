@@ -65,3 +65,4 @@ SVC    = 64484 com.opencodex.proxy  (PID는 재기동으로 바뀜, 실행 상�
 ```
 
 증거: `.codexclaw/evidence/<sid>/qa/macmini-{prestate,deploy,cli-adversarial,restore}/`
+

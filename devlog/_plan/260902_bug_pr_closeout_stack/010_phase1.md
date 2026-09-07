@@ -31,3 +31,4 @@ carries root cause, precedence reasoning, and per-suite verification counts
 - `gh pr view 3163 --json state,mergeCommit` reports MERGED with a SHA.
 - ancestry check exits 0.
 - `gh issue view 3156 --json state` reports CLOSED.
+

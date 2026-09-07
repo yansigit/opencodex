@@ -24,6 +24,12 @@ Auth page can restore it: absent rows are created from the canonical preset, dis
 rows are re-enabled without replacing saved mode or model settings, and noncanonical `openai`
 rows are not offered that recovery path.
 
+Luna Reserve compatibility is a ChatGPT account capability on the canonical OpenAI forward path,
+not an OpenAI API-key entitlement. Its manual stored-main selector requires effective local authless
+Desktop mode and current credential-bound upstream permission; a catalog entry alone does not
+authorize a request. See [Luna Reserve alongside routed models](/reference/cli/providers-accounts/#luna-reserve-alongside-routed-models)
+for setup, restart order, authorization requirements, and unsupported helpers.
+
 ### Providers overview pool capacity
 
 For Codex login in Pool mode, the Providers overview shows a configured-weight estimate of the
@@ -509,16 +515,22 @@ material off it. Muse Spark is also reachable through resellers, with a narrower
 `command-code` carries both tiers, while `opencode-go` serves only
 `muse-spark-1.3-contributor`.
 
-**Meta Muse Code (`meta-muse`).** If you already use the Muse Code CLI, this imports the
-API key it stored after `muse login` instead of asking you to provision a second one.
-macOS only — the CLI keeps that key in the macOS Keychain, and no other platform's
-storage has been verified. OpenCodex never launches the CLI: if no credential is present
-it tells you to run `muse login` yourself.
+**Meta Muse Code (`meta-muse`).** On macOS, if you already use the Muse Code CLI, this
+imports the API key it stored after `muse login` instead of asking you to provision a
+second one. OpenCodex never launches the CLI: if no credential is present it tells you to
+run `muse login` yourself.
+
+Elsewhere it asks you to paste the key. Meta ships no native Windows CLI, and on Linux the
+CLI exists but where it stores its credential has not been verified, so OpenCodex refuses
+to guess at a credential store and points you at [dev.meta.ai](https://dev.meta.ai)
+instead, where the same key is visible. A pasted key faces the same format check and the
+same live validation against the Model API as an imported one. See
+[Platform support](/reference/platform-support/) for the full per-platform picture.
 
 **Read this before enabling it.** Meta scopes that credential to the Muse Code CLI, so
 using it here is an *unsupported* path. Meta does not authorize subscription coverage
 outside its own client, how these calls settle is not observable from the API, and you
-should treat every call as billable against your account. The imported key is copied into
+should treat every call as billable against your account. The key, imported or pasted, is copied into
 OpenCodex's auth store (`~/.opencodex/auth.json`, mode 0600) like every other OAuth
 credential. The dashboard shows a Terms-of-Service warning before the first login and
 before any reauthentication — the same treatment Anthropic and Google Antigravity get.
@@ -666,6 +678,12 @@ A provider is included when opencodex has a matching wire adapter, **not** based
 (AI Studio, Vertex, and Antigravity/Cloud Code Assist modes), `azure` / `azure-openai`, `kiro`, and
 `cursor`. A proprietary API without one of these implementations, such as native Amazon Bedrock,
 is not supported directly.
+
+Provider configuration selects the adapter; upstream transport selection is separate. Eligible
+Responses traffic can use WSS with [explicit proxy routing](/reference/proxy-formats/#json-and-sse-output).
+Invalid or unsupported WebSocket proxy settings fall back to HTTP/SSE, which uses Bun's HTTP
+proxy rules rather than the WSS-specific `ALL_PROXY` fallback.
+
 **GitHub Copilot** is an OAuth provider (`ocx login github-copilot`) that exchanges a GitHub
 device-flow login for a short-lived Copilot API token — not a pasted API key. **GitLab Duo** remains
 a key/subscription-token gateway on its OpenAI-compatible endpoint. **Cloudflare AI

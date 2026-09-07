@@ -13,7 +13,7 @@ import type { WebSearchBackendId } from "./index";
 import { clearableDeadline } from "../lib/abort";
 import { redactSecretString } from "../lib/redact";
 import { readBoundedResponseBody } from "../lib/bounded-body";
-import { fetchWithResetRetry, prepareSameTarget429Wait } from "../lib/upstream-retry";
+import { applyUpstreamRecoveryInit, fetchWithResetRetry, prepareSameTarget429Wait } from "../lib/upstream-retry";
 import { rateLimitRetryDelayMs } from "../providers/key-failover";
 import {
   isTranslatorBudgetExceededError,
@@ -23,7 +23,6 @@ import {
 import { formatWebSearchResults } from "./format-result";
 import { parseStreamWithProgress, RoutedModelInactivityError, WebSearchStreamProtocolError } from "./progress-stream";
 import { WEB_SEARCH_TOOL_NAME } from "./synthetic-tool";
-import { OcxRequestValidationError } from "../lib/errors";
 
 const SSE_HEADERS = {
   "Content-Type": "text/event-stream",
@@ -231,14 +230,8 @@ function forcedAnswerNudge(): OcxMessage {
   };
 }
 
-function jsonError(status: number, message: string, errorType = "upstream_error", code: string | null = null): Response {
-  return new Response(JSON.stringify({
-    error: {
-      message,
-      type: errorType,
-      code,
-    },
-  }), {
+function jsonError(status: number, message: string): Response {
+  return new Response(JSON.stringify({ error: { message, type: "upstream_error", code: null } }), {
     status,
     headers: { "Content-Type": "application/json" },
   });
@@ -247,12 +240,7 @@ function jsonError(status: number, message: string, errorType = "upstream_error"
 /** Hard provider/parse failure inside an iteration. The eager first iteration converts it to a
  *  non-200 jsonError; later (already-streaming) iterations surface it as an in-stream error event. */
 class LoopError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-    readonly errorType?: string,
-    readonly code?: string,
-  ) {
+  constructor(readonly status: number, message: string) {
     super(message);
     this.name = "LoopError";
   }
@@ -315,6 +303,8 @@ export interface WebSearchLoopDeps {
   onRequestBuilt?: (request: AdapterRequest) => void;
   /** Validate the final adapter before every cached replay or request build. */
   validateAdapter?: (parsed: OcxParsedRequest, adapter: ProviderAdapter) => void;
+  /** Request-scoped executor retains the core's selection binding across loop retries. */
+  fetchForRequest?: (request: AdapterRequest, parsed: OcxParsedRequest) => typeof globalThis.fetch;
   /** Called before each routed-model dispatch in the loop, for attempt telemetry. Same-target 429 replays pass the `rate-limit-429` recovery kind. */
   onAttemptSend?: (recovery?: AttemptRecoveryKind) => void;
   /**
@@ -327,8 +317,6 @@ export interface WebSearchLoopDeps {
   retryOn429Policy?: Required<RateLimitRetryPolicy> | null;
   /** Called only when the final bridged Responses stream reaches completed or incomplete. */
   onCompletedResponse?: (response: Record<string, unknown>) => void;
-  /** OAuth account identity forwarded to AdapterFetchContext for provider-local cooldown bookkeeping. */
-  accountId?: string;
   /** Internal, opt-in structural stream diagnostics shared with the final bridge. */
   diagnostic?: BridgeDiagnosticContext;
 }
@@ -446,10 +434,10 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
           request = cachedRequest;
         } else {
           request = await requestAdapter.buildRequest(iterParsed, {
+            ...deps.incomingMeta,
             headers: selectedForwardHeaders,
             abortSignal: headerDeadline.signal,
             translatorBudget,
-            providerFetch: routedProviderFetch,
           });
           try {
             deps.onRequestBuilt?.(request);
@@ -459,6 +447,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
           cachedRequest = request;
           cachedAdapter = requestAdapter;
         }
+        const requestFetch = deps.fetchForRequest?.(request, iterParsed) ?? routedProviderFetch;
         let response: Response;
         try {
           if (requestAdapter.fetchResponse) {
@@ -468,8 +457,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
               timeoutMs: connectTimeoutMs,
               returnRawErrors: true,
               stream: true,
-              executor: routedProviderFetch,
-              ...(deps.accountId ? { accountId: deps.accountId } : {}),
+              executor: requestFetch,
             });
           } else {
             response = await fetchWithResetRetry(
@@ -480,12 +468,17 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
                 deps.onAttemptSend?.(retryRecovery ?? recovery);
                 const h = new Headers(request.headers);
                 if (!h.has("accept-encoding")) h.set("accept-encoding", "identity");
-                return routedProviderFetch(request.url, {
+                // A connection-reset replay must leave the half-closed pooled socket, not just
+                // ask politely: Bun has ignored a bare `Connection: close` (oven-sh/bun#20492),
+                // so the transport-level `keepalive: false` this helper adds is what actually
+                // opens a new connection. Spending `retryRecovery` on telemetry alone left every
+                // replay on this leg eligible for the same dead socket the reset came from.
+                return requestFetch(request.url, applyUpstreamRecoveryInit({
                   method: request.method,
                   headers: h,
                   body: request.body,
                   signal: headerDeadline.signal,
-                });
+                }, retryRecovery));
               },
               { abortSignal: headerDeadline.signal, label: "web-search-loop" },
             );
@@ -574,9 +567,6 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
       return prepared;
     } catch (error) {
       if (isTranslatorBudgetExceededError(error)) throw error;
-      if (error instanceof OcxRequestValidationError) {
-        throw new LoopError(error.status, error.message, "invalid_request_error", "invalid_request_error");
-      }
       if (headerDeadline.didExpire()) {
         throw new LoopError(504, `Provider response-header timeout after ${connectTimeoutMs}ms during web-search`);
       }
@@ -807,7 +797,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
     firstPrepared = await prepareIterationDrained(false);
   } catch (e) {
     if (abortSignal) abortSignal.removeEventListener("abort", linkAbort);
-    if (e instanceof LoopError) return jsonError(e.status, e.message, e.errorType, e.code ?? null);
+    if (e instanceof LoopError) return jsonError(e.status, e.message);
     throw e;
   }
 
@@ -891,18 +881,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
               message: "upstream translation buffer exceeded the safe limit",
             };
           } else {
-            const message = e instanceof LoopError ? e.message : (e instanceof Error ? e.message : String(e));
-            yield {
-              type: "error",
-              ...(e instanceof LoopError ? {
-                status: e.status,
-                ...(e.errorType !== undefined || e.status === 400
-                  ? { errorType: e.errorType ?? "upstream_error" }
-                  : {}),
-                ...(e.code !== undefined ? { code: e.code } : {}),
-              } : {}),
-              message,
-            };
+            yield { type: "error", message: e instanceof LoopError ? e.message : (e instanceof Error ? e.message : String(e)) };
           }
           return;
         }

@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { repoPath } from "../helpers/repo-root";
 
-const text = readFileSync(resolve(import.meta.dir, "../../.github/workflows/release.yml"), "utf8");
+const text = readFileSync(repoPath(".github/workflows/release.yml"), "utf8");
 
 describe("release candidate publish bridge", () => {
   test("requires and validates immutable candidate provenance", () => {
@@ -27,6 +27,7 @@ describe("release candidate publish bridge", () => {
   });
 
   test("automatic candidate publication uses only the downloaded tarball", () => {
+    expect(text).toContain('package_file="./${CANDIDATE_PACKAGE_PATH#./}"');
     expect(text).toContain('npm publish "$package_file" --tag "$NPM_DIST_TAG" --access public --ignore-scripts');
     expect(text).toContain('if [ -z "$DISPATCH_CANDIDATE_RUN_ID" ]');
     expect(text).toContain('elif [ "$DRY_RUN" = "true" ]');

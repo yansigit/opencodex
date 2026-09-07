@@ -20,7 +20,11 @@ You can log in multiple Claude accounts via the Providers dashboard (`ocx login 
 add-account). By default every request uses the **active** account only.
 
 An **experimental, opt-in** Claude account pool (`anthropicAccountPool.enabled`) adds sticky
-session affinity and 429 cooldown failover across those OAuth accounts. For **new** sessions,
+session affinity and usage-aware new-session selection across those OAuth accounts. When the
+setting is omitted, 429 failover is enabled by the presence of two or more usable accounts, so a
+rate-limited request can move to another account. Setting `anthropicAccountPool.enabled` explicitly
+to `false` disables that reactive failover as well as the pool. For **new**
+sessions,
 `anthropicAccountPool.strategy` selects among eligible accounts: `quota` (default) picks the
 lowest known usage in the window set by `quotaWindow` (`five-hour` by default, or `weekly` /
 `max-utilization`) when above `autoSwitchThreshold`; `round-robin` spreads evenly
@@ -29,7 +33,7 @@ reauthentication, or threshold, then advances. It is **off by default**, shows a
 and is not battle-tested — Anthropic may restrict accounts that look like automated rotation;
 rotation does not protect against provider enforcement.
 
-Operational contract when enabled:
+Operational contract when failover is active:
 
 - Upstream **429** cools that account using `Retry-After` when present (else a default backoff),
   clears its affinities, and may rotate to another eligible account within the same request
@@ -76,6 +80,31 @@ ignores Anthropic credentials that only a project dotenv introduced. A value you
 your shell still wins, in every auth mode. To use an API key deliberately, export it
 (`export ANTHROPIC_API_KEY=...`) rather than leaving it in a project file.
 
+### Native fallback when Claude routing is off
+
+`ocx claude` used to exit with an error when Claude routing was disabled. It now launches the
+native `claude` binary instead, so the command stays useful with routing off:
+
+| Where routing is off | What happens |
+| --- | --- |
+| `claudeCode.enabled: false` in config | Native launch, with a notice that routing is disabled |
+| The running proxy reports `enabled: false` from `GET /api/claude-code` | Native launch, with a notice to restart the service after re-enabling |
+| `claudeCode.enabled` absent or `true` | Routed through the proxy, unchanged |
+
+Only an explicit `false` triggers the fallback, so a proxy predating the field stays routed. A
+missing proxy is not a trigger either — with routing on, `ocx claude` still starts the proxy.
+
+A native session must not inherit proxy state, so the fallback removes values it can **prove**
+OpenCodex owns: `ANTHROPIC_BASE_URL` only when it points at this proxy's own loopback address
+and configured port *and* the paired admission token is one the proxy issued; the
+`CLAUDE_CODE_*` discovery and auto-context levers; and model slots that only resolve through the
+proxy (routed aliases and `provider/model` ids). Anything else is yours and is preserved — an
+unrelated `http://localhost:8080` gateway and your own `sk-ant-` credential both survive.
+
+If your saved `/model` picker default is a proxy-only model, the native session falls back to
+`claudeCode.model` when that is natively usable, and otherwise warns you to pass
+`--model <Anthropic model>`. An explicit `--model` argument always wins.
+
 ## Auth mode
 
 Claude Code needs a token in `ANTHROPIC_AUTH_TOKEN` to talk to a gateway, but setting that
@@ -117,6 +146,8 @@ default, then select **Save and apply to Desktop**. Empty families are allowed. 
 is temporarily unavailable, the first available route in that family is used until it returns.
 
 You can also manage the same profile from the command line:
+
+The profile-editing instructions below describe the local profile. Connected remote apply is described separately below.
 
 ```bash
 ocx claude desktop [apply]
@@ -196,6 +227,66 @@ dedicated proxy admission header is valid. This also means the
 Disable with `claudeCode.nativePassthrough: false`; point elsewhere with
 `claudeCode.anthropicBaseUrl`.
 
+## Claude Desktop on a connected remote hub
+
+When this machine is connected to a hub, `ocx claude desktop apply` (or `ocx claude desktop`)
+uses the hub's Desktop model snapshot. It writes the connected hub origin and the hub-issued
+model IDs into the local Desktop configuration without generating replacement aliases locally.
+Static and hybrid modes copy the snapshot entries; discovery-only mode uses the hub origin
+without embedding the model list.
+
+The hub owns the Desktop profile, family assignments and defaults. Change those on the hub,
+then apply again on the connected client and reselect the model in Desktop. Old aliases created
+only on the client require reapply/reselection; they are not automatically migrated. Local `show`,
+profile edits, and import/export remain local views and operations, not hub-profile management.
+While connected, `ocx claude desktop import <path> --apply` is unsupported and refuses the import
+before saving. Import without `--apply` remains local.
+
+Apply reads the snapshot using the existing connection's data credential. It needs no admin token
+and uploads no profile. If the hub is too old to support the snapshot, the response is invalid,
+or no Desktop models are available, apply fails without substituting a local catalog or loopback
+origin. Upgrade/configure the hub and apply again.
+
+This alias change does not fix the separate `thinking` / `redacted_thinking` replay and prompt-cache
+request in [#3719](https://github.com/lidge-jun/opencodex/issues/3719). Proxy admission alone does not enable native Anthropic passthrough; translated
+Anthropic routes can still use prompt caching. Replay fidelity and cache-hit comparisons remain
+separate work.
+
+### Key rotation, recovery and disconnect
+
+Key rotation and recovery update the credential stored in the connection-owned Desktop profile
+alongside the local connection credential. No manual Desktop reapply is required just to migrate
+the key. Existing model IDs, family/default choices and the user's current profile selection are
+preserved; rotation does not select the managed profile again or re-enable a disabled integration.
+CLI JSON `rotation: "committed"` means the new key is active. `rotation: "rolled_back"` means the
+previous key was retained or restored, not that a new key was committed or the previous key revoked.
+Uncertain or incomplete recovery is reported as such, rather than as successful rotation.
+
+The first connected apply records the prior managed settings and selection for restoration.
+Repeated apply and key rotation retain that original baseline. `ocx disconnect` restores the
+connection-owned settings while preserving current user-added fields and unrelated profiles.
+The previous selection is restored only if the managed profile is still selected; a later valid
+user selection stays selected. A newly created profile with user additions is retained in readable
+standard mode instead of deleting those additions. `--keep-catalog` keeps the catalog, not the
+Desktop connection credential.
+
+For an older managed profile without an original record, OpenCodex can migrate it when it
+unambiguously belongs to the current hub and a recognized connection key. Apply, rotation/recovery
+or direct disconnect can handle this case without a new flag or prerequisite reapply. A warning
+explains that disconnect will use standard mode because the previous settings were not recorded.
+That fallback removes only the connection-owned gateway settings, preserves user fields and a
+separate valid selection, and is reported as standard fallback, not original restoration.
+
+Conflicting managed fields, unrecognized credentials or damaged restoration records are preserved
+and reported for resolution. Interrupted cleanup can resume for the same connection; it does not
+clear a newer connection or claim completion while restoration remains incomplete. Finish pending
+rotation recovery before starting disconnect, and retain the same catalog choice when retrying it.
+
+Fully quit and reopen Claude Desktop after apply, rotation/recovery or restoration: changing files
+does not replace a credential already held by the running app. OpenCodex does not kill/restart the
+app automatically. Disconnect works locally without automatically revoking the hub key or erasing
+arbitrary external copies; revoke separately on the hub if desired.
+
 ## The /model picker ("From gateway")
 
 Claude Code 2.1.129+ discovers gateway models via `GET /v1/models?limit=1000` and lists them in
@@ -239,6 +330,16 @@ express fall back to the hashed alias. Model ids MAY contain `--` (resolution sp
 
 **Model resolution order:** `[1m]` marker stripped → readable alias decoded → Desktop hashed
 alias decoded → `modelMap` exact match → date-stripped match (`-20250514` removed) → passthrough.
+
+<a id="desktop-alias-resolution"></a>
+
+An unresolved date-shaped Desktop ID can also be a genuine native model missing from discovery.
+Messages and count-tokens return HTTP 503 with the fixed `desktop_model_mapping_unavailable` error when the available
+evidence cannot resolve that ID; this does not establish that the model is invalid. Unknown legacy
+hash aliases still return HTTP 400. Neither case strips the date or falls back to another route.
+Known IDs, registered mappings and exact `modelMap` matches keep their existing behavior, including
+recognized real native IDs. Refresh model discovery or reapply the connected hub profile before
+trying again; retrying alone does not guarantee resolution.
 
 Each entry carries a display name like `gemini-3-pro (gemini)`, plus full model capabilities
 (reasoning-effort ladder, thinking types) in the official `ModelInfo` shape. Real Anthropic models
@@ -363,6 +464,8 @@ entirely). The stub keeps tool call/result pairing intact.
 ```
 
 Lookup order: discovery alias → exact id → id with date suffix stripped (`-20250514`) → passthrough.
+
+See [Desktop alias resolution](#desktop-alias-resolution) for the rejection policy.
 
 ## Compatibility mode
 

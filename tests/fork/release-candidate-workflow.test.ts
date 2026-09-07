@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { repoPath } from "../helpers/repo-root";
 
-const workflowPath = resolve(import.meta.dir, "../../.github/workflows/release-candidate.yml");
+const workflowPath = repoPath(".github/workflows/release-candidate.yml");
 const workflowText = readFileSync(workflowPath, "utf8");
 const workflow = Bun.YAML.parse(workflowText) as {
   on?: {
@@ -45,7 +45,7 @@ describe("release candidate workflow contract", () => {
 
   test("installs once, runs only candidate contracts, then builds and packages once", () => {
     expect(workflowText.match(/bun install --frozen-lockfile/g)?.length).toBe(2);
-    const focused = workflowText.indexOf("bun test tests/release-candidate.test.ts");
+    const focused = workflowText.indexOf("bun test tests/ci-workflows/release-candidate.test.ts");
     const gui = workflowText.indexOf("bun run build:gui");
     const pack = workflowText.indexOf("bun scripts/build-release-candidate.ts");
     const verify = workflowText.indexOf("bun scripts/release-candidate.ts verify");
@@ -64,7 +64,7 @@ describe("release candidate workflow contract", () => {
   });
 
   test("packs once and uploads only the immutable candidate directory", () => {
-    const builderText = readFileSync(resolve(import.meta.dir, "../../scripts/build-release-candidate.ts"), "utf8");
+    const builderText = readFileSync(repoPath("scripts/build-release-candidate.ts"), "utf8");
     expect(builderText.match(/\["npm", "pack",/g)?.length).toBe(1);
     expect(workflowText).not.toMatch(/^\s*npm pack\b/m);
 

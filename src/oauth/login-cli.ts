@@ -1,4 +1,6 @@
 import * as readline from "node:readline";
+import { modelSelectionGuidance } from "../cli/model-selection-guidance";
+import { initializeProviderModelSelection } from "../providers/initial-model-selection";
 import { openUrl } from "../lib/open-url";
 import { initializePersistedConfigIfMissing, loadConfig, mutatePersistedConfig } from "../config";
 import { findLiveProxy } from "../server/proxy-liveness";
@@ -153,6 +155,7 @@ async function handleOAuthLogin(name: string): Promise<void> {
   }
   const reload = await notifyRunningProxyAfterOAuthLogin(name);
   console.log(`\n✅ Logged in to ${name}. Try: ocx sync`);
+  for (const line of modelSelectionGuidance(name)) console.log(line);
   warnIfLiveReloadSkipped(reload);
 }
 
@@ -238,6 +241,7 @@ export async function commitKeyLoginProvider(
     const collision = codexAccountNamespaceProviderCollisionError(fresh.codexAccountNamespaces, name);
     if (collision) throw new Error(collision);
     mergedProvider = mergeKeyLoginProviderRow(provider, fresh.providers[name]);
+    initializeProviderModelSelection(name, mergedProvider, fresh.providers[name], fresh);
     fresh.providers[name] = mergedProvider;
     return { changed: true, value: { config: structuredClone(fresh), provider: structuredClone(mergedProvider) } };
   });
@@ -247,6 +251,7 @@ export async function commitKeyLoginProvider(
     const collision = codexAccountNamespaceProviderCollisionError(initial.codexAccountNamespaces, name);
     if (collision) throw new Error(collision);
     mergedProvider = mergeKeyLoginProviderRow(provider, initial.providers[name]);
+    initializeProviderModelSelection(name, mergedProvider, initial.providers[name], initial);
     initial.providers[name] = mergedProvider;
     const initialized = initializePersistedConfigIfMissing(initial);
     if (initialized === "invalid") throw new Error("config is invalid");
@@ -313,6 +318,7 @@ async function handleKeyLogin(name: string): Promise<void> {
   let reload: LocalProviderReloadResult | null = null;
   await commitKeyLoginProvider(config, name, provider, result => { reload = result; });
   console.log(`✅ ${def.label} added. Try: ocx sync`);
+  for (const line of modelSelectionGuidance(name)) console.log(line);
   warnIfLiveReloadSkipped(reload);
 }
 

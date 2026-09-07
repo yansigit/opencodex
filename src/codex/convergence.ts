@@ -5,6 +5,7 @@ import {
   reconcileSuccessfulModelDiscoveries,
   type KnownModelBaseline,
 } from "../providers/new-model-policy";
+import { pendingModelSelectionProviders } from "../providers/initial-model-selection";
 import { COMBO_NAMESPACE } from "../combos";
 import { getAuthStorePath } from "../oauth/store";
 import type { OcxConfig, OcxProviderConfig } from "../types";
@@ -369,6 +370,8 @@ function prepareCatalog(
     )),
   );
   const mergedModels = mergeCatalogEntriesFromObservedState({
+    modelPickerOrder,
+    accountSelectors,
     catalogModels,
     baselineCatalogModels,
     routedEntries,
@@ -379,6 +382,7 @@ function prepareCatalog(
     disabledModels: new Set(config.disabledModels ?? []),
     selectedModelsByProvider,
     gatheredProviderNames,
+    pendingProviderNames: pendingModelSelectionProviders(config),
     degradedProviderNames,
     legacyCustomModelSlugs: legacyCustomModelCatalogSlugs(config),
     multiAgentMode,

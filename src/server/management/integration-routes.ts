@@ -9,6 +9,12 @@
  * Design of record: devlog/_fin/260802_client_toggle_api/040_wp4_management_api.md.
  */
 import { readFileSync } from "node:fs";
+import { saveConfigPreservingClaudeCode } from "../../config";
+import { listAsideProfileStates, type AsideProfilesInput } from "../../integrations/aside-profiles";
+import {
+  handleAsideProfileRoutes, asideJournalResponse, asideRestoreResponse,
+  asideJournalDeleteResponse, type AsideProfileRouteOptions,
+} from "./aside-profile-routes";
 import type { IntegrationIO } from "../../integrations/config-io";
 import { matchesOperationResult } from "../../integrations/journal";
 import {
@@ -41,6 +47,8 @@ import { loadExportModels } from "./model-rows";
 
 
 const INTEGRATION_ROUTE_PREFIX = "/api/client-integrations/";
+const INTEGRATION_COLLECTION_PATH = "/api/client-integrations";
+const INTEGRATION_HISTORY_PATHS = ["/api/client-integrations/journal", "/api/client-integrations/restore"];
 export { INTEGRATION_MUTATION_TERMINAL_MS };
 
 type IntegrationStateRecord = Awaited<ReturnType<typeof readIntegrationState>>;
@@ -76,6 +84,16 @@ export interface IntegrationJournalRow {
   configPath: string;
   snapshot: "none" | "stored" | "expired";
   undoable: boolean;
+  /**
+   * May the operator retire this row?
+   *
+   * Computed HERE, not in the GUI, because the DELETE route enforces the same
+   * rule and two copies of it would drift. False for a client newest row: it
+   * is the undo entry point (`undoable` above keys off exactly this), and it
+   * is what a user reaches for right after the mistake.
+   */
+  deletable: boolean;
+  profileId?: number;
 }
 
 export interface IntegrationToggleBody {
@@ -170,6 +188,23 @@ export function setIntegrationMutationFlightTestHooks(
  */
 function integrationStore(): IntegrationStateStore {
   return integrationMutationTestHooks?.store ?? createIntegrationStateStore();
+}
+
+function asideOptions(ctx: ManagementContext): AsideProfileRouteOptions {
+  let input: AsideProfilesInput | undefined;
+  return {
+    input: () => input ??= {
+      config: ctx.config,
+      port: Number(ctx.url.port) || ctx.config.port,
+      models: () => loadExportModels(ctx.config),
+      store: integrationStore(),
+      ...pathOverrides(),
+      io: integrationMutationTestHooks?.io,
+      lockSeams: integrationMutationTestHooks?.lockSeams,
+      persistConfig: ctx.deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode,
+    },
+    failure: result => writerFailureResponse("aside", result, ctx),
+  };
 }
 
 async function buildIntegrationWriteInput(
@@ -293,8 +328,106 @@ function writerFailureResponse(
   }, 500, ctx.req, ctx.config);
 }
 
+/**
+ * Who asked for this deletion, as an audit value that is safe to persist.
+ *
+ * The tombstone lives in an append-only log the user can read, so this must be
+ * a principal NAME and nothing else -- never the admin token, a session id, or
+ * a filesystem path. `principal` is undefined only in direct-dispatch tests,
+ * which the auth gate documents as the untrusted admin-token case.
+ */
+function journalDeletePrincipal(ctx: ManagementContext): string {
+  return ctx.principal ?? "admin-token";
+}
+
+/**
+ * Retire one journal row at the operator request.
+ *
+ * The opId travels in the QUERY STRING, matching DELETE
+ * /api/codex-auth/accounts?id= -- the repository other DELETE-by-identifier. A
+ * body on DELETE is legal but unevenly handled by intermediaries, and there is
+ * nothing here a query cannot carry.
+ */
+async function handleJournalDelete(ctx: ManagementContext): Promise<Response> {
+  const { req, url } = ctx;
+  const opId = url.searchParams.get("opId")?.trim();
+  if (!opId) {
+    return jsonResponse({
+      error: "opId must be a non-empty string",
+      code: "invalid_op_id",
+    }, 400, req, ctx.config);
+  }
+  const aside = await asideJournalDeleteResponse(ctx, opId, asideOptions(ctx));
+  if (aside) return aside;
+  try {
+    const store = integrationStore();
+    const operation = store.findOperation(opId);
+    if (!operation) {
+      // Already retired, or never existed. Both are 404: the tombstone hides
+      // the row from findOperation, so a double-click is idempotent here
+      // rather than a second deletion of something.
+      return jsonResponse({
+        error: "integration operation not found",
+        code: "integration_operation_not_found",
+        opId,
+      }, 404, req, ctx.config);
+    }
+    /*
+     * The newest row per client is refused, and refused by the SERVER even
+     * though the GUI already hides its button. The button is a courtesy; this
+     * is the rule. An admin-token caller has no GUI at all.
+     *
+     * Re-read immediately before the write: a restore that landed while the
+     * dialog was open appends a new row and changes which opId is newest.
+     */
+    const newest = store.listOperations(operation.clientId, 1)[0];
+    if (newest?.opId === opId) {
+      return jsonResponse({
+        error: "the newest operation for a client cannot be deleted",
+        code: "integration_journal_newest_protected",
+        clientId: operation.clientId,
+        opId,
+      }, 409, req, ctx.config);
+    }
+
+    store.retireOperation({
+      tombstone: opId,
+      at: new Date().toISOString(),
+      by: journalDeletePrincipal(ctx),
+    });
+
+    /*
+     * Snapshot bytes go too, and go AFTER the tombstone -- the same post-commit
+     * ordering appendOperation uses (journal.ts rule 1). If this fails, the row
+     * is still retired and retentionDegraded discloses the leftover file; the
+     * reverse order would delete a user backup for a deletion that then failed
+     * to record.
+     */
+    const pruned = store.pruneSnapshots(operation.clientId);
+    if (pruned.ok) store.clearPruneFailure(operation.clientId);
+    else store.markPruneFailure(operation.clientId, pruned.error);
+
+    return jsonResponse({
+      ok: true,
+      opId,
+      clientId: operation.clientId,
+      snapshotRemoved: pruned.ok,
+    }, 200, req, ctx.config);
+  } catch (error) {
+    return internalErrorResponse(error, ctx);
+  }
+}
+
 export async function handleIntegrationRoutes(ctx: ManagementContext): Promise<Response | null> {
   const { req, url } = ctx;
+  const profileOptions = asideOptions(ctx);
+  const aside = await handleAsideProfileRoutes(ctx, profileOptions);
+  if (aside) return aside;
+  if (url.searchParams.has("profile")
+    && (url.pathname === INTEGRATION_COLLECTION_PATH || url.pathname.startsWith(INTEGRATION_ROUTE_PREFIX))
+    && !INTEGRATION_HISTORY_PATHS.includes(url.pathname)) {
+    return jsonResponse({ error: "profile applies only to Aside", code: "invalid_aside_profile" }, 400, req, ctx.config);
+  }
 
   if (url.pathname === "/api/client-integrations" && req.method === "GET") {
     try {
@@ -311,12 +444,21 @@ export async function handleIntegrationRoutes(ctx: ManagementContext): Promise<R
        * later one silently — a duplicate that could only ever hide a
        * disagreement, never surface it.
        */
-      const clients = INTEGRATION_CLIENT_IDS.map(clientId =>
-        readIntegrationState({ clientId, models, config: ctx.config, port, store, ...pathOverrides() }));
+      const clients = await Promise.all(INTEGRATION_CLIENT_IDS.map(async clientId => {
+        if (clientId === "aside") {
+          try { return await listAsideProfileStates({ ...profileOptions.input(), models }); }
+          catch { /* Existing status projection retains a safe unresolved-path diagnostic. */ }
+        }
+        return readIntegrationState({ clientId, models, config: ctx.config, port, store, ...pathOverrides() });
+      }));
       return jsonResponse({ clients } satisfies IntegrationStateListEnvelope, 200, req, ctx.config);
     } catch (error) {
       return internalErrorResponse(error, ctx);
     }
+  }
+
+  if (url.pathname === "/api/client-integrations/journal" && req.method === "DELETE") {
+    return handleJournalDelete(ctx);
   }
 
   if (url.pathname === "/api/client-integrations/journal") {
@@ -325,6 +467,8 @@ export async function handleIntegrationRoutes(ctx: ManagementContext): Promise<R
     if (requestedClient !== null && !isIntegrationClientId(requestedClient)) {
       return invalidClientResponse(ctx);
     }
+    const asideJournal = await asideJournalResponse(ctx, requestedClient, profileOptions);
+    if (asideJournal) return asideJournal;
     try {
       const store = integrationStore();
       const storedOperations = store.listOperations(requestedClient ?? undefined);
@@ -334,7 +478,7 @@ export async function handleIntegrationRoutes(ctx: ManagementContext): Promise<R
           newestByClient.set(operation.clientId, operation.opId);
         }
       }
-      const operations: IntegrationJournalRow[] = storedOperations.map(operation => {
+      let operations: IntegrationJournalRow[] = storedOperations.map(operation => {
         /*
          * Resolved against the DISK, not read off the row.
          *
@@ -371,8 +515,23 @@ export async function handleIntegrationRoutes(ctx: ManagementContext): Promise<R
             const current = currentConfigText(operation.configPath);
             return current === undefined ? false : matchesOperationResult(operation, current);
           })(),
+          /*
+           * Deliberately NOT an `undoable` derivative. The two axes are
+           * independent: an expired row is undoable-false and deletable-true,
+           * which is the pairing this route exists to produce -- a row whose
+           * bytes are gone previously carried no action at all.
+           */
+          deletable: newestByClient.get(operation.clientId) !== operation.opId,
         };
       });
+      if (requestedClient === null) {
+        const profiles = await asideJournalResponse(ctx, "aside", profileOptions);
+        if (profiles?.ok) {
+          const body = await profiles.json() as IntegrationJournalEnvelope;
+          operations = [...operations.filter(row => row.clientId !== "aside"), ...body.operations]
+            .sort((a, b) => b.at.localeCompare(a.at));
+        }
+      }
       return jsonResponse({ operations } satisfies IntegrationJournalEnvelope, 200, req, ctx.config);
     } catch (error) {
       return internalErrorResponse(error, ctx);
@@ -398,6 +557,8 @@ export async function handleIntegrationRoutes(ctx: ManagementContext): Promise<R
 
     const opId = parsed.opId.trim();
     const confirmDrift = parsed.confirmDrift ?? false;
+    const asideRestore = await asideRestoreResponse(ctx, { opId, confirmDrift }, profileOptions);
+    if (asideRestore) return asideRestore;
     let restoreClientId: IntegrationClientId | undefined;
     try {
       const store = integrationStore();
@@ -462,6 +623,11 @@ export async function handleIntegrationRoutes(ctx: ManagementContext): Promise<R
   const requestedClient = decodeClientPath(url.pathname);
   if (requestedClient === null) return null;
   if (!isIntegrationClientId(requestedClient)) return invalidClientResponse(ctx);
+  // Canonical Aside paths are owned above. Never decode an alternate spelling
+  // into the legacy single-account writer or bypass profile policy/guards.
+  if (requestedClient === "aside") {
+    return jsonResponse({ error: "Use the canonical Aside profile path", code: "invalid_aside_profile_path" }, 400, req, ctx.config);
+  }
 
   if (req.method === "GET") {
     try {

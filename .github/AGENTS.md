@@ -28,7 +28,7 @@ change requires explicit security review under `MAINTAINERS.md`.
 ## Validation
 
 - Inspect the complete workflow diff, including event triggers, permissions, conditions, interpolation, and shell behavior.
-- Workflow file changes (`.github/workflows/**`): run `bun run lint:workflows` (actionlint semantic validation) and the matching workflow tests (e.g. `bun test tests/ci-workflows.test.ts`).
+- Workflow file changes (`.github/workflows/**`): run `bun run lint:workflows` (actionlint semantic validation) and the matching workflow tests (e.g. `bun test tests/ci-workflows/ci-workflows.test.ts`).
 - Dependency or lock changes (`package.json`, `bun.lock`, `gui/package.json`, `gui/bun.lock`, overrides): run `bun run audit:high` (root and gui).
 - Run the local commands represented by changed workflow steps where possible.
 - Run `bun run prepush` for CI, release, dependency, packaging, or cross-platform workflow changes.

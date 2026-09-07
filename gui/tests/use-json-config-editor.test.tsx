@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
-import { act } from "react";
+import { act, useEffect } from "react";
 import type { Root } from "react-dom/client";
 import { useJsonConfigEditor, type Config } from "../src/hooks/useJsonConfigEditor";
 
@@ -23,6 +23,7 @@ const config: Config = {
       allowPrivateNetwork: true,
       hasApiKey: true,
       hasHeaders: true,
+      initialModelSelection: { version: 1, registrationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", status: "pending" },
       note: "derived registry note",
     },
     beta: {
@@ -45,26 +46,34 @@ let responseFactory: () => Promise<Response>;
 let configRefreshes: number;
 let quotaRefreshes: number;
 let savedCallbacks: number;
+let addedProviderNames: string[];
 let notifications: Array<{ message: string; ok?: boolean }>;
 
-function Harness() {
-  editor = useJsonConfigEditor({
+function Harness({ onEditor }: { onEditor: (value: Editor) => void }) {
+  const currentEditor = useJsonConfigEditor({
     apiBase: "/editor",
     config,
     notify: (message, ok) => { notifications.push({ message, ok }); },
     fetchConfig: async () => { configRefreshes += 1; },
     fetchProviderQuotas: async () => { quotaRefreshes += 1; },
-    onSaved: () => { savedCallbacks += 1; },
+    onSaved: added => { savedCallbacks += 1; addedProviderNames = added; },
     t: key => key,
   });
+  useEffect(() => {
+    onEditor(currentEditor);
+  }, [currentEditor, onEditor]);
   return null;
+}
+
+function captureEditor(value: Editor): void {
+  editor = value;
 }
 
 async function mountHook(): Promise<void> {
   const { createRoot } = await import("react-dom/client");
   await act(async () => {
     root = createRoot(host);
-    root.render(<Harness />);
+    root.render(<Harness onEditor={captureEditor} />);
   });
 }
 
@@ -84,6 +93,7 @@ beforeEach(() => {
   configRefreshes = 0;
   quotaRefreshes = 0;
   savedCallbacks = 0;
+  addedProviderNames = [];
   notifications = [];
   responseFactory = async () => Response.json({ success: true });
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -150,6 +160,17 @@ test("Save sends one atomic provider PUT with baseline and next, then refreshes"
   expect(requests.some(request => ["POST", "PATCH", "DELETE"].includes(request.method))).toBe(false);
   expect(configRefreshes).toBe(1);
   expect(quotaRefreshes).toBe(1);
+  expect(savedCallbacks).toBe(1);
+});
+
+test("successful batch registration reports new names for model-selection guidance", async () => {
+  await mountHook();
+  await act(async () => { editor!.openJsonEditor(); });
+  const next = JSON.parse(editor!.draft);
+  next.providers.gamma = { adapter: "openai-chat", baseUrl: "https://gamma.example.test/v1" };
+  await act(async () => { editor!.setDraft(JSON.stringify(next)); });
+  await act(async () => { expect(await editor!.saveConfig()).toBe(true); });
+  expect(addedProviderNames).toEqual(["gamma"]);
   expect(savedCallbacks).toBe(1);
 });
 

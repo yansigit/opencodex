@@ -35,7 +35,7 @@ export function withOwnedServiceHomePreload(
   return [...preloadArgs, ...args];
 }
 
-function windowsServiceProbeEnv(): Record<string, string> {
+export function windowsServiceProbeEnv(): Record<string, string> {
   // The production Windows probe deliberately resolves schtasks.exe/sc.exe from
   // System32, so PATH fixtures cannot isolate it. The flag is inert unless the
   // caller also passes `preloadPath` through withOwnedServiceHomePreload; this

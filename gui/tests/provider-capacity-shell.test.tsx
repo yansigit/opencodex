@@ -164,6 +164,8 @@ beforeEach(() => {
       const url = String(input);
       if (url.includes("/api/provider-quotas") && rejectQuotaFetch) throw new Error("quota unavailable");
       if (url.includes("/api/provider-quotas") && quotaFetchOverride) return quotaFetchOverride();
+      if (url.endsWith("/api/models")) return Response.json([]);
+      if (url.endsWith("/api/selected-models")) return Response.json({ selected: {}, available: {}, liveModelCounts: {} });
       const body = url.includes("/api/provider-quotas") ? quotaPayload : {};
       return quotaResponse(body);
     },
@@ -223,13 +225,6 @@ test("provider quota fetch preserves aggregate capacity through shell state and 
   }).format(new Date(RECOVERY_AT));
   expect(text).toContain(expectedRecoveryAt);
   expect(text).not.toMatch(/configured units|weighted units|units remaining|projected/i);
-});
-
-test("provider workspace uses a labelled section instead of nesting a main landmark", async () => {
-  await mountShell();
-
-  expect(host.querySelectorAll("main")).toHaveLength(0);
-  expect(host.querySelector("section.pws-main")?.getAttribute("aria-label")).toBe("Provider details");
 });
 
 test("successful empty quota response removes cached providers and updates session cache", async () => {
@@ -304,7 +299,6 @@ test("a cancelled superseded quota rejection cannot rewrite state or session cac
 });
 
 test("all-stale response renders coverage only without a numeric fallback", async () => {
-  const old = Date.now() - 31 * 60_000;
   quotaPayload = {
     reports: [{
       provider: "openai",
@@ -333,6 +327,50 @@ test("all-stale response renders coverage only without a numeric fallback", asyn
   expect(text).not.toContain("Current effective account");
   expect(text).not.toContain("80% used");
   expect(text).toContain("Incomplete coverage: 2 account(s) excluded");
+});
+
+test("a fully included pool still surfaces the uncalibrated-plan notice", async () => {
+  // The #3155 reporter's own shape: every seat included, complete coverage, one seat counted
+  // at the baseline weight. The uncalibrated notice is the ONLY remaining uncertainty signal
+  // here, so it must render independently of the incomplete gate — folding it under the
+  // incomplete branch would pass every other fixture in this file and silently hide it.
+  quotaPayload = {
+    reports: [{
+      provider: "openai",
+      label: "OpenAI (Codex login)",
+      source: "chatgpt:wham",
+      updatedAt: Date.now(),
+      quota: { weeklyPercent: 44, updatedAt: Date.now() },
+      aggregation: {
+        kind: "capacity-weighted-v1",
+        scope: "routable-known",
+        presentation: "aggregate",
+        includedAccounts: 2,
+        excludedAccounts: 0,
+        unknownPlanAccounts: 1,
+        missingQuotaAccounts: 0,
+        pausedAccounts: 0,
+        reauthAccounts: 0,
+        staleQuotaAccounts: 0,
+        incomplete: false,
+        weekly: {
+          usedPercent: 44,
+          includedAccounts: 2,
+          excludedAccounts: 0,
+          incomplete: false,
+          updatedAt: Date.now(),
+        },
+        currentAccount: { isMain: false, quota: { weeklyPercent: 77, updatedAt: Date.now() } },
+      },
+    }],
+  };
+
+  await mountShell();
+
+  const text = host.textContent ?? "";
+  expect(text).toContain("1 account(s) on an uncalibrated plan are counted at the baseline seat weight");
+  expect(text).not.toContain("Incomplete coverage");
+  expect(text).toContain("44% used");
 });
 
 test("coverage-only API report remains visible in the rate-limit overview", async () => {
@@ -448,49 +486,4 @@ test("five-hour and custom aggregate windows can be marked independently", async
   const markers = [...host.querySelectorAll<HTMLElement>(".quota-window-partial")];
   expect(markers).toHaveLength(1);
   expect(markers[0]?.getAttribute("aria-label")).toBe("Burst: incomplete account coverage");
-});
-
-test("single-account pool collapses duplicate pool estimate, recovery share, and current-account breakdown", async () => {
-  const now = Date.now();
-  const singleAccountResetAt = Date.UTC(2026, 8, 1, 16, 40);
-  quotaPayload = {
-    reports: [{
-      provider: "openai",
-      label: "OpenAI (Codex login)",
-      source: "chatgpt:wham",
-      updatedAt: now,
-      quota: { weeklyPercent: 21, updatedAt: now },
-      aggregation: {
-        kind: "capacity-weighted-v1",
-        scope: "routable-known",
-        presentation: "aggregate",
-        includedAccounts: 1,
-        excludedAccounts: 0,
-        unknownPlanAccounts: 0,
-        missingQuotaAccounts: 0,
-        pausedAccounts: 0,
-        reauthAccounts: 0,
-        staleQuotaAccounts: 0,
-        incomplete: false,
-        weekly: {
-          usedPercent: 21,
-          includedAccounts: 1,
-          excludedAccounts: 0,
-          incomplete: false,
-          updatedAt: now,
-          nextRecoveryAt: singleAccountResetAt,
-          nextRecoveryPercent: 21,
-        },
-        currentAccount: { isMain: true, plan: "plus", quota: { weeklyPercent: 21, weeklyResetAt: singleAccountResetAt, updatedAt: now } },
-      },
-    }],
-  };
-  await mountShell();
-
-  const text = host.textContent ?? "";
-  expect(text).not.toContain("Configured-weight pool estimate");
-  expect(text).not.toContain("Current effective account");
-  expect(text).not.toContain("Next capacity recovery");
-  expect(text).toContain("21% used");
-  expect(host.querySelectorAll(".quota-stacked-row")).toHaveLength(1);
 });

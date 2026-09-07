@@ -11,6 +11,21 @@ including `managedIdentityClientId`, the exact scope, `liveModels: false`,
 mutual exclusion with `apiKey`/`apiKeyPool`, and stable errors. API-key mode
 remains supported separately.
 
+## 初回登録時のモデル選択
+
+新しい非 OAuth 接続では、信頼できるモデル一覧の取得が完了するまでモデルの公開を保留します。Models タブの重複しないモデル行が20個以上なら、モデルのスイッチをすべて OFF にします。プロバイダー自体は ACTIVE のままです。実際の認証方式が OAuth または ChatGPT ログインなら既定値を維持します。
+
+初回のプロバイダー登録にのみ適用され、更新、再ログイン、キー交換で既存の選択をリセットしません。初期設定後は Models または以下の CLI で必要なモデルを有効にできます。後から追加されるモデルのポリシーは変更しません。`<model-id>` を一覧の ID に置き換えてください。
+
+```sh
+ocx models live --provider openrouter
+ocx models enable '<model-id>'
+ocx models disable '<model-id>'
+ocx models provider openrouter on
+```
+
+GUI で登録または OAuth ログインが完了すると、Models ページへ移動できる案内が表示されます。CLI はモデル管理コマンドを出力し、JSON にも次の操作を含めます。`--no-wait` は完了ではなくログイン待機を示します。ライブモデルのコマンドを使う前に `ocx start` でプロキシを起動してください。
+
 ## プロバイダー関連のトップレベルフィールド
 
 |フィールド |タイプ |デフォルト |意味 |
@@ -18,8 +33,9 @@ remains supported separately.
 | `providers` | `Record<string, OcxProviderConfig>` | — |プロバイダー名からプロバイダー設定へのマップ。 |
 | `openaiProviderTierVersion?` | `2` |移行によって設定される |単一のオプション対応 OpenAI プロジェクションを完了としてマークします。 |
 | `disabledModels?` | `string[]` | — | Codex catalog と `/v1/models` から非表示にする model。直接の proxy 呼び出しはブロックしません。routed id は一覧から削除されます。account-qualified native id は該当する selector row だけを非表示にし、bare native GPT id は bare row とその model の全 account-selector row を非表示にします。Models ページに表示されるのは bare native 行と routed 行だけです。selector-qualified 行を 1 つだけ非表示にするには、この設定フィールドを直接編集してください。 |
-| `providerContextCaps?` | `Record<string, number>` | `{}` |プロバイダーごとの Codex に表示されるコンテキストの上限。キャップは既知のコンテキスト ウィンドウを下げるだけです。 |
-| `contextCapValue?` | `number` | `350000` |ダッシュボードのコンテキストキャップ コントロールで使用される既定値。「すべてのルーティング済みプロバイダーに適用」がオンになっている場合のみ、変更によってすべてのルーティング済みプロバイダー（`providerContextCaps` エントリがまだないプロバイダーを含む）に値が適用されます。それ以外では各プロバイダーは独自のキャップを保持します。 |
+| `providerContextCaps?` | `Record<string, number>` | `{}` | プロバイダーごとの有効なコンテキスト上限。通常のウィンドウは縮小されます。長いウィンドウに対応したネイティブモデルは、そのモデルが対応する上限まで拡張できます。 |
+| `providerContextCapValues?` | `Record<string, number>` | `{}` | プロバイダーごとに最後に選択した上限。無効にしても保持され、この値だけで上限が有効になることはありません。有効な値が保存済みの値より優先されます。 |
+| `contextCapValue?` | `number` | `350000` | 初回の有効化で使う既定値。再び有効にすると、そのプロバイダーの選択値を復元します。`setAll: true` とともにグローバル値を変更すると、有効な上限だけを更新します。値を指定せずに `setAll: true` を送ると、設定済みの全プロバイダーの上限を現在のグローバル値で有効にします。 |
 | `codexAccounts?` | `CodexAccount[]` | `[]` | ChatGPT/Codex プール アカウントのメタデータは Codex Auth によって管理されます。秘密は`codex-accounts.json`に別に住んでいます。 |
 | `pausedCodexAccountIds?` | `string[]` | `[]` |再開するまでプールの選択から除外されるアカウント (一時停止時のメイン `__main__` アカウントを含む)。 |
 | `codexAccountNamespaces?` | `Record<string, string>` | — | 任意の公開 model selector を保存済み Codex アカウント target に対応付ける任意の map。account-qualified picker row が有効な場合、target が存在する各 selector は Codex picker に個別の `<selector>/<native-openai-model>` row を追加し、各 row はそのアカウントだけを使用します。selector が 1 つでも有効な場合、bare native row は picker で非表示になりますが、明示的に無効化されない限り id は引き続き routing でき、raw `/v1/models` にも表示されます。 |
@@ -73,7 +89,7 @@ account を削除しても mapping は保持され、同じ id を再追加す�
 | `apiKeyTransport?` | `"x-api-key" \| "bearer"` | Anthropic キーのヘッダー スタイル。デフォルトはネイティブ `x-api-key` です。キー認証 `anthropic` プロバイダーにのみ有効です。 |
 | `apiKeyPool?` | `ApiKeyPoolEntry[]` |マルチキープール。 `apiKey` はアクティブなエントリをミラーリングします。各項目には `id`、`key`、オプションの `label`、およびオプションの数値 `addedAt` があります。 |
 | `defaultModel?` | `string` |このプロバイダーが明示的なモデルなしで選択された場合に使用されるモデル。 |
-| `models?` | `string[]` |シード/フォールバック モデルのリスト。 `liveModels: false` では、発見されたモデルはこれらのみです。 |
+| `models?` | `string[]` | 初期／フォールバックモデル一覧。`liveModels: false` で `models` が空でなければ、その後に `retainModels` を追加します。`models` が空または省略されている場合は、設定済みの `defaultModel`、`retainModels` の順に初期一覧を作り、重複 ID は最初の出現だけを残します。 |
 | `liveModels?` | `boolean` |開始/同期時にライブ カタログをフェッチします (デフォルトは `true`)。カスタムプロバイダーは `${baseUrl}/models` を使用します。組み込みはレジストリ URL とフィルターを使用する場合があります。 |
 | `selectedModels?` | `string[]` |検出後のカタログ許可リスト。空でない場合は、それらの ID のみが公開されます。空または省略すると、検出されたすべてのモデルが公開されます。 |
 | `modelDisplayNames?` | `Record<string, string>` | このプロバイダーの正確なネイティブモデル ID をキーにした、永続的な表示専用ラベルです。大文字と小文字は区別されます。ラベルはプロバイダーカタログのメタデータより優先され、認証、アダプター、ルーティング、課金、上流リクエストには影響しません。マップは検出上限と同じ 2,000 件までです。 |
@@ -101,8 +117,8 @@ account を削除しても mapping は保持され、同じ id を再追加す�
 | `xaiResponsesXSearch?` | `boolean` | デフォルトでは無効です。xAI Responses の宛先では、最終的なリクエスト正規化後もライブの `web_search` ツールが残っている場合にのみ、プロバイダーがホストする `x_search` 宣言を追加します。既存の宣言は重複させず、呼び出し元の `tool_choice` / `allowed_tools` セレクターの範囲を拡張することもありません。また、これは `search.xSearch` オプションを持つウェブ検索サイドカーとは別です。 |
 | `modelPreferHostedTools?` | `Record<string,string[]>` | hosted tool namespace を予約する非 forward Responses gateway 向けの完全一致モデル opt-in。現在は `["image_generation"]` のみを受け付けます。一致したモデルは `openai-responses` wire を使い、その hosted tool をサポートする必要があります。競合するクライアント `image_gen` 宣言を除去し、呼び出し元の tool choice を維持するため selector も書き換えます。OpenAI API の仮想 `-pro` モデルでは、まず選択した公開 ID に一致させ、解決後のベース wire-model ID をフォールバックとして使用します。`modelAdapters` は公開 ID、次にベース ID の順に解決し、後者の結果が最終 wire を決めます。未設定のモデルは通常の alias 動作を維持します。 |
 | `annotateEmptyToolOutputs?` | `boolean` | 存在するものの空であるツール結果を、モデルに届く前に短いマーカーへ置き換え、空白の結果が欠落した結果として解釈されないようにします。空文字列とテキストのみのパーツ配列に適用されます。画像、ファイル、暗号化されたパーツには一切手を加えません。組み込みレジストリでは `DeepSeek` のデフォルトが `true` で、それ以外は未設定です。プロバイダーを対象外にするには `false` を設定します。明示的な `false` は、後続の編集でこのフィールドが省略されても保持されます。`PATCH /api/providers?name=<provider>` は `true`、`false`、またはオーバーライドを消去してレジストリのデフォルト動作へ戻すための `null` を受け付けます。 |
-| `reasoningEffortMap?` | `Record<string, string>` |ラベルを推論するためのプロバイダー全体のワイヤ エイリアス。 |
-| `modelReasoningEffortMap?` | `Record<string, Record<string, string>>` |推論ラベルのモデルごとのワイヤ エイリアス。 |
+| `reasoningEffortMap?` | `Record<string, string>` | ラベルを推論するためのプロバイダー全体のワイヤ エイリアス。ラベルを `"__omit__"` にマッピングすると、アップストリームのリクエストから推論フィールドが完全に省略されます（例: ディープ モードに `reasoning_effort` の省略が必要な Ollama モデル向け）。 |
+| `modelReasoningEffortMap?` | `Record<string, Record<string, string>>` | 推論ラベルのモデルごとのワイヤ エイリアス。ラベルを `"__omit__"` にマッピングすると、アップストリームのリクエストから推論フィールドが完全に省略されます。 |
 | `reasoningWireFormat?` | `"gateway-object"` | `reasoning_effort` ではなく `reasoning: { enabled, effort }` を受け取る OpenAI 互換ゲートウェイ用です。ClinePass プリセットが自動設定します。 |
 | `noReasoningModels?` | `string[]` |推論/思考パラメーターを拒否するモデル。 |
 | `noTemperatureModels?` | `string[]` |発信者指定の`temperature`を拒否するモデル。 |
@@ -143,6 +159,8 @@ API キープロバイダーは、リテラルキーまたは環境参照を保�
 
 プライベート/ローカル宛先には `allowPrivateNetwork: true` が必要で、送信プロキシがアクティブな場合は、一致する `NO_PROXY` エントリが必要です。ループバックは自動的に追加されます。 CIDR エントリは解釈されないため、各 LAN ホストを明示的にリストします。マッチャーは、正確なホスト、ドメイン サフィックス、オプションのポート、括弧で囲まれた IPv6、および `*` をサポートします。たとえば、`192.168.1.50` を明示的にリストします。メタデータとリンクローカル宛先はブロックされたままになります。診断リクエストはリダイレクトを拒否し、資格情報が剥奪されたターゲットを報告します。通常のプロバイダー要求のリダイレクト レビューは、この診断ガードとは独立したままになります。
 
+Clash / Surge / Mihomo 利用者向けの fake-IP DNS 例外は 2 種類あり、いずれも DNS の*応答*にのみ適用されます。URL に書かれたリテラルアドレスは引き続き拒否されます。IANA ベンチマーク範囲 `198.18.0.0/15`（IPv4-mapped IPv6 表記を含む）は、そのホストにアウトバウンドプロキシが適用される場合に許可されます。Mihomo の既定 IPv6 fake-IP 範囲 `fdfe:dcba:9876::/48` はより厳しい条件でのみ許可されます。URL スキームに一致するプロキシ変数（`https:` は `HTTPS_PROXY`、`http:` は `HTTP_PROXY`、`ALL_PROXY` は対象外）が設定されていること、ホストが `NO_PROXY` に一致しないことが必要で、その場合リクエストはそのプロキシに明示的に固定されます。それ以外の ULA、隣接プレフィックス、実際のプライベート応答と混在した fake-IP 応答には引き続き `allowPrivateNetwork: true` が必要です。プロバイダー保存時の検証には IPv6 例外は適用されません。
+
 ## Codexアカウントプール
 
 pool アカウントの追加と quota 更新はダッシュボードの **Codex Auth** ページで処理してください。設定には secret で
@@ -174,13 +192,13 @@ affinity を維持します。これらの戦略は provider enforcement を回�
 
 |キー |タイプ |デフォルト |説明 |
 | --- | --- | --- | --- |
-| `anthropicAccountPool.enabled?` | `boolean` | `false` |スティッキー アフィニティと 429 クールダウン フェイルオーバーを有効にします。 |
+| `anthropicAccountPool.enabled?` | `boolean` | `false` | スティッキー セッション アフィニティと使用量に基づく新規セッション選択を有効にします。このキーを省略すると、使用可能なアカウントが 2 つ以上存在する場合にリアクティブな 429 フェイルオーバーが有効になります。明示的な `false` は、プールとそのフェイルオーバーの両方を無効にします。 |
 | `anthropicAccountPool.autoSwitchThreshold?` | `number` | `80` |新しいセッションでは、アクティブなアカウントがこのしきい値に達すると、設定した期間で既知のキャッシュ使用量が最も低いアカウントを選択します。 `0` はクォータ選択を無効にします。 |
 | `anthropicAccountPool.strategy?` | `"quota" \| "round-robin" \| "fill-first"` | `"quota"` |新しいセッション戦略。`quota` は `quotaWindow` で指定した期間（既定は 5 時間足）でアカウントを順位付けし、`fill-first` も同じ期間で使い切りのしきい値を判定します。 |
 | `anthropicAccountPool.quotaWindow?` | `"five-hour" \| "weekly" \| "max-utilization"` | `"five-hour"` |使用量ベースのアカウント選択で使う、プロバイダー報告のキャッシュ済み使用率です。`five-hour` は従来の動作を維持します。`weekly` は週次使用量を使い、他に対象アカウントが残る間だけ 5 時間使用量が上限に達したアカウントを除外し、残らない場合はそれらへフォールバックします。`max-utilization` は判明している値のうち最も高いものを使うため、週次使用量が未取得でも 5 時間使用量を利用できます。どちらも不明なら unknown の順位付けに従います。既知の使用量は unknown より先ですが、対象がすべて unknown でも対象順の先頭を選択します。記載した 5 時間使用量による同点判定後も完全に同点なら、対象順を維持します。正常な affinity セッションを先回りして再配置することはありません。新規セッションの割り当てと、対象となる 429 代替後のルーティング復旧では、`quota` はこの期間で対象候補を直接順位付けし、`fill-first` はこの期間のしきい値と上限到達ルールを使って安定順に進み、`round-robin` はこの設定を無視します。クールダウン、フェイルオーバー上限、再認証の適格性は別のローカル状態です。アカウント別の週次使用量は、ダッシュボードのプロバイダーページで取得した後にのみ利用できます。 |
 | `anthropicAccountPool.stickyLimit?` | `number` | `1` |成功した新しいセッションのバインドは 1 つのラウンドロビン選択で保持されます。範囲は 1 ～ 100。 |
 
-有効にすると、429 レコードは `Retry-After` またはデフォルトのバックオフからの制限されたクールダウンを記録し、リクエスト内でローテーションする可能性があります。アフィニティはプロセスローカルであり、サイズ制限があります。資格情報 401/403 は、アカウントに再認証が必要であることをマークします。すべての対象となるアカウントが冷却されている場合、クライアントは、既知の場合、認証エラーではなく、`Retry-After` を含む 429 を受け取ります。
+リアクティブ フェイルオーバーが有効な場合、429 レコードは `Retry-After` またはデフォルトのバックオフからの制限されたクールダウンを記録し、リクエスト内でローテーションする可能性があります。アフィニティはプロセスローカルであり、サイズ制限があります。資格情報 401/403 は、アカウントに再認証が必要であることをマークします。すべての対象となるアカウントが冷却されている場合、クライアントは、既知の場合、認証エラーではなく、`Retry-After` を含む 429 を受け取ります。
 
 :::caution[実験的]
 Anthropic アカウント ポリシーのリスクを理解していない限り、これは無効のままにしてください。不明な場合は、`ocx account use anthropic <id>` を手動で切り替えることをお勧めします。
@@ -346,7 +364,16 @@ Vercel AI Gateway は、1 つのモデルを複数の基盤となる推論プロ
 
 ## 静的モデルのホワイトリスト
 
-`models` のみを公開するように `liveModels: false` を設定します。 `models` が空であるか省略されている場合、プロバイダーはルーティングされたモデルを公開しません。ライブ ディスカバリは、キャッシュする前に 4 MiB または 2,000 を超える生のモデル行を拒否します。組み込みのプリセットは下限を使用し、チャットに適した行にフィルターをかけることができます。サイズが大きすぎる、または形式が正しくない結果は、古い/構成されたフォールバックに続きます。ゼロに適格な有効な結果は引き続き権威を持ち、暗黙的に置き換えられたり切り捨てられたりすることはありません。
+`liveModels: false` で `models` が空または省略されている場合、初期一覧には設定済みの
+`defaultModel`、`retainModels` の順で ID を追加し、重複は最初の出現だけを残します。
+空でない `models` が明示されている場合は、`models`、`retainModels` の順になり、別の
+`defaultModel` を暗黙に追加しません。そのモデルも `models` または `retainModels` に明示すれば
+含められます。どのフィールドにも ID がなければ初期一覧は空です。この順序は最終的なピッカーの
+表示順を保証しません。`selectedModels`、`disabledModels`、プロバイダーの無効化は引き続き適用されます。
+`authMode: "forward"` は別の分岐を維持し、このルーティング用の静的一覧を使いません。
+これらの規則はライブ検出失敗時のフォールバックを変更しません。
+
+ライブ ディスカバリは、キャッシュする前に 4 MiB または 2,000 を超える生のモデル行を拒否します。組み込みのプリセットは下限を使用し、チャットに適した行にフィルターをかけることができます。サイズが大きすぎる、または形式が正しくない結果は、古い/構成されたフォールバックに続きます。ゼロに適格な有効な結果は引き続き権威を持ち、暗黙的に置き換えられたり切り捨てられたりすることはありません。
 
 検出を実行する必要があるが、選択した ID のみが Codex および `/v1/models` に表示される必要がある場合は、`selectedModels` を使用します。ダッシュボードには、後で許可リストを変更できるように、検出された完全なリストが保持されます。
 

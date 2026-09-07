@@ -45,3 +45,4 @@ Tailscale 이름 해석: 사용자가 말한 "macbook"과 "desktop"은 SSH 별�
 - 원격 호스트의 사용자 자격증명이나 `~/.opencodex` 내부 계정 데이터 변경.
 - 로컬 전체 스위트 실행(`bun run test`) — 금지돼 있다.
 - `dev`/`main`/`preview` 직접 푸시 — 전부 PR 경로.
+

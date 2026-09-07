@@ -365,6 +365,77 @@ async function snapshotOnDiskMatches(path: string, payload: string, payloadBytes
   }
 }
 const spillCounters = { writes: 0, writeFailures: 0, readFailures: 0 };
+
+export type ResponseSpillWriteFailureCode =
+  | "EACLRETRYEXHAUSTED"
+  | "ETIMEDOUT"
+  | "EACCES"
+  | "ENOSPC"
+  | "EFBIG"
+  | "EIO"
+  | "ECAPACITY"
+  | "ELOOP"
+  | "EUNKNOWN";
+
+export type ResponseSpillWriteStatus = "initial" | "healthy" | "degraded";
+
+interface ResponseSpillWriteHealth {
+  consecutiveFailures: number;
+  lastFailureCode: ResponseSpillWriteFailureCode | null;
+  lastFailureAt: number | null;
+  lastSuccessAt: number | null;
+}
+
+const spillWriteHealth: ResponseSpillWriteHealth = {
+  consecutiveFailures: 0,
+  lastFailureCode: null,
+  lastFailureAt: null,
+  lastSuccessAt: null,
+};
+
+/**
+ * Collapse filesystem/runtime errors into a fixed privacy-safe diagnostic union.
+ * Messages and paths are deliberately ignored: this projection is returned by the
+ * authenticated memory endpoint, and a nested `cause` can contain a username or
+ * workspace path even when the public wrapper does not.
+ */
+function classifySpillWriteFailure(error: unknown): ResponseSpillWriteFailureCode {
+  let cursor = error;
+  for (let depth = 0; depth < 4 && cursor && typeof cursor === "object"; depth += 1) {
+    const record = cursor as { code?: unknown; cause?: unknown };
+    const code = typeof record.code === "string" ? record.code.toUpperCase() : "";
+    switch (code) {
+      case "EACLRETRYEXHAUSTED": return "EACLRETRYEXHAUSTED";
+      case "ETIMEDOUT": return "ETIMEDOUT";
+      case "EACCES":
+      case "EPERM": return "EACCES";
+      case "ENOSPC":
+      case "EDQUOT": return "ENOSPC";
+      case "EFBIG": return "EFBIG";
+      case "EIO": return "EIO";
+      case "ECAPACITY": return "ECAPACITY";
+      case "ELOOP": return "ELOOP";
+    }
+    cursor = record.cause;
+  }
+  return "EUNKNOWN";
+}
+
+function noteSpillWriteSuccess(): void {
+  spillCounters.writes += 1;
+  spillWriteHealth.consecutiveFailures = 0;
+  spillWriteHealth.lastSuccessAt = now();
+}
+
+function noteSpillWriteFailure(
+  error: unknown,
+  override?: ResponseSpillWriteFailureCode,
+): void {
+  spillCounters.writeFailures += 1;
+  spillWriteHealth.consecutiveFailures += 1;
+  spillWriteHealth.lastFailureCode = override ?? classifySpillWriteFailure(error);
+  spillWriteHealth.lastFailureAt = now();
+}
 /**
  * Admission-boundary observability (test-visible). directSpills: oversized
  * candidates routed straight to durable spill without a resident stay or
@@ -594,6 +665,7 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
   let ref: ResponseSpillRef | null = null;
   let committed = false;
   let rejectedOversized = false;
+  let exhaustedAclRetry = false;
   try {
     if (legacyRetirementBlocked) return;
     const state = spillPayloadForResident(job.id, candidate);
@@ -605,7 +677,7 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
       if (legacyRetirementBlocked || states.get(job.id) !== candidate || job.cancelled) return false;
       committed = swapResidentForSpill(job.id, candidate, published);
       if (committed) {
-        spillCounters.writes += 1;
+        noteSpillWriteSuccess();
         if (job.directAdmission) admissionCounters.directSpills += 1;
         deferSupersededSpill(job.supersededSpill);
       }
@@ -621,12 +693,17 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
       if (!isAclTimeout(error)) throw error;
       // The ACL helper permits exactly one caller-owned recovery budget. The resident generation
       // remains replayable during both attempts, so a transient timeout never becomes a tombstone.
-      ref = await writeResponseSpillDurablyAsync(job.id, state, {
-        aclBudgetMs: responseSpillAsyncAclAttemptBudgetMs(),
-        retryTimedOutOnce: true,
-        publicationControl: job.publicationControl,
-        commitUnderLock,
-      });
+      try {
+        ref = await writeResponseSpillDurablyAsync(job.id, state, {
+          aclBudgetMs: responseSpillAsyncAclAttemptBudgetMs(),
+          retryTimedOutOnce: true,
+          publicationControl: job.publicationControl,
+          commitUnderLock,
+        });
+      } catch (retryError) {
+        exhaustedAclRetry = isAclTimeout(retryError);
+        throw retryError;
+      }
     }
     if (committed) ref = null;
   } catch (error) {
@@ -634,7 +711,7 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
     if (rejectedOversized && job.directAdmission) admissionCounters.oversizedDrops += 1;
     if (isRetryableSpillPublicationError(error) && !rejectedOversized) return;
     if (states.get(job.id) === candidate && !job.cancelled) {
-      spillCounters.writeFailures += 1;
+      noteSpillWriteFailure(error, exhaustedAclRetry ? "EACLRETRYEXHAUSTED" : undefined);
       replaceWithSpillFailure(job.id, candidate);
       deferSupersededSpill(job.supersededSpill);
     }
@@ -661,7 +738,7 @@ function queuePendingResponseSpill(
   if (legacyRetirementBlocked) return;
   const inheritedSpill = cancelPendingResponseSpill(id) ?? options.supersededSpill;
   if (pendingResponseSpillBytes + candidate.sizeBytes > MAX_PENDING_RESPONSE_SPILL_BYTES) {
-    spillCounters.writeFailures += 1;
+    noteSpillWriteFailure(null, "ECAPACITY");
     replaceWithSpillFailure(id, candidate);
     deferSupersededSpill(inheritedSpill);
     return;
@@ -679,7 +756,7 @@ function queuePendingResponseSpill(
   if (accountedResponseSpillBytes() + footprint + inheritedBytes > spillByteCap()) {
     enforceSpilledResponseBudget();
     if (accountedResponseSpillBytes() + footprint + inheritedBytes > spillByteCap()) {
-      spillCounters.writeFailures += 1;
+      noteSpillWriteFailure(null, "ECAPACITY");
       replaceWithSpillFailure(id, candidate);
       deferSupersededSpill(inheritedSpill);
       return;
@@ -817,7 +894,7 @@ function installShutdownFallbackSpill(
       enforceSpilledResponseBudget();
       if (accountedResponseSpillBytes() + supersededBytes > spillByteCap()) {
         if (states.get(job.id) === candidate) {
-          spillCounters.writeFailures += 1;
+          noteSpillWriteFailure(null, "ECAPACITY");
           replaceWithSpillFailure(job.id, candidate);
           deferSupersededSpill(job.supersededSpill);
         }
@@ -839,7 +916,7 @@ function installShutdownFallbackSpill(
     });
     if (installed) {
       ref = null;
-      spillCounters.writes += 1;
+      noteSpillWriteSuccess();
       if (job.directAdmission) admissionCounters.directSpills += 1;
       deferSupersededSpill(job.supersededSpill);
     }
@@ -848,7 +925,7 @@ function installShutdownFallbackSpill(
     if (rejectedOversized && job.directAdmission) admissionCounters.oversizedDrops += 1;
     if (isRetryableSpillPublicationError(error) && !rejectedOversized) throw error;
     if (states.get(job.id) === candidate) {
-      spillCounters.writeFailures += 1;
+      noteSpillWriteFailure(error);
       replaceWithSpillFailure(job.id, candidate);
       deferSupersededSpill(job.supersededSpill);
     }
@@ -861,9 +938,10 @@ function installShutdownFallbackSpill(
 function terminalizeShutdownFallbackCandidate(
   job: PendingResponseSpill,
   candidate: ResidentResponseState,
+  failureCode: ResponseSpillWriteFailureCode = "ETIMEDOUT",
 ): void {
   if (states.get(job.id) !== candidate) return;
-  spillCounters.writeFailures += 1;
+  noteSpillWriteFailure(null, failureCode);
   replaceWithSpillFailure(job.id, candidate);
   deferSupersededSpill(job.supersededSpill);
 }
@@ -912,11 +990,11 @@ function stopAtShutdownTerminalizationPassLimit(
   failures.push(Object.assign(new Error("Response spill shutdown terminalization pass limit exceeded"), { code: "ELOOP" }));
   supersedeShutdownFallbackBatch(pending, failures);
   for (const { job, candidate } of pending) {
-    terminalizeShutdownFallbackCandidate(job, candidate);
+    terminalizeShutdownFallbackCandidate(job, candidate, "ELOOP");
   }
   for (const [id, state] of [...states]) {
     if (state.kind !== "resident") continue;
-    spillCounters.writeFailures += 1;
+    noteSpillWriteFailure(null, "ELOOP");
     replaceWithSpillFailure(id, state);
   }
   recomputeOldestResident();
@@ -1252,7 +1330,7 @@ function replaceSpillEntryAtomically(
       },
     });
     if (!installed) return;
-    spillCounters.writes += 1;
+    noteSpillWriteSuccess();
     // The old generation is NOT unlinked here (review C1-1): the new stub is
     // only durable once the debounced snapshot flushes — a crash before that
     // reloads the OLD stub, which must still find its file. Queue the unlink;
@@ -1266,7 +1344,7 @@ function replaceSpillEntryAtomically(
       if (replaceMapEntry(id, candidate, expected)) deferSupersededSpill(expected.spill);
       return;
     }
-    spillCounters.writeFailures += 1;
+    noteSpillWriteFailure(error);
     // deferSpillUnlink: the durable snapshot may still reference the old
     // generation; deleting it now would strand the old stub after a crash.
     replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
@@ -1376,7 +1454,7 @@ function admitOversizedCandidate(
       },
     });
     if (!installed) return;
-    spillCounters.writes += 1;
+    noteSpillWriteSuccess();
     admissionCounters.directSpills += 1;
     if (expected?.kind === "spill") {
       // Same deferred-unlink rule as replaceSpillEntryAtomically: the new stub
@@ -1393,7 +1471,7 @@ function admitOversizedCandidate(
       return;
     }
     if (rejectedOversized) admissionCounters.oversizedDrops += 1;
-    spillCounters.writeFailures += 1;
+    noteSpillWriteFailure(error);
     replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
   }
 }
@@ -1418,15 +1496,6 @@ function now(): number {
 
 function snapshotPath(): string {
   return join(getConfigDir(), "responses-state.json");
-}
-
-interface LegacySnapshotState {
-  createdAt?: unknown;
-  clientThreadId?: unknown;
-  items?: unknown;
-  providers?: OcxProviderContinuationState;
-  conversationId?: unknown;
-  cursorCheckpointUsable?: unknown;
 }
 
 function isSpillRef(value: unknown): value is ResponseSpillRef {
@@ -2577,7 +2646,7 @@ function enforceSpilledResponseBudget(): number {
     // order must not depend on the host locale.
     .sort((a, b) => a[1].createdAt - b[1].createdAt
       || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  for (const [id, entry] of spilled) {
+  for (const [id] of spilled) {
     if (spilledBytes <= spillByteCap()) break;
     const beforeDelete = spilledBytes;
     deleteEntry(id);
@@ -2642,10 +2711,10 @@ function pruneResponses(at = now()): void {
           return installed;
         },
       });
-      if (installed) spillCounters.writes += 1;
+      if (installed) noteSpillWriteSuccess();
     } catch (error) {
       if (isRetryableSpillPublicationError(error)) break;
-      spillCounters.writeFailures += 1;
+      noteSpillWriteFailure(error);
       replaceWithSpillFailure(oldestId, entry);
     }
   }
@@ -2782,10 +2851,10 @@ export function evictOldestResponseContinuationForBudget(): number {
         return installed;
       },
     });
-    if (installed) spillCounters.writes += 1;
+    if (installed) noteSpillWriteSuccess();
   } catch (error) {
     if (isRetryableSpillPublicationError(error)) return 0;
-    spillCounters.writeFailures += 1;
+    noteSpillWriteFailure(error);
     replaceWithSpillFailure(id, entry);
   }
   schedulePersist();
@@ -3074,6 +3143,11 @@ export interface ResponseStateMetrics {
   oldestAgeMs: number;
   spillWrites: number;
   spillWriteFailures: number;
+  spillWriteStatus: ResponseSpillWriteStatus;
+  spillWriteConsecutiveFailures: number;
+  spillLastWriteFailureCode: ResponseSpillWriteFailureCode | null;
+  spillLastWriteFailureAt: number | null;
+  spillLastWriteSuccessAt: number | null;
   spillReadFailures: number;
   replayScopeMismatchDrops: number;
 }
@@ -3117,6 +3191,15 @@ export function responseStateMetrics(): ResponseStateMetrics {
     oldestAgeMs: states.size > 0 ? at - oldestCreatedAt : 0,
     spillWrites: spillCounters.writes,
     spillWriteFailures: spillCounters.writeFailures,
+    spillWriteStatus: spillWriteHealth.consecutiveFailures > 0
+      ? "degraded"
+      : spillWriteHealth.lastSuccessAt !== null
+        ? "healthy"
+        : "initial",
+    spillWriteConsecutiveFailures: spillWriteHealth.consecutiveFailures,
+    spillLastWriteFailureCode: spillWriteHealth.lastFailureCode,
+    spillLastWriteFailureAt: spillWriteHealth.lastFailureAt,
+    spillLastWriteSuccessAt: spillWriteHealth.lastSuccessAt,
     spillReadFailures: spillCounters.readFailures,
     replayScopeMismatchDrops,
   };
@@ -3287,6 +3370,10 @@ export function clearResponseStateMemoryForTests(): void {
   spillCounters.writes = 0;
   spillCounters.writeFailures = 0;
   spillCounters.readFailures = 0;
+  spillWriteHealth.consecutiveFailures = 0;
+  spillWriteHealth.lastFailureCode = null;
+  spillWriteHealth.lastFailureAt = null;
+  spillWriteHealth.lastSuccessAt = null;
   replayScopeMismatchDrops = 0;
   replayOverlapSkips = 0;
   persistAttemptHookForTests = null;

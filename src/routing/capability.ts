@@ -10,7 +10,7 @@
  * how that affects eligibility.
  */
 
-import { modelInList, type OcxConfig } from "../types";
+import { modelInList, type OcxConfig, type OcxProviderConfig } from "../types";
 import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
 import { serviceTierSupportForModel } from "../providers/service-tier";
 import { PROVIDER_REGISTRY } from "../providers/registry";
@@ -149,14 +149,20 @@ function localRemoteEvidence(baseUrl: string | undefined): Pick<RouteCapabilityE
  * Assemble canonical capability evidence for one `provider/model` candidate.
  * Sources (in priority order): provider config maps, provider registry hints,
  * cached Codex catalog row, native-model metadata.
+ * Policy assembly supplies the resolved provider so every transport capability
+ * describes the destination dispatch will use. Its maps already include applicable
+ * registry defaults; name-only registry fallbacks must not override that authority.
  */
 export function candidateCapabilityEvidence(
   config: OcxConfig,
   providerName: string,
   modelId: string,
+  resolvedProvider?: OcxProviderConfig,
 ): RouteCapabilityEvidence {
-  const provider = config.providers[providerName];
-  const registryEntry = PROVIDER_REGISTRY.find(entry => entry.id === providerName);
+  const provider = resolvedProvider ?? config.providers[providerName];
+  const registryEntry = resolvedProvider === undefined
+    ? PROVIDER_REGISTRY.find(entry => entry.id === providerName)
+    : undefined;
   const catalogRow = cachedCatalogModels().find(model => model.provider === providerName && model.id === modelId);
   const isNative = providerName === OPENAI_CODEX_PROVIDER_ID && !modelId.includes("/");
 
@@ -213,9 +219,19 @@ export function candidateCapabilityEvidence(
     || provider?.parallelToolCalls === true
     || undefined;
 
-  const reasoningEfforts = modelRecordValue(provider?.modelReasoningEfforts, modelId)
-    ?? modelRecordValue(registryEntry?.modelReasoningEfforts, modelId)
-    ?? (isNative ? nativeReasoningEfforts(modelId) : undefined);
+  // `noReasoningModels` is a POSITIVE statement that this model has no effort control, and
+  // every other consumer already reads it that way: configuredReasoningEfforts
+  // (reasoning-effort.ts), supportedLadderFor (server/effort-policy.ts) and the
+  // compatibility fingerprint (routing/compatibility/behavior.ts) all check it first.
+  // Routing evidence did not, which was harmless only while no registry ladder existed to
+  // contradict it — a provider-level ladder would otherwise report supported rungs for a
+  // model the operator explicitly disabled reasoning for.
+  const reasoningEfforts = modelInList(provider?.noReasoningModels, modelId)
+    ? []
+    : modelRecordValue(provider?.modelReasoningEfforts, modelId)
+      ?? modelRecordValue(registryEntry?.modelReasoningEfforts, modelId)
+      ?? provider?.reasoningEfforts
+      ?? (isNative ? nativeReasoningEfforts(modelId) : undefined);
 
   const tierSupport = provider
     ? serviceTierSupportForModel(provider, modelId, providerName)
@@ -236,7 +252,11 @@ export function candidateCapabilityEvidence(
     ...(typeof contextWindow === "number" ? { contextWindow } : {}),
     ...(typeof image === "boolean" ? { image } : {}),
     ...(typeof tools === "boolean" ? { tools } : {}),
-    ...(reasoningEfforts !== undefined && reasoningEfforts.length > 0 ? { reasoningEfforts } : {}),
+    // A DEFINED but empty ladder is known-negative evidence and must survive. Dropping it
+    // made the evaluator take its `!Array.isArray` branch and record "unknown", which is
+    // permissive — "we could not tell" rather than "this model has no effort control" — so
+    // an explicitly disabled model could still satisfy a reasoning-effort requirement.
+    ...(reasoningEfforts !== undefined ? { reasoningEfforts } : {}),
     ...(serviceTier !== "unknown" ? { serviceTier } : {}),
     ...localRemote,
     ...(typeof encryptedCodexTasks === "boolean" ? { encryptedCodexTasks } : {}),

@@ -7,8 +7,8 @@ export interface AccountQuota {
   weeklyResetAt?: number;
   fiveHourResetAt?: number;
   shortResetAt?: number;
-  monthlyResetAt?: number;
   shortWindowSeconds?: number;
+  monthlyResetAt?: number;
   customWindows?: { label: string; percent: number; resetAt?: number }[];
   creditsUsd?: {
     used: number;
@@ -20,6 +20,14 @@ export interface AccountQuota {
   };
   resetCredits?: number;
   updatedAt: number;
+}
+
+export function quotaAutoRefreshAvailability(quota: AccountQuota | null) {
+  return {
+    fiveHourAvailable: quota?.shortWindowSeconds === 5 * 60 * 60
+      && typeof quota.shortResetAt === "number",
+    weeklyAvailable: typeof quota?.weeklyResetAt === "number",
+  };
 }
 
 export function isThirtyDayOnlyPlan(plan: string | null | undefined): boolean {

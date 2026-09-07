@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { registerFork } from "../../src/fork/register";
+import { repoRoot as resolveRepoRoot } from "../helpers/repo-root";
 
 const PROTECTED = [
   "src/router.ts",
@@ -10,7 +10,7 @@ const PROTECTED = [
   "src/server/responses/core.ts",
 ] as const;
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const repoRoot = resolveRepoRoot();
 const IMPORT_RE =
   /^\s*import\s+(?!type\b)[^;]*?from\s+["']([^"']+)["']|^\s*import\s+["']([^"']+)["']|^\s*export\s+(?!type\b)[^;]*?from\s+["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']\s*\)/gm;
 

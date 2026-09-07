@@ -4,7 +4,7 @@ description: Replit AI Integrations üzerinden OpenAI Chat ve Anthropic Messages
 ---
 
 **Replit ağ geçidi eşlikçisi**, **Replit dağıtımınızın içinde** çalışan
-[`integrations/replit-gateway`](https://github.com/lidge-jun/opencodex/tree/dev/integrations/replit-gateway)
+[`integrations/replit-gateway`](https://github.com/yansigit/opencodex/tree/dev/integrations/replit-gateway)
 paketindeki kullanıcıya ait bir Bun servisidir. Repl ortamındaki Replit AI Integrations kimlik
 bilgilerini okur ve opencodex'e iki yerel tel uç noktası sunar:
 
@@ -37,7 +37,7 @@ opencodex `AI_INTEGRATIONS_*` sırlarını asla almaz. opencodex'in yerelde sakl
 - Pano sihirbazı veya CLI kurulumu için çalışan opencodex vekil sunucusu (`ocx start`).
 
 Dağıtım ve yapılandırma için
-[paket README](https://github.com/lidge-jun/opencodex/blob/dev/integrations/replit-gateway/README.md).
+[paket README](https://github.com/yansigit/opencodex/blob/dev/integrations/replit-gateway/README.md).
 
 ## Ağ geçidini dağıtma (özet)
 
@@ -172,14 +172,14 @@ Replit eşlikçisi **bugün bu çubuğu karşılamıyor**.
 | `AI_INTEGRATIONS_*` adları | **Doğrulanmamış gözlem**; canary bekliyor |
 | Şartlar ve tüzel kişi | ToS — **Replit, Inc.**; Pro/Enterprise: Commercial Agreement |
 | Platform dışı yönlendirme | **Alınmadı** |
-| Adlandırılmış bakım sahibi | **opencodex:** [@lidge-jun](https://github.com/lidge-jun), [@Ingwannu](https://github.com/Ingwannu) ([`MAINTAINERS.md`](https://github.com/lidge-jun/opencodex/blob/main/MAINTAINERS.md)). **Replit:** bu iş akışının ortağı değil. |
+| Adlandırılmış bakım sahibi | **opencodex:** [@lidge-jun](https://github.com/lidge-jun), [@Ingwannu](https://github.com/Ingwannu) ([`MAINTAINERS.md`](https://github.com/yansigit/opencodex/blob/main/MAINTAINERS.md)). **Replit:** bu iş akışının ortağı değil. |
 | Atıflanabilir doğrulama tarihi | **2026-08-22** |
 
 **Kayıt defteri yükseltmesi engelli.** `replit`/`replit-anthropic` `src/providers/registry.ts` içinde yok.
 
 ## Ayrıca bakın
 
-- [Paket README](https://github.com/lidge-jun/opencodex/blob/dev/integrations/replit-gateway/README.md)
-- [Tasarım özelliği](https://github.com/lidge-jun/opencodex/blob/dev/docs/superpowers/specs/2026-08-22-replit-gateway-design.md)
+- [Paket README](https://github.com/yansigit/opencodex/blob/dev/integrations/replit-gateway/README.md)
+- [Tasarım özelliği](https://github.com/yansigit/opencodex/blob/dev/docs/superpowers/specs/2026-08-22-replit-gateway-design.md)
 - [Sağlayıcılar](/guides/providers/)
 - [Web panosu](/guides/web-dashboard/)

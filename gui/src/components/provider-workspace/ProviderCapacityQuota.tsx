@@ -8,6 +8,7 @@ import { useT, useI18n, type Locale } from "../../i18n/shared";
 import {
   accountQuotaFromReport,
   capacityAggregationFromReport,
+  observedAtFromReport,
   type CapacityWindowView,
   type ProviderQuotaReportView,
 } from "../../provider-workspace/report";
@@ -45,13 +46,10 @@ export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuo
   const { locale } = useI18n();
   const aggregation = capacityAggregationFromReport(report);
   const primaryQuota = accountQuotaFromReport(report);
+  // Only a passively observed row carries this; see ProviderUsage for the same rule.
+  const observedAt = observedAtFromReport(report);
   const credits = primaryQuota?.creditsUsd;
   const showsAggregate = aggregation?.presentation === "aggregate";
-  const showsPoolBreakdown = Boolean(
-    showsAggregate
-    && aggregation
-    && aggregation.includedAccounts + aggregation.excludedAccounts > 1,
-  );
   const incompleteWindowKeys = new Set<QuotaWindowKey>();
   const incompleteCustomWindowLabels = new Set<string>();
   if (showsAggregate && aggregation) {
@@ -62,7 +60,7 @@ export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuo
       if (window.incomplete) incompleteCustomWindowLabels.add(window.label);
     }
   }
-  const recoveryRows: Array<{ key: number; label: string; window: CapacityWindowView }> = showsPoolBreakdown && aggregation ? [
+  const recoveryRows: Array<{ key: number; label: string; window: CapacityWindowView }> = showsAggregate && aggregation ? [
     ...(aggregation.fiveHour ? [{ key: 0, label: t("codexAuth.fiveHour"), window: aggregation.fiveHour }] : []),
     ...(aggregation.weekly ? [{ key: 1, label: t("codexAuth.weekly"), window: aggregation.weekly }] : []),
     ...(aggregation.monthly ? [{ key: 2, label: t("codexAuth.monthly"), window: aggregation.monthly }] : []),
@@ -89,7 +87,7 @@ export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuo
 
   return (
     <>
-      {showsPoolBreakdown && <div className="pws-capacity-label">{t("pws.capacity.estimate")}</div>}
+      {showsAggregate && <div className="pws-capacity-label">{t("pws.capacity.estimate")}</div>}
       {(primaryQuota || pending) && (
         <QuotaBars
           quota={primaryQuota}
@@ -97,6 +95,7 @@ export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuo
           t={t}
           layout="stacked"
           pending={pending}
+          {...(observedAt !== undefined ? { observedAt } : {})}
           incompleteWindowKeys={showsAggregate ? incompleteWindowKeys : undefined}
           incompleteCustomWindowLabels={showsAggregate ? incompleteCustomWindowLabels : undefined}
         />
@@ -123,7 +122,7 @@ export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuo
                 </div>]
               : [];
           })}
-          {showsPoolBreakdown && aggregation && aggregation.currentAccount?.quota && (
+          {showsAggregate && aggregation && aggregation.currentAccount?.quota && (
             <div className="pws-capacity-current">
               <span className="pws-capacity-label">
                 {t("pws.capacity.currentAccount")}

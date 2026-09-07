@@ -31,3 +31,4 @@ Three live defects found and fixed during dogfood (each with a regression test):
 - 596bb02f3 runtimeRole=hub refused ocx start (state read).
 - 19eb6a4bd hub role ran local client syncs on start (readyz failed + grok rewrite).
 - f98081fbf connect refused to commit on a fresh machine with no config.json.
+

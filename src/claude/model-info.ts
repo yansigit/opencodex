@@ -111,23 +111,51 @@ export function buildAnthropicModelInfos(
   aliasForRoute: (provider: string, modelId: string) => string = desktop3pAlias,
   nativeContextCap?: NativeContextLimitsInput,
   fastMode?: boolean,
+  // Presence is the feature gate: the caller passes undefined when `fastRows` is off, so a
+  // default install publishes nothing. The predicate answers ELIGIBILITY, not enablement.
+  fastRows?: (model: CatalogModel | { provider: string; id: string }) => boolean,
 ): AnthropicModelInfo[] {
   const out: AnthropicModelInfo[] = [];
   const seen = new Set<string>();
+  // Every id the loops below will really emit, computed BEFORE either runs. `seen` alone is
+  // not enough: it grows as they run, so whether a synthetic id collided with a real one
+  // would depend on iteration order. With both `foo` and a real `foo--fast` in the roster,
+  // the synthetic id for `foo` IS the real model's id, and whichever ran first would win it.
+  const realDiscoveryIds = new Set<string>([
+    ...nativeSlugs.map(slug => (
+      idStyle === "readable" ? claudeCodeNativeAlias(slug) : aliasForRoute("native", slug)
+    )),
+    ...routedModels.map(m => {
+      // The same asymmetry the routed loop applies: readable uses the LISTED id, so a
+      // fastMode-rewritten Cursor row is counted under the id it is really published as,
+      // while Desktop 3P hashes the RAW id.
+      const listed = fastMode === true && m.provider === "cursor" && idStyle === "readable"
+        ? cursorFastIdFor(m.id) ?? m.id
+        : m.id;
+      return idStyle === "readable"
+        ? claudeCodeAlias(m.provider, listed)
+        : aliasForRoute(m.provider, m.id);
+    }),
+  ]);
   // [1m] picker variant (devlog 260712 B1): Claude Code accounts exactly 1M for ids
   // carrying the marker (2.1.207 binary: /\[1m\]/i → 1e6, compaction preserved), so
   // ONLY models with an authoritative >=1M window get a second selectable row —
   // the auto-context widening that let a 372K route carry the marker (and be
   // over-filled) is the #854 defect and does not come back. Guards (audit R1#11):
   // same dedupe set, never double-suffix.
-  const push1mVariant = (base: AnthropicModelInfo, contextWindow: number | undefined, maxInputTokens?: number) => {
+  const push1mVariant = (
+    base: AnthropicModelInfo,
+    contextWindow: number | undefined,
+    maxInputTokens?: number,
+    selectorId?: string,
+  ) => {
     // The [1m] marker makes Claude Code account 1e6 tokens for the row, so it
     // may only name models whose AUTHORITATIVE effective window is >= 1M —
     // never the auto-context widening, which would mark a 372K route and have
     // Claude Code over-fill it (the #854 defect).
     if (contextWindow === undefined || contextWindow < ONE_MILLION) return;
     if (base.id.includes("[1m]")) return;
-    const id = `${base.id}[1m]`;
+    const id = selectorId ?? `${base.id}[1m]`;
     if (seen.has(id)) return;
     seen.add(id);
     // The marker fixes Claude Code's accounting at 1e6, but a model may accept less input
@@ -140,6 +168,21 @@ export function buildAnthropicModelInfos(
       : ONE_MILLION;
     out.push({ ...base, id, display_name: `${base.display_name} · 1M`, max_input_tokens: advertised });
   };
+  /**
+   * Publish a Fast sibling beside a row, following `push1mVariant` rather than the
+   * `fastMode` rewrite below: `fastMode` is a global switch with no per-request choice, so
+   * it REPLACES the listed id, while a selector has to leave the default pickable beside it.
+   *
+   * Because it only ADDS a row, it is safe for the Desktop 3P hashed style too — the
+   * exclusion `fastMode` needs exists because rewriting a hash strands a saved selection.
+   */
+  const pushFastVariant = (base: AnthropicModelInfo) => {
+    const id = `${base.id}--fast`;
+    // A real model always wins its own id, whatever the iteration order.
+    if (realDiscoveryIds.has(id) || seen.has(id)) return;
+    seen.add(id);
+    out.push({ ...base, id, display_name: `${base.display_name} · Fast` });
+  };
   for (const slug of nativeSlugs) {
     const id = idStyle === "readable" ? claudeCodeNativeAlias(slug) : aliasForRoute("native", slug);
     if (seen.has(id)) continue;
@@ -151,6 +194,9 @@ export function buildAnthropicModelInfos(
     const info = modelInfo(id, `${slug} (native)`, nativeEffectiveLadder(slug), true, nativeMaxInput ?? nativeWindow);
     out.push(info);
     push1mVariant(info, nativeWindow, nativeMaxInput);
+    // Natives too, not only routed rows: gpt-5.6-sol is the flagship Fast model, and
+    // omitting it would leave this surface without the model the feature exists for.
+    if (fastRows?.({ provider: "native", id: slug }) === true) pushFastVariant(info);
   }
   for (const m of routedModels) {
     // Global Fast has no toggle on this surface, so the fast identity is what gets listed —
@@ -179,7 +225,19 @@ export function buildAnthropicModelInfos(
     out.push(info);
     // Anthropic passthrough guard (audit 021 #3): never auto-widen canonical claude
     // routes — only a genuine >=1M window earns the variant row there.
-    push1mVariant(info, m.contextWindow, routedMaxInput);
+    // Claude Code groups canonical Fable ids before it compares the [1m] marker. This
+    // reversible alias only separates picker families; it is not an OpenAI-native route.
+    // The Messages ingress restores the canonical Anthropic id before passthrough.
+    const oneMillionSelector = idStyle === "readable"
+      && m.provider === "anthropic"
+      && listedModelId.startsWith("claude-fable-")
+      ? `${claudeCodeNativeAlias(listedModelId)}[1m]`
+      : undefined;
+    push1mVariant(info, m.contextWindow, routedMaxInput, oneMillionSelector);
+    // The whole model is passed, not a (provider, id) pair: a combo row lives in its own
+    // namespace with no config.providers entry, so the caller classifies it from the
+    // aggregated supportsServiceTier the row already carries.
+    if (fastRows?.(m) === true) pushFastVariant(info);
   }
   return out;
 }

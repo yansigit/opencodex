@@ -10,6 +10,13 @@ export type RefreshPolicy = "proactive" | "lazy-only" | "disabled";
 
 export type ProviderTlsProfile = "antigravity-browser";
 
+/** Request-owned identity of the configured key, before env/keychain resolution. */
+export interface ProviderApiKeySelection {
+  entryId?: string;
+  reference?: string;
+  revision?: string;
+}
+
 export interface OpenRouterProviderRouting {
   /** OpenRouter provider slugs to try first, in priority order. */
   order?: string[];
@@ -226,12 +233,7 @@ export interface OcxProviderConfig {
    * version here instead of waiting for a code change. Absent uses the adapter's current default.
    */
   commandCodeVersion?: string;
-  /**
-   * Command Code OAuth `/alpha/generate` project-context envelope. When `"on"`, the adapter
-   * fills `memory`, `taste`, and `skills` from bounded files under `process.cwd()`. Absent or
-   * `"off"` keeps the empty envelope (`memory: ""`, `taste: null`, `skills: null`). Does not
-   * enable taste learning (`x-taste-learning` stays `"false"`).
-   */
+  /** Include bounded repository context in Command Code envelopes. */
   projectContext?: "off" | "on";
   /**
    * Responses upstream that stores nothing server-side (DeepSeek documents "the API
@@ -284,22 +286,22 @@ export interface OcxProviderConfig {
    */
   decodesNativeCompactionBlobs?: boolean;
   /**
+   * Trust this direct key-auth Responses provider to consume or relay opaque encrypted
+   * V2 agent tasks. OpenCodex does not decrypt, translate, or recover an eligible task.
+   * Absent or false keeps the existing recovery/fail-closed behavior.
+   */
+  allowEncryptedV2AgentTasks?: boolean;
+  /**
    * Explicit opt-in for non-registry private-network destinations such as localhost, RFC1918,
    * link-local, or unique-local upstreams. Metadata endpoints remain blocked.
    */
   allowPrivateNetwork?: boolean;
   /**
-   * ChatGPT Codex backend WebSocket upstream transport.
-   * Defaults to false (routes streaming turns over standard HTTP/SSE).
-   * Set `true` to opt into the faster responses_websockets transport.
-   * `OCX_CODEX_WS_UPSTREAM=true` or `1` also enables it when this is omitted;
-   * `false` and `0` disable it. Invalid or absent values default to HTTP/SSE.
+   * ChatGPT Codex backend WebSocket upstream transport. Defaults to false (HTTP/SSE).
+   * The OCX_CODEX_WS_UPSTREAM environment value applies only when this is omitted.
    */
   wsUpstream?: boolean;
-  /**
-   * Maximum WebSocket request frame size in bytes before routing over standard HTTP/SSE.
-   * Defaults to CODEX_WS_CREATE_FRAME_LIMIT_BYTES (~16 MiB minus margin).
-   */
+  /** Maximum request frame size before falling back to HTTP/SSE. */
   maxWsFrameBytes?: number;
   /**
    * Pin the HTTP version used for upstream provider requests. Bun's fetch negotiates
@@ -354,6 +356,10 @@ export interface OcxProviderConfig {
    * `apiKey` seeds a one-entry pool on first management touch.
    */
   apiKeyPool?: Array<{ id: string; key: string; label?: string; addedAt?: number }>;
+  /** Changes on manual selection (including re-selection) and committed automatic allocation. */
+  apiKeySelectionRevision?: string;
+  /** Runtime only. Never expose in management responses or persist a routed provider. */
+  _apiKeyAttempt?: ProviderApiKeySelection;
   defaultModel?: string;
   models?: string[];
   /**
@@ -370,6 +376,13 @@ export interface OcxProviderConfig {
    * full set so the user can pick). See devlog issue_052_provider-model-allowlist.
    */
   selectedModels?: string[];
+  /** Registration-owned state. Absent means legacy or OAuth-exempt, not uninitialized. */
+  initialModelSelection?: {
+    version: 1;
+    registrationId: string;
+    status: "pending" | "ready" | "all-off";
+    modelCount?: number;
+  };
   /**
    * Per-provider retention allowlist for authoritative live discovery. When non-empty, any
    * model id in this list is preserved in the routed catalog even if the live `/models`
@@ -455,11 +468,13 @@ export interface OcxProviderConfig {
    */
   authMode?: "key" | "forward" | "oauth" | "local";
   /**
-   * Per-provider override for generic OAuth multi-account 429 failover (#2568).
+   * Per-provider override for the generic OAuth PROACTIVE account preference (#2568, #695).
    *
-   * Rotation is presence-driven by default — 2+ logged-in accounts activate it — so this exists
-   * for the operator who accepts rotation on one provider and refuses it on another. An explicit
-   * boolean here beats the global `oauthAccountFailover` and beats presence.
+   * When this setting and the global setting are omitted, 2+ eligible accounts enable reactive
+   * 429 rotation by presence. An explicit provider `false` disables both proactive preference
+   * and reactive replay under another identity; an explicit `true` enables them. This overrides
+   * global `oauthAccountFailover` in either direction. A healthy selected account retains
+   * priority during proactive selection.
    */
   oauthAccountFailover?: {
     enabled?: boolean;
@@ -537,6 +552,8 @@ export interface OcxProviderConfig {
    * from the web-search sidecar's `search.xSearch` options and never widens caller tool selectors.
    */
   xaiResponsesXSearch?: boolean;
+  /** One-time Grok subscription wire upgrade; later explicit Chat choices remain authoritative. */
+  xaiResponsesDefaultVersion?: number;
   /**
    * Whether the Responses upstream accepts native custom tools and custom_tool_call items.
    * Set false only for a provider whose native contract rejects them; absence preserves
@@ -549,9 +566,21 @@ export interface OcxProviderConfig {
    * SSE/JSON; raw inspection state remains authoritative.
    */
   responsesSnapshotRepair?: boolean;
-  /** Provider-wide mapping from Codex effort labels to upstream `reasoning_effort` values. */
+  /**
+   * Provider-wide mapping from Codex effort labels to upstream `reasoning_effort` values.
+   * Map a label to the reserved value `"__omit__"` to send no reasoning field at all for that
+   * effort, so the upstream model's own default applies. The sentinel is
+   * `REASONING_EFFORT_OMIT_SENTINEL` in `src/reasoning-effort.ts`; it suppresses
+   * `reasoning_effort` on an OpenAI-compatible wire and Ollama's native `think` field on the
+   * Ollama native adapter (#2356).
+   */
   reasoningEffortMap?: Record<string, string>;
-  /** Model-specific mapping from Codex effort labels to upstream `reasoning_effort` values. */
+  /**
+   * Model-specific mapping from Codex effort labels to upstream `reasoning_effort` values.
+   * Map a label to the reserved value `"__omit__"` to send no reasoning field at all for that
+   * effort, so the upstream model's own default applies. Same sentinel as
+   * `reasoningEffortMap`, resolved per model first.
+   */
   modelReasoningEffortMap?: Record<string, Record<string, string>>;
   /** OpenAI-compatible gateway reasoning wire shape. Default sends `reasoning_effort`. */
   reasoningWireFormat?: "gateway-object";
@@ -661,7 +690,7 @@ export interface OcxProviderConfig {
    * before any response bytes are relayed, so the replay is lossless.
    */
   retryOn429?: RateLimitRetryPolicy;
-  /** Opt in to replaying transient upstream 5xx responses (at most three total sends). */
+  /** Opt in to replaying transient upstream failures within one bounded request budget. */
   replayTransientFailures?: boolean;
   /**
    * Opt-in retry for pre-stream transient upstream statuses
@@ -712,9 +741,8 @@ export interface OcxProviderConfig {
    * Google adapter mode. "ai-studio" (default) = Generative Language API + x-goog-api-key.
    * "vertex" = Vertex AI project/location endpoints with GCP ADC (or x-goog-api-key).
    * "cloud-code-assist" = Google Antigravity (Cloud Code Assist) OAuth + CCA envelope.
-   * "ai-studio-web" = browser-relayed AI Studio Playground/Build session.
    */
-  googleMode?: "ai-studio" | "vertex" | "cloud-code-assist" | "ai-studio-web";
+  googleMode?: "ai-studio" | "ai-studio-web" | "vertex" | "cloud-code-assist";
   /** Vertex AI GCP project id (or GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT env). */
   project?: string;
   /** Vertex AI location, e.g. "us-central1" or "global" (or GOOGLE_CLOUD_LOCATION env). */
@@ -730,7 +758,7 @@ export interface OcxProviderConfig {
    * headless and cannot control a screen itself; provide commands here only when running on a host
    * that can. With no executor, these tools honestly report "not supported".
    */
-  desktopExecutor?: import("../adapters/cursor/native-exec-desktop").DesktopExecutorConfig;
+  desktopExecutor?: import("../adapters/cursor/desktop-executor-contract").DesktopExecutorConfig;
   /**
    * Cursor adapter only: unsafe opt-in escape hatch for Cursor server-driven built-in local
    * read/write/delete/ls/grep/shell/fetch execution. Prefer `nativeLocalExec: "on"` for new

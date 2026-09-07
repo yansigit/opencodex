@@ -253,7 +253,6 @@ export function getCursorCheckpointForPrefix(input: {
   if (!refs) return undefined;
   const identityScope = input.identityScope?.trim() || "local";
   let foundRef: string | undefined;
-  let foundCreatedAt = Number.NEGATIVE_INFINITY;
   for (const ref of refs) {
     const snapshot = store.snapshots.get(ref);
     if (!snapshot) continue;
@@ -262,10 +261,8 @@ export function getCursorCheckpointForPrefix(input: {
     if (snapshot.coveredMessageCount !== input.coveredMessageCount) continue;
     if (snapshot.identityScope !== identityScope) continue;
     if (snapshot.modelId !== input.modelId) continue;
-    if (snapshot.createdAt >= foundCreatedAt) {
-      foundRef = ref;
-      foundCreatedAt = snapshot.createdAt;
-    }
+    if (foundRef) return undefined;
+    foundRef = ref;
   }
   return getCursorCheckpoint(foundRef);
 }

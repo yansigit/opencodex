@@ -10,6 +10,7 @@ import {
   multiAgentGuidanceEnabled,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
+  saveConfigPreservingClaudeCode,
 } from "../config";
 import {
   clearLoginState,
@@ -74,8 +75,8 @@ import { handleIntegrationRoutes } from "./management/integration-routes";
 import { handleNativeIntegrationRoutes } from "./management/native-integration-routes";
 import { handleCursorIntegrationRoutes } from "./management/cursor-integration-routes";
 import type { ManagementContext } from "./management/context";
-import type { ManagementPrincipal, ManagementSessionControl } from "./management-auth";
 import { ManagementPersistenceError, MissingManagementPersistenceError } from "./management/context";
+import type { ManagementPrincipal, ManagementSessionControl } from "./management-auth";
 export type { ManagementApiDeps } from "./management/context";
 import { fetchAllModels } from "./management/shared";
 import { CatalogGatherBusyError } from "../codex/catalog/provider-fetch";
@@ -102,8 +103,8 @@ const managementConvergenceBindings = new WeakMap<object, Readonly<{
  * Namespace match for management route prefixes: exact hit or a child path, never a
  * prefix collision (`/api/labfoo` must not match `/api/lab`).
  */
-function pathInManagementNamespace(pathname: string, prefix: string): boolean {
-  return pathname === prefix || pathname.startsWith(`${prefix}/`);
+function pathInManagementNamespace(pathname: string, prefix: string, includeChildren = true): boolean {
+  return pathname === prefix || (includeChildren && pathname.startsWith(`${prefix}/`));
 }
 
 /**
@@ -131,6 +132,17 @@ async function handleLabRoutesOnDemand(ctx: ManagementContext): Promise<Response
   }
   const { handleLabRoutes } = await import("./management/lab-routes");
   return handleLabRoutes(ctx);
+}
+
+/**
+ * Lazy like the Lab and routing-profile handlers, and for the same recorded reason: this file is
+ * mounted for every dashboard request, so a static import would put the quota-reset store and
+ * its config resolution on all of them.
+ */
+async function handleQuotaResetRoutesOnDemand(ctx: ManagementContext): Promise<Response | null> {
+  if (!pathInManagementNamespace(ctx.url.pathname, "/api/quota-resets", false)) return null;
+  const { handleQuotaResetRoutes } = await import("./management/quota-reset-routes");
+  return handleQuotaResetRoutes(ctx);
 }
 
 export async function handleManagementAPI(
@@ -234,6 +246,7 @@ export async function handleManagementAPI(
     ??     (await handleStorageLogGuardRoutes(ctx))
     ??     (await handleLogsUsageRoutes(ctx))
     ??     (await handleRequestHistoryRoutes(ctx))
+    ??     (await handleQuotaResetRoutesOnDemand(ctx))
     ??     (await handleRoutingAnalyticsRoutes(ctx))
     ??     (await handleRoutingProfileRoutesOnDemand(ctx))
     ??     (await handleReplitProviderRoutes(ctx))

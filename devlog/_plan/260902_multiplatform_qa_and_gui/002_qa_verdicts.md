@@ -38,3 +38,4 @@
 | `intmb` 격리 prefix | `rm -rf` | 경로 gone |
 | `intmb` `~/.codex` 부산물 | 파일명 지정 삭제 | opencodex 흔적 0건 |
 | 로컬 데모 프록시 | `SIGINT` | 포트 10399/10401 리스너 없음 |
+

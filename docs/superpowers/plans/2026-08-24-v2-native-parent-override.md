@@ -27,7 +27,7 @@ Add the persisted contract and authenticated `/api/v2` management surface.
 Focused verification:
 
 ```bash
-bun test tests/config.test.ts tests/provider-id-rewrite.test.ts tests/multi-agent-keep-native-v1.test.ts
+bun test tests/server/config.test.ts tests/providers/provider-id-rewrite.test.ts tests/codex-integration/multi-agent-keep-native-v1.test.ts
 bun run typecheck
 ```
 
@@ -40,13 +40,13 @@ Implement the guarded request-time route replacement with one small shared decis
 - Resolve the target through normal routing and require a noncanonical provider. Only after success replace the route and rewrite both `parsed.modelId` and `parsed._rawBody.model`. Preserve the caller model in `logCtx.requestedModel`.
 - `/responses/compact` eligibility requires explicit `multiAgentMode === "v2"` and no child/helper marker. Apply it after original route resolution and before native-versus-synthetic compaction selection so routed roots use existing synthetic compaction and native children remain native.
 - Once eligibility is established, missing/unroutable/canonical targets return the existing invalid-route error representation without native upstream I/O. Out-of-scope requests retain existing behavior.
-- Add `tests/responses-v2-native-parent-override.test.ts` and extend compact routing tests for native root override, dual model rewrite, logging identity, routed/V1/non-agent/combo/malformed/child/helper exclusions, fail-closed targets, routed root synthetic compaction, native child compaction, shadow ordering, and recovery ordering.
+- Add `tests/responses/responses-v2-native-parent-override.test.ts` and extend compact routing tests for native root override, dual model rewrite, logging identity, routed/V1/non-agent/combo/malformed/child/helper exclusions, fail-closed targets, routed root synthetic compaction, native child compaction, shadow ordering, and recovery ordering.
 
 Focused verification:
 
 ```bash
-bun test tests/responses-v2-native-parent-override.test.ts tests/responses-compaction-routing.test.ts tests/responses-shadow-intercept.test.ts tests/agent-task-recovery.test.ts
-bun test tests/core-lab-boundary.test.ts
+bun test tests/responses/responses-v2-native-parent-override.test.ts tests/responses/responses-compaction-routing.test.ts tests/responses/responses-shadow-intercept.test.ts tests/server/agent-task-recovery.test.ts
+bun test tests/lab/core-lab-boundary.test.ts
 bun run typecheck
 ```
 
@@ -92,11 +92,11 @@ bun run build
 ## Final verification
 
 ```bash
-bun test tests/config.test.ts tests/provider-id-rewrite.test.ts
-bun test tests/multi-agent-keep-native-v1.test.ts
-bun test tests/responses-v2-native-parent-override.test.ts
-bun test tests/responses-compaction-routing.test.ts
-bun test tests/core-lab-boundary.test.ts
+bun test tests/server/config.test.ts tests/providers/provider-id-rewrite.test.ts
+bun test tests/codex-integration/multi-agent-keep-native-v1.test.ts
+bun test tests/responses/responses-v2-native-parent-override.test.ts
+bun test tests/responses/responses-compaction-routing.test.ts
+bun test tests/lab/core-lab-boundary.test.ts
 bun run typecheck
 bun run test
 bun run privacy:scan

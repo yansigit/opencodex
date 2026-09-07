@@ -77,8 +77,12 @@ const server = startServer(0, {
 
 // The parent treats existence as readiness and parses the port immediately. Publish
 // through a rename so it can never observe the file between create and write.
+// Test-only causal probe, normally disabled: a healthy process can publish later
+// than the old generic deadline without changing recovery/admission behavior.
 const portDelayMs = Number(process.env.OCX_TEST_NATIVE_STARTUP_DELAY_PORT_MS ?? 0);
-if (!Number.isFinite(portDelayMs) || portDelayMs < 0 || portDelayMs > 60_000) throw new Error("invalid native startup port delay fault");
+if (!Number.isFinite(portDelayMs) || portDelayMs < 0 || portDelayMs > 60_000) {
+  throw new Error("invalid native startup port delay fault");
+}
 if (portDelayMs > 0) await Bun.sleep(portDelayMs);
 atomicWriteFile(portPath, String(server.port));
 console.info(`[native-startup] port-published elapsedMs=${Date.now() - Number(process.env.NATIVE_STARTUP_LAUNCHED_AT ?? Date.now())}`);

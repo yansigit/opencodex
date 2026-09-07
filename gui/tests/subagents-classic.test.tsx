@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import Subagents from "../src/pages/Subagents";
 import { LanguageProvider } from "../src/i18n/provider";
+import { en } from "../src/i18n/en";
 import { clearClientResourceStoresForTests } from "../src/client-resource";
 
 /**
@@ -139,8 +140,9 @@ async function mount() {
 
 /** Picker add/remove toggles use the advertised override labels. */
 function addToggle(id: string): HTMLButtonElement {
+  const label = en["sub.workspace.addToFeatured"].replace("{m}", id);
   const row = Array.from(container.querySelectorAll("button"))
-    .find((b) => (b.getAttribute("aria-label") ?? "").includes(`Add ${id} to advertised overrides`));
+    .find((b) => b.getAttribute("aria-label") === label);
   if (!row) throw new Error(`add toggle not found: ${id}`);
   return row as unknown as HTMLButtonElement;
 }
@@ -160,7 +162,7 @@ test("renders one featured list and one picker, never the same list twice", asyn
   expect(container.querySelector(".subagents-workspace-rail")).toBeNull();
   const featuredHeadings = Array.from(container.querySelectorAll(".swi-featured-title"))
     .map(node => node.textContent?.trim());
-  expect(featuredHeadings.filter(text => text === "Advertised overrides").length).toBe(1);
+  expect(featuredHeadings.filter(text => text === en["sub.featured"]).length).toBe(1);
 });
 
 test("caps featured selections at five", async () => {
@@ -210,13 +212,13 @@ test("saves the featured order with PUT and the models payload", async () => {
   expect(put!.init?.body).toBe(JSON.stringify({ models: ["a-1", "a-2"] }));
 });
 
-test("marks the preferred model and lets Prefer update it without changing roster order", async () => {
+test("shows an out-of-roster preference and lets Prefer update it without changing roster order", async () => {
   injectionModel = "a-2";
   await mount();
   await act(async () => { addToggle("a-1").click(); });
-  expect(container.textContent).toContain("Preferred");
+  expect(container.textContent).toContain(en["sub.preferredOutsideAdvertised"]);
   const prefer = [...container.querySelectorAll("button")]
-    .find(button => button.textContent?.trim() === "Prefer");
+    .find(button => button.textContent?.trim() === en["sub.prefer"]);
   expect(prefer).toBeTruthy();
   await act(async () => { prefer!.click(); });
   const patch = requests.find(row => row.init?.method === "PUT" && String(row.url).includes("/api/injection-model"));

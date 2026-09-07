@@ -131,8 +131,8 @@ Local `main` that still points at an older promotion is unused as a daily tree; 
 
 ## Testing during sync and rebuild
 
-- Overlay / fork seam: `bun test tests/fork/register.test.ts` and `bun test tests/core-lab-boundary.test.ts`.
-- Replayed Antigravity PRs: focused `bun test tests/antigravity-quota.test.ts` (and matching google/CCA tests that those PRs already use).
+- Overlay / fork seam: `bun test tests/fork/register.test.ts` and `bun test tests/lab/core-lab-boundary.test.ts`.
+- Replayed Antigravity PRs: focused `bun test tests/adapters/google/antigravity-quota.test.ts` (and matching google/CCA tests that those PRs already use).
 - Subagent roles: focused tests those PRs already add.
 - Shared runtime, routing, config, server after a release merge: `bun run typecheck` and `bun run test`.
 - Logging/credentials: `bun run privacy:scan`.

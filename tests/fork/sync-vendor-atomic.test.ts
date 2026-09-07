@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { detectLatestVTag } from "../../scripts/fork/sync/detect";
 import { pinVendorRefs } from "../../scripts/fork/sync/pin";
 import type { CommandRunner } from "../../scripts/fork/sync/types";
+import { repoPath } from "../helpers/repo-root";
 
 const temporaryDirectories: string[] = [];
 
@@ -103,10 +104,7 @@ describe("fork sync vendor publication", () => {
     const rewrittenDev = git(work, "commit-tree", tree, "-m", "rewritten dev");
     git(work, "branch", "-f", "vendor/dev", rewrittenDev);
 
-    const workflow = readFileSync(resolve(
-      import.meta.dir,
-      "../../.github/workflows/fork-upstream-sync.yml",
-    ), "utf8");
+    const workflow = readFileSync(repoPath(".github/workflows/fork-upstream-sync.yml"), "utf8");
     const command = workflow.match(
       /^\s*if ! (git push --atomic origin refs\/heads\/vendor\/main:refs\/heads\/vendor\/main refs\/heads\/vendor\/dev:refs\/heads\/vendor\/dev); then$/m,
     )?.[1];

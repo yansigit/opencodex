@@ -25,7 +25,11 @@ test("the mobile brand can shrink, so the version badge cannot reach the action 
   expect(name).toContain("text-overflow: ellipsis");
 
   const ver = block(".mobile-topbar .brand .ver");
-  expect(ver).toContain("flex-shrink: 0");
+  expect(ver).toContain("flex-shrink: 1");
+  const badge = block(".brand .ver {");
+  expect(badge).toContain("min-width: 0");
+  expect(badge).toContain("white-space: nowrap");
+  expect(badge).toContain("text-overflow: ellipsis");
 });
 
 test("the topbar action orbs keep their touch target", () => {
@@ -52,3 +56,4 @@ test("the badge is dropped at the existing tiny-phone breakpoint, not a new one"
   const scope = css.slice(tiny, tiny + 700);
   expect(scope).toContain(".mobile-topbar .brand .ver { display: none; }");
 });
+

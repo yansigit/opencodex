@@ -4,7 +4,7 @@ description: Associez opencodex à votre propre déploiement Replit qui relaie O
 ---
 
 Le **compagnon passerelle Replit** est un service Bun que vous déployez dans
-[`integrations/replit-gateway`](https://github.com/lidge-jun/opencodex/tree/dev/integrations/replit-gateway)
+[`integrations/replit-gateway`](https://github.com/yansigit/opencodex/tree/dev/integrations/replit-gateway)
 et qui s’exécute **dans votre Repl Replit**. Il lit les identifiants Replit AI Integrations depuis
 l’environnement du Repl et expose deux points de terminaison natifs à opencodex :
 
@@ -38,7 +38,7 @@ distincte (`REPLIT_GATEWAY_KEY`) qu’opencodex stocke localement et envoie en
 - Un proxy opencodex actif (`ocx start`) pour l’assistant du tableau de bord ou l’installation CLI.
 
 Déployez et configurez la passerelle avec le
-[`README du paquet`](https://github.com/lidge-jun/opencodex/blob/dev/integrations/replit-gateway/README.md).
+[`README du paquet`](https://github.com/yansigit/opencodex/blob/dev/integrations/replit-gateway/README.md).
 
 ## Déployer la passerelle (résumé)
 
@@ -185,7 +185,7 @@ Le compagnon Replit **n’atteint pas** ce niveau aujourd’hui.
 
 ## Voir aussi
 
-- README du paquet : [`integrations/replit-gateway/README.md`](https://github.com/lidge-jun/opencodex/blob/dev/integrations/replit-gateway/README.md)
-- Spécification : [`2026-08-22-replit-gateway-design.md`](https://github.com/lidge-jun/opencodex/blob/dev/docs/superpowers/specs/2026-08-22-replit-gateway-design.md)
+- README du paquet : [`integrations/replit-gateway/README.md`](https://github.com/yansigit/opencodex/blob/dev/integrations/replit-gateway/README.md)
+- Spécification : [`2026-08-22-replit-gateway-design.md`](https://github.com/yansigit/opencodex/blob/dev/docs/superpowers/specs/2026-08-22-replit-gateway-design.md)
 - [Fournisseurs](/guides/providers/)
 - [Tableau de bord web](/guides/web-dashboard/)

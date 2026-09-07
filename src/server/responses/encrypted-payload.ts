@@ -286,7 +286,7 @@ export function sanitizeEncryptedContentInPlace(input: unknown): number {
     | { kind: "visit"; node: unknown }
     | { kind: "array"; node: unknown[]; index: number }
     | { kind: "object"; values: unknown[]; index: number }
-    | { kind: "agent"; message: Record<string, unknown> };
+    | { kind: "agent"; message: Record<string, unknown>; rewrittenBefore: number };
   const stack: VisitFrame[] = [{ kind: "visit", node: input }];
 
   while (stack.length > 0) {
@@ -319,7 +319,7 @@ export function sanitizeEncryptedContentInPlace(input: unknown): number {
       }
       stack.push({ kind: "array", node: frame.node, index: frame.index + 1 });
       if (child && typeof child === "object" && (child as { type?: unknown }).type === "agent_message") {
-        stack.push({ kind: "agent", message: child as Record<string, unknown> });
+        stack.push({ kind: "agent", message: child as Record<string, unknown>, rewrittenBefore: rewritten });
       }
       stack.push({ kind: "visit", node: child });
       continue;
@@ -333,18 +333,10 @@ export function sanitizeEncryptedContentInPlace(input: unknown): number {
     }
 
     if (
-      frame.message.type === "agent_message"
+      rewritten > frame.rewrittenBefore
+      && frame.message.type === "agent_message"
       && !hasEncryptedContentPart(frame.message.content)
     ) {
-      if (Array.isArray(frame.message.content)) {
-        frame.message.content = frame.message.content.map(part => (
-          part && typeof part === "object"
-          && (part as { type?: unknown }).type === "output_text"
-          && typeof (part as { text?: unknown }).text === "string"
-            ? { type: "input_text", text: (part as { text: string }).text }
-            : part
-        ));
-      }
       frame.message.type = "message";
       frame.message.role = "user";
       delete frame.message.id;

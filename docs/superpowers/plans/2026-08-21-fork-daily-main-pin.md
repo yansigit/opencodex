@@ -141,7 +141,7 @@ Verify:
 ```bash
 git merge-base --is-ancestor vendor/main overlay   # must be true
 git log --oneline vendor/main..overlay             # only fork: commits
-bun test tests/fork/register.test.ts tests/core-lab-boundary.test.ts
+bun test tests/fork/register.test.ts tests/lab/core-lab-boundary.test.ts
 ```
 
 If rebase rewrites commits, force-push `overlay` only if it already has an `origin` upstream; otherwise first push is `git push -u origin overlay`. Never force-push `main`.
@@ -175,7 +175,7 @@ Conflicts: resolve on `run/main` only. Do not retarget GitHub PRs. Do not silent
 Verify (do not claim green without output):
 
 ```bash
-bun test tests/fork/register.test.ts tests/core-lab-boundary.test.ts tests/antigravity-quota.test.ts
+bun test tests/fork/register.test.ts tests/lab/core-lab-boundary.test.ts tests/adapters/google/antigravity-quota.test.ts
 bun run typecheck
 ```
 
@@ -200,7 +200,7 @@ gh pr create --repo yansigit/opencodex --base main --head overlay \
 - Does not include unreleased Antigravity/subagent PRs (those stay on run/main).
 
 ## Verification
-- bun test tests/fork/register.test.ts tests/core-lab-boundary.test.ts
+- bun test tests/fork/register.test.ts tests/lab/core-lab-boundary.test.ts
 EOF
 )"
 ```

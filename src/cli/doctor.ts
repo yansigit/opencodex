@@ -49,6 +49,10 @@ import {
   resolveEffectiveUserIdentity,
 } from "../codex/user-identity";
 import { collectProjectCodexConfigWarnings, formatProjectCodexConfigWarningsForDoctor } from "../codex/project-config-warnings";
+import {
+  collectLegacyCodexConfigKeyDiagnostics,
+  formatLegacyCodexConfigKeyDiagnosticsForDoctor,
+} from "../codex/legacy-config-keys";
 import { collectStartupHealth, formatStartupRoutingDetail, startupHealthSummary } from "../codex/autostart-health";
 import {
   displayCodexRuntimePath,
@@ -1347,6 +1351,12 @@ export async function runDoctor(args: string[] = []): Promise<void> {
         console.log(`  --     ${DIRECTIVE_KEY_FILE} status could not be checked (${cause instanceof Error ? cause.message : String(cause)})`);
       }
     }
+  }
+
+  console.log("\nCodex config compatibility");
+  const legacyKeyResult = collectLegacyCodexConfigKeyDiagnostics();
+  for (const line of formatLegacyCodexConfigKeyDiagnosticsForDoctor(legacyKeyResult)) {
+    console.log(line);
   }
 
   console.log("\nCodex agent role files");

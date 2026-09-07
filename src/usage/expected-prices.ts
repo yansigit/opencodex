@@ -42,6 +42,8 @@ export interface ExpectedPriceOverlay {
 
 const GEMINI_31_PRO: Cost4 = { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 };
 const GPT56_SOL: Cost4 = { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 };
+const GPT6_ASTRA: Cost4 = { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 };
+const ASTRA_API_PRICING = "https://developers.openai.com/api/docs/models/gpt-6-astra";
 /**
  * Daybreak aliases. `daybreak-*-latest` never appears in the pricing table itself — only its
  * current snapshot does — so these tuples are the snapshot's published rates and carry
@@ -112,20 +114,16 @@ const KIMI_PRICING = "https://platform.kimi.ai/docs/pricing (official table; cac
 const QWEN38_MAX_PRICING = "https://qwen.ai/blog?id=qwen3.8 (Qwen release announcement; no Model Studio billing row yet; cache rates unpublished -> 0)";
 const COMMAND_CODE_PRICING = "https://commandcode.ai/models + https://commandcode.ai/models.data (official model manifest)";
 const COMMAND_CODE_VERIFIED_AT = "2026-08-26";
-const CURSOR_DOCS_PRICING = "https://cursor.com/docs/models-and-pricing";
-const CURSOR_GROK_46: Cost4 = { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 };
-const CURSOR_GROK_45: Cost4 = { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 };
-const CURSOR_COMPOSER_1: Cost4 = { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 };
-const CURSOR_COMPOSER_25: Cost4 = { input: 0.5, output: 2.5, cacheRead: 0.2, cacheWrite: 0 };
-const CURSOR_COMPOSER_25_FAST: Cost4 = { input: 3, output: 15, cacheRead: 0.5, cacheWrite: 0 };
-const CURSOR_GROK_46_FAST: Cost4 = { input: 4, output: 12, cacheRead: 1, cacheWrite: 0 };
-const CURSOR_GROK_45_FAST: Cost4 = { input: 4, output: 18, cacheRead: 1, cacheWrite: 0 };
-const CLAUDE_OPUS_FAST: Cost4 = { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 };
 
 export const EXPECTED_PRICE_OVERLAYS: readonly ExpectedPriceOverlay[] = [
-  // claude-fable-5-1 has no jawcode row yet, so both Anthropic surfaces need their own
-  // overlay (the overlay lookup is keyed by the configured provider id; only the jawcode
-  // bundle collapses anthropic-apikey onto anthropic).
+  { provider: "openai-apikey", modelId: "gpt-6-astra", cost4: GPT6_ASTRA, source: ASTRA_API_PRICING, verifiedAt: "2026-09-05", status: "verified" },
+  // Display estimates use API prices for both login and API-key routes, including cache writes.
+  { provider: "openai", modelId: "gpt-6-astra", cost4: GPT6_ASTRA, source: `API-reference comparison estimate: ${ASTRA_API_PRICING}`, verifiedAt: "2026-09-05", status: "verified-derived" },
+  // claude-fable-5-1 now HAS a generated jawcode row, so the two Anthropic surfaces resolve
+  // from it and these overlays are the fallback rather than the primary source. They stay:
+  // the overlay lookup is keyed by the configured provider id, so an account-pool log label
+  // like anthropic-pb51d9b still needs them, and only the jawcode bundle collapses
+  // anthropic-apikey onto anthropic.
   { provider: "anthropic", modelId: "claude-fable-5-1", cost4: CLAUDE_FABLE_51, source: `anthropic official Claude Fable 5.1 ${ANTHROPIC_PRICING}; cache hit = 0.025x base input`, verifiedAt: "2026-09-02", status: "verified" },
   { provider: "anthropic-apikey", modelId: "claude-fable-5-1", cost4: CLAUDE_FABLE_51, source: `anthropic official Claude Fable 5.1 ${ANTHROPIC_PRICING}; cache hit = 0.025x base input`, verifiedAt: "2026-09-02", status: "verified" },
   // Cursor canonicalizes every Fable 5.1 spelling onto this sole overlay row.
@@ -240,16 +238,6 @@ export const EXPECTED_PRICE_OVERLAYS: readonly ExpectedPriceOverlay[] = [
   { provider: "alibaba-token-plan-intl", modelId: "qwen3.8-max", cost4: QWEN38_MAX, source: QWEN38_MAX_PRICING, verifiedAt: "2026-08-04", status: "verified" },
   // Cursor Auto router — Cursor's published fixed token price (verified).
   { provider: "cursor", modelId: "auto", cost4: { input: 1.25, output: 6, cacheRead: 0.25, cacheWrite: 1.25 }, source: "https://docs.cursor.com/account/pricing + https://cursor.com/blog/aug-2025-pricing", verifiedAt: "2026-07-20", status: "verified" },
-  // Cursor-specific native models (verified from official docs).
-  { provider: "cursor", modelId: "grok-4.6", cost4: CURSOR_GROK_46, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
-  { provider: "cursor", modelId: "grok-4.5", cost4: CURSOR_GROK_45, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
-  { provider: "cursor", modelId: "composer-1", cost4: CURSOR_COMPOSER_1, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
-  { provider: "cursor", modelId: "composer-2.5", cost4: CURSOR_COMPOSER_25, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
-  { provider: "cursor", modelId: "composer-2.5-fast", cost4: CURSOR_COMPOSER_25_FAST, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
-  { provider: "cursor", modelId: "grok-4.6-fast", cost4: CURSOR_GROK_46_FAST, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
-  { provider: "cursor", modelId: "grok-4.5-fast", cost4: CURSOR_GROK_45_FAST, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
-  { provider: "cursor", modelId: "claude-opus-5-fast", cost4: CLAUDE_OPUS_FAST, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
-  { provider: "cursor", modelId: "claude-opus-4-8-fast", cost4: CLAUDE_OPUS_FAST, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
 ];
 
 /**
@@ -258,6 +246,11 @@ export const EXPECTED_PRICE_OVERLAYS: readonly ExpectedPriceOverlay[] = [
  * therefore cannot reprice routed resellers that reuse the same model slug.
  */
 export const VERIFIED_PRICE_OVERRIDES: readonly ExpectedPriceOverlay[] = [
+  ...["openai", "openai-apikey"].map((provider): ExpectedPriceOverlay => ({
+    provider, modelId: "gpt-5.6-sol", cost4: GPT56_SOL,
+    source: provider === "openai" ? `API-reference comparison estimate: ${OPENAI_GPT56_PRICING}` : OPENAI_GPT56_PRICING,
+    verifiedAt: "2026-09-05", status: provider === "openai" ? "verified-derived" : "verified",
+  })),
   {
     provider: "xai",
     modelId: "grok-4.6",
@@ -361,6 +354,7 @@ export function findExpectedPriceOverlay(
 
 /** OpenAI Fast price multipliers retained as a compatibility export. */
 export const PRIORITY_MULTIPLIERS: Readonly<Record<string, number>> = {
+  "gpt-6-astra": 2,
   "gpt-5.6-sol": 2,
   "gpt-daybreak-blue-latest": 2,
   "daybreak-blue-latest": 2,
@@ -389,7 +383,6 @@ export interface PriorityPricingRule {
   verifiedAt: string;
 }
 
-const OPENAI_FAST_PRICING = "https://openai.com/api-fast-mode/";
 const XAI_PRIORITY_PRICING = "https://docs.x.ai/developers/advanced-api-usage/priority-processing";
 
 /**
@@ -408,10 +401,15 @@ export const PRIORITY_PRICING_RULES: readonly PriorityPricingRule[] = [
         provider,
         modelId,
         multiplier,
-        source: OPENAI_FAST_PRICING,
-        verifiedAt: "2026-08-05",
+        source: modelId === "gpt-6-astra" ? ASTRA_API_PRICING : "https://openai.com/api-fast-mode/",
+        verifiedAt: modelId === "gpt-6-astra" ? "2026-09-05" : "2026-08-05",
       })),
   ),
+  ...["gpt-5.6-sol-pro", "gpt-5.6-terra-pro", "gpt-5.6-luna-pro"].map((modelId): PriorityPricingRule => ({
+    provider: "openai-apikey", modelId, multiplier: 2,
+    source: "https://developers.openai.com/api/docs/pricing (derived from the virtual selection's base wire model)",
+    verifiedAt: "2026-09-05",
+  })),
   ...["grok-4.5", "grok-4.6"].map((modelId): PriorityPricingRule => ({
     provider: "xai",
     modelId,
@@ -457,7 +455,7 @@ export interface ContextTier {
   /** Per-field factor from the short rate to the published long rate. */
   multiplier: Cost4;
   /** Published relationship between confirmed priority and long-context bands. */
-  confirmedPriorityRelation?: "exclusive" | "lower-bound";
+  confirmedPriorityRelation?: "exclusive" | "lower-bound" | "stack";
   source: string;
   verifiedAt: string;
 }
@@ -472,7 +470,8 @@ const OPENAI_LONG_CONTEXT: Cost4 = { input: 2, output: 1.5, cacheRead: 2, cacheW
 const UNIFORM_DOUBLE: Cost4 = { input: 2, output: 2, cacheRead: 2, cacheWrite: 2 };
 
 const OPENAI_PRICING_DOC = "https://developers.openai.com/api/docs/pricing";
-const OPENAI_GPT56_CONTEXT_MODELS = [
+const OPENAI_CONTEXT_MODELS = [
+  "gpt-6-astra",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
@@ -484,16 +483,17 @@ const OPENAI_GPT56_CONTEXT_MODELS = [
 ];
 
 export const CONTEXT_TIERS: readonly ContextTier[] = [
+  // API-reference estimates do not apply subscription-only exemptions or multipliers.
   ...["openai", "openai-apikey"].flatMap(provider =>
-    OPENAI_GPT56_CONTEXT_MODELS.map((modelId): ContextTier => ({
+    OPENAI_CONTEXT_MODELS.map((modelId): ContextTier => ({
       provider,
       modelId,
       thresholdInputTokens: 272_000,
       inclusive: false,
       multiplier: OPENAI_LONG_CONTEXT,
-      confirmedPriorityRelation: "exclusive",
+      confirmedPriorityRelation: "stack",
       source: OPENAI_PRICING_DOC,
-      verifiedAt: "2026-08-03",
+      verifiedAt: "2026-09-05",
     })),
   ),
   {
@@ -503,9 +503,9 @@ export const CONTEXT_TIERS: readonly ContextTier[] = [
     thresholdInputTokens: 272_000,
     inclusive: false,
     multiplier: OPENAI_LONG_CONTEXT,
-    confirmedPriorityRelation: "exclusive",
+    confirmedPriorityRelation: "stack",
     source: OPENAI_PRICING_DOC,
-    verifiedAt: "2026-08-11",
+    verifiedAt: "2026-09-05",
   },
   {
     // The bare selector is the separately billed API-key alias. Daybreak Red has no tier row:
@@ -515,9 +515,9 @@ export const CONTEXT_TIERS: readonly ContextTier[] = [
     thresholdInputTokens: 272_000,
     inclusive: false,
     multiplier: OPENAI_LONG_CONTEXT,
-    confirmedPriorityRelation: "exclusive",
+    confirmedPriorityRelation: "stack",
     source: OPENAI_PRICING_DOC,
-    verifiedAt: "2026-08-11",
+    verifiedAt: "2026-09-05",
   },
   {
     provider: "xai",

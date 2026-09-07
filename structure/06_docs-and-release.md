@@ -37,22 +37,33 @@ bun run build
 
 ## Container deployment recipe
 
-Phase-5 remote-hub documentation includes an operator-owned multi-stage Dockerfile and Compose
-example in `guides/remote-hub`; the repository intentionally ships no root `Dockerfile`,
-`.dockerignore`, registry image, or publish workflow. An official image would create a release
-surface that also requires maintained base-image digest updates, vulnerability scanning, SBOM,
-signing, registry provenance, rollback, and support policy. Until those controls have an explicit
-owner, the guide requires operators to pin the Bun base digest, run non-root, persist
-`OPENCODEX_HOME`, mount the data token through `OCX_API_TOKEN_FILE`, and prove liveness, readiness,
-authenticated catalog access, and a real routed response themselves.
+The repository ships a root multi-stage `Dockerfile`, `compose.yaml`, narrow `.dockerignore`, and
+container bootstrap helper, but still publishes no registry image. The source build pins the Bun
+base by multi-platform digest, runs non-root with a read-only root filesystem and dropped
+capabilities, publishes the data port on host loopback by default (remote binding is an explicit
+`OPENCODEX_BIND_ADDRESS` opt-in), persists `OPENCODEX_HOME`, and streams the initial data token through stdin into the
+owner-only canonical token file. Before every image build, operators run
+`bun scripts/generate-compatibility-version.ts` in the host Git checkout. The runtime copies
+that untracked JSON artifact without including `.git` in the Docker context or changing the
+generator's tracked-source authority. `docker/verify-compatibility.ts` rejects stale manifests
+by comparing all file hashes and the complete source inventory in the read-only build context
+and copied runtime tree. It rejects symlinks, missing/mismatched entries, and extra source files.
+The required roots are `package.json`, `bun.lock`, and `scripts/model-metadata.source.json`;
+the context admits only that exact scripts artifact.
+Operators must still prove liveness, readiness, authenticated
+catalog access, and a real routed response before promotion.
+
+An official image would create a larger release surface requiring maintained base-image digest
+updates, vulnerability scanning, SBOM, signing, registry provenance, rollback, and support policy.
+Those controls still have no owner, so there is no image-publish workflow or official registry tag.
 
 [Decision Log]
 - 목적과 의도: Document a reproducible container topology without silently creating an official image channel.
-- 기존 구현 및 제약 조건: The repository has no maintained Docker release artifacts, registry workflow, scanner, SBOM/signing chain, or image rollback policy.
-- 검토한 주요 대안: Add a root Dockerfile and publish it; omit containers entirely; provide a complete operator-owned recipe in the remote-hub guide.
-- 선택한 방식: Keep the recipe in documentation, require an operator-resolved base digest and mounted secret file, and publish only the public data port.
-- 다른 대안 대신 이 방식을 선택한 이유: A source recipe communicates the supported runtime contract while leaving image provenance and operations with the party building it.
-- 장점, 단점 및 영향: Docker users have a concrete starting point, but opencodex does not claim to ship, scan, sign, or support the resulting image.
+- 기존 구현 및 제약 조건: The documentation recipe was not executable from the repository root, file-backed Compose secret ownership varies by implementation, and no registry workflow, scanner, SBOM/signing chain, or image rollback policy exists.
+- 검토한 주요 대안: Publish an official image; keep only copied documentation snippets; ship a maintained source recipe with a volume-backed stdin bootstrap.
+- 선택한 방식: Maintain the root source-build recipe, persist the owner-only token in the state volume, publish only `10100`, and leave registry publication out of scope.
+- 다른 대안 대신 이 방식을 선택한 이유: A runnable source recipe can be tested and reviewed without claiming provenance and operational controls the project does not provide.
+- 장점, 단점 및 영향: Compose users get a reproducible non-root deployment and safe first-run secret path; operators still own image builds, upgrades, external TLS/tailnet management, and rollout policy.
 
 ## Windows service wrapper and incomplete updates
 
@@ -68,11 +79,14 @@ authenticated catalog access, and a real routed response themselves.
 
 | Workflow | Trigger | Purpose |
 | --- | --- | --- |
-| `.github/workflows/ci.yml` | `pull_request`, merge-queue `merge_group`, `push` to `main`/`preview`/`dev`, or manual dispatch | Cross-platform quality gate. Concurrency identities supersede stale PR/push runs without canceling immutable merge-queue or manual evidence, merge-group paths compare explicit queue base/head SHAs, and the stable `ci` aggregate fails closed over every producer. Self-hosted Windows is restricted to trusted push/manual events. |
+| `.github/workflows/ci.yml` | `pull_request`, merge-queue `merge_group`, `push` to `main`/`preview`/`dev`, or manual dispatch | Cross-platform quality gate. Linux uses four timing-aware general-suite shards plus dedicated isolation jobs and `gates`; macOS is the unsharded control; Windows uses six timing-aware shards. Concurrency supersedes stale PR/push runs without canceling immutable merge-queue or manual evidence, and the stable `ci` aggregate fails closed over every producer. All Windows work stays on ephemeral GitHub-hosted runners. |
 | `.github/workflows/release-pr.yml` | Manual dispatch only (main branch) | Maintains a reviewable Release Please version PR without creating a GitHub release or publishing a package during the candidate-artifact rollout. |
 | `.github/workflows/release-candidate.yml` | Successful `Cross-platform CI` push run on `main`, or exact-SHA manual dispatch | Builds one npm tarball, records canonical source/tree/input/package provenance, and uploads it without publish credentials. |
-| `.github/workflows/fork-auto-release.yml` | Successful `Build release candidate` completion on `main` | Resolves exactly one unexpired artifact from the trusted candidate run and dispatches its run/artifact IDs. |
-| `.github/workflows/release.yml` | Audited stable repository dispatch or transitional manual dispatch | Stable automation re-verifies and publishes the exact candidate tarball without lifecycle scripts or repacking. Existing manual dev/preview callers retain their prior path until rollout is proven and cutover is authorized. |
+| `.github/workflows/fork-auto-release.yml` | Successful `Build release candidate` completion on `main` | Resolves exactly one unexpired artifact from the trusted candidate run and sends the audited stable `repository_dispatch` carrying its run/artifact IDs. |
+| `.github/workflows/fork-dev-auto-release.yml` | Successful `Cross-platform CI` push run on `dev` | Dispatches the transitional `dev` prerelease path for the exact green head; it does not publish stable releases or write the next stable development version. |
+| `.github/workflows/release.yml` | Audited stable `repository_dispatch` or transitional manual dispatch | Re-verifies and publishes the exact candidate tarball without lifecycle scripts or repacking. Stable repository dispatch must come from the provenance chain and carries immutable candidate IDs; existing manual dev/preview callers remain a transition path. |
+| `.github/workflows/promote-dev.yml` | Successful `Cross-platform CI` on `dev`/`main`, successful `Release` on `main`, or default-branch manual dispatch | Maintains the human-gated `dev`-to-`main` promotion, reconciles verified `main` ancestry into `dev`, and is the sole live post-release writer that advances `dev` after proving the npm version, GitHub Release, tag, and exact release SHA. |
+| `.github/workflows/dev-version-bump.yml` | Reusable `workflow_call` only; dormant | Retained upstream recovery implementation. No workflow calls it and it has no branch-selectable manual trigger; `promote-dev.yml` must remain the sole live post-release authority unless a reviewed design explicitly replaces it. |
 | `.github/workflows/deploy-docs.yml` | `push` to `main` touching `docs-site/**` or the workflow, or manual dispatch | Build and publish the Astro/Starlight docs site to GitHub Pages. |
 | `.github/workflows/service-lifecycle.yml` | `pull_request` to `main`/`dev` and `push`, both filtered on the service path set (`src/service.ts`, `src/cli.ts`, `src/cli/index.ts`, `src/lib/bun-runtime.ts`, `package.json`, `bun.lock`, the workflow), or manual dispatch | Service-lifecycle smoke on three platforms: Linux systemd, macOS launchd, and Windows Scheduled Tasks. Each installs, verifies, stops via `ocx stop`, and uninstalls. The path list is kept in sync with the `release.yml` service-gate regex. |
 | `.github/workflows/enforce-pr-target.yml` | `pull_request_target` (opened, reopened, edited, labeled, unlabeled, ready_for_review, synchronize) plus default-branch `status` events filtered to successful `CodeRabbit` statuses | The `enforce-target` gate: rejects pull requests whose head ancestry sits on the `main` tip while far behind `dev`, rejects empty or malformed descriptions, requires a GUI screenshot when the title/body mentions `gui` (immediately waivable with the maintainer-controlled `gui-screenshot-waived` label; legacy maintainer comments remain compatibility evidence on later PR events), keeps contributor PRs in draft until a four-box readiness checklist is complete, verifies the CI / latest-dev / Codex+CodeRabbit-findings claims (review threads plus current-head CodeRabbit review-body findings outside the diff range), and adds a `review-ready` status label at the ready moment. CodeRabbit status SHAs must resolve to exactly one open current-head PR before writes. Stacked child PRs targeting another open PR's head skip the wrong-base gate. |
@@ -80,7 +94,7 @@ authenticated catalog access, and a real routed response themselves.
 | `.github/workflows/issue-quality-tests.yml` | `pull_request` and `push` filtered on the issue/PR automation scripts, templates, and their workflows | Tests the issue and PR automation scripts themselves, so the gates cannot rot silently. |
 | `.github/workflows/issue-triage.yml` | `issues` (opened) | Duplicate detection and triage labeling for new issues. |
 | `.github/workflows/pr-labeler.yml` | `pull_request_target` (opened, edited, synchronize, labeled, unlabeled) | Type and path labeling plus title sync; `labeled`/`unlabeled` let a human override enqueue a fresher run in the per-PR concurrency group. |
-| `.github/workflows/react-doctor.yml` | `pull_request` (opened, synchronize, reopened, ready_for_review) and `push` to `main`; no path filter | React-focused static review. Findings fail the job; write-scoped outputs stay disabled, a contract pinned by `tests/ci-workflows.test.ts`. |
+| `.github/workflows/react-doctor.yml` | `pull_request` (opened, synchronize, reopened, ready_for_review) and `push` to `main`; no path filter | React-focused static review. Findings fail the job; write-scoped outputs stay disabled, a contract pinned by `tests/ci-workflows/ci-workflows.test.ts`. |
 | `.github/workflows/stale-needs-info.yml` | `schedule` only (daily 06:15 UTC); deliberately no manual dispatch | Closes issues left in needs-info past the grace period. Manual dispatch is omitted so a branch-selected run cannot execute that branch's body with issue write scope. |
 
 `pull_request_target`, `issues`, and `schedule` workflows always load from the repository default
@@ -129,7 +143,7 @@ exists so the repository-shape source of truth does not omit the shape of its ow
   `devlog/_chase/` (the reference clones themselves are gitignored).
 - The runtime does not consume `devlog/`, so a contributor who ignores it still builds and runs.
   Repository checks do read it deliberately: `privacy:scan` scans it, and
-  `tests/repo-hygiene.test.ts` enforces the mechanical guards — no tracked `160000` gitlink anywhere,
+  `tests/ci-workflows/repo-hygiene.test.ts` enforces the mechanical guards — no tracked `160000` gitlink anywhere,
   devlog Markdown tracked as ordinary blobs, no `.gitmodules`, and no open plan carrying an unresolved
   security verdict on a security-boundary topic. Some unit-scoped release gate scripts resolve their
   evidence directory from `devlog/_plan` or `_fin` as well.
@@ -137,11 +151,12 @@ exists so the repository-shape source of truth does not omit the shape of its ow
   published outcome — the fix, its regression test, the release note, the advisory once public —
   reaches the repository.
 
-After a successful real stable release from `main`, promotion automation advances `dev` to the
-next stable patch in a package.json-only commit based on that released main commit. Re-running the
+After a successful real stable release from `main`, `promote-dev.yml` advances `dev` to the next
+stable patch in a package.json-only commit based on that released main commit. Re-running the
 completion event is idempotent when `dev` already carries that successor; any other branch or
-version state fails closed. Upstream sync applies the package recipe without ever decreasing the
-current valid version.
+version state fails closed. `dev-version-bump.yml` is dormant `workflow_call`-only recovery code,
+not a second post-release writer. Upstream sync applies the package recipe without ever decreasing
+the current valid version.
 
 ## Maintenance governance
 
@@ -172,7 +187,7 @@ Invariants:
   (`>= 1 MB`) that rejects the ~450-byte placeholder stub left by `--ignore-scripts`/pnpm; it then
   lazy-runs `install.js` and execs `src/cli/index.ts` under Bun, propagating exit code and signal.
 - `package.json` carries `"trustedDependencies": ["bun"]` so `bun install` runs the dependency's
-  postinstall, and `"engines": { "node": ">=22.0.0" }` (Bun is no longer a user prerequisite).
+  postinstall, and `"engines": { "node": ">=18" }` (Bun is no longer a user prerequisite).
 - The plain-Node launcher owns `OPENCODEX_BUN_PATH` selection before Bun can load project dotenv and
   stamps the chosen source/path pair. `src/service.ts` and `src/codex/shim.ts` bake that already-
   selected executable (normally the bundled binary, stable under the npm global prefix) into
@@ -185,12 +200,24 @@ Invariants:
 
 Package release is npm-focused. Stable automation follows one provenance chain:
 `Cross-platform CI` → `Build release candidate` → `Fork auto-release` → `Release`. The candidate
-workflow packages once; the publisher verifies the run, artifact, manifest, source tree, inputs,
-version, and tarball digests before publishing that same file. `scripts/release.ts` suppresses the
-competing automatic dispatcher for helper-created stable commits, waits for that same immutable
-candidate, and passes its run and artifact IDs to the publisher. Dev/preview manual dispatch remains
-a transition path until a real stable candidate release proves the chain and maintainers authorize
-retirement. Docs publishing is separate from npm release publishing.
+workflow packages once; the dispatcher selects exactly one unexpired artifact from that successful
+same-repository `main` run; the publisher re-verifies the run, artifact, manifest, source tree,
+inputs, version, and tarball digests before publishing the same file. Stable automation reaches
+`release.yml` through the audited `fork-auto-release` repository dispatch with immutable candidate
+IDs. `scripts/release.ts` suppresses the competing automatic dispatcher for helper-created stable
+commits, waits for the same immutable candidate, and passes its run and artifact IDs to the
+publisher. Dev/preview manual dispatch remains a transition path until a real stable candidate
+release proves the chain and maintainers authorize retirement. Docs publishing is separate from
+npm release publishing.
+
+Opening a preview for the next core ends the current patch line. After
+`vX.Y.0-preview.*` is tagged, a fix ships as part of `X.Y.0`, not as
+`X.(Y-1).(Z+1)`. `nextStableRelease` refuses such a patch bump, and the release workflow's global
+ordering gate prevents an explicit lower version from bypassing the resolver. This is a deliberate
+policy restriction, not preservation of an unused capability: at the design audit, 103 of 143 stable
+tags had `patch > 0`, and history includes `v2.6.24-preview.20260705` followed by `v2.6.23` and
+`v2.7.39-preview.20260724` followed by `v2.7.37`. Reopening parallel patch lines would require a
+separate channel-aware invariant and release-note baseline design.
 
 ### Release notes
 
@@ -225,13 +252,19 @@ Every npm release version must map cleanly across four surfaces:
 | Surface | Required state |
 | --- | --- |
 | `package.json` | `version` equals the release workflow `version` input. |
-| npm registry | `@bitkyc08/opencodex@<version>` does not exist before publish, then exists after publish with the requested dist-tag. |
-| Git tag | `v<version>` does not exist before publish, then points at the exact release commit. |
-| GitHub Release | `v<version>` does not exist before publish, then is created from the exact release commit. |
+| npm registry | Absent for a fresh release, or already published with `gitHead` equal to the exact release commit for a verified resume; afterward it exists with the requested dist-tag. |
+| Git tag | Absent for a fresh release, or already points at the exact release commit for a verified resume; afterward `v<version>` points there. |
+| GitHub Release | Absent for a fresh release, or is consistent with the verified tag for a resume; afterward `v<version>` exists from the exact release commit. |
 
-The release must fail before `npm publish` if npm, the Git tag, or the GitHub Release already has the
-requested version. This prevents partial releases where npm is published but GitHub Release creation
-fails afterward.
+The metadata preflight runs before publication and fails closed on conflicting state. A wholly new
+version proceeds to npm first; after the registry confirms that exact version, the workflow creates
+and verifies the Git tag at the exact release commit, then creates the GitHub Release from the already
+validated notes. A partial-publication retry is permitted only when the existing npm `gitHead`, tag,
+and release state are consistent with the exact `GITHUB_SHA`; it resumes only the missing later
+surfaces instead of republishing or moving public metadata.
+
+After a fresh tag fetch, the release target must outrank the global release-tag set. An exact tag at
+the exact `GITHUB_SHA` is accepted only for the provenance-verified resume described above.
 
 Do not force-move public version tags by default. If release metadata is already inconsistent, treat
 the version as consumed and publish the next unused patch version instead. Only rewrite a public tag
@@ -240,20 +273,25 @@ after an explicit human decision that the public history rewrite is acceptable.
 Manual preflight checks when debugging a release:
 
 ```bash
-npm view @bitkyc08/opencodex@<version> version
+npm view @yansigit/opencodex@<version> version
 git ls-remote origin refs/tags/v<version>
 gh release view v<version>
 ```
 
 If any of these commands reports an existing artifact for the requested version, stop before
-publishing. For a non-destructive recovery, choose the next unused patch version and release that
-version through `scripts/release.ts`.
+publishing. For a non-destructive recovery, choose the next unused version that also outranks the
+global tag set and release it through `scripts/release.ts`. A patch is not available once a higher-core
+preview has closed that stable patch line.
 
 ## Cross-platform CI
 
 `.github/workflows/ci.yml` is the ordinary quality gate for runtime/package changes. Linux runs
-the suite in four shards with a separate `gates` job, macOS runs it whole, and Windows runs whole
-but only at the shipping boundary (`push` to `main`/`preview`, or manual dispatch). Each lane runs:
+the general lane in four timing-aware fresh-process shards, with unstable process families isolated
+in dedicated jobs and fixed-cost checks in `gates`. macOS remains the unsharded control. Windows
+runs six timing-aware shards on ephemeral `windows-latest` runners for pull requests, merge-queue
+candidates, integration pushes, and manual dispatch. Test membership comes from the repository's
+lane manifest; the upstream domain-layout migration changes file locations without weakening lane
+coverage. Across the jobs, the workflow runs the equivalent of:
 
 ```bash
 bun install --frozen-lockfile
@@ -271,17 +309,18 @@ and the Node-only global-install smoke path:
 npm install
 npm run build:gui
 npm pack --json > pack.json
-npm install -g ./bitkyc08-opencodex-*.tgz
+npm install -g ./yansigit-opencodex-*.tgz
 ocx help
 ```
 
 The CI intentionally does not build docs, run coverage, or perform remote Ubuntu/RDP smoke tests.
 Those stay outside the default gate until a concrete regression justifies the extra runtime.
 
-The Release workflow remains manual and publish-focused. Before any dry-run or publish step, it
-checks that the exact release commit (`GITHUB_SHA`) already has a successful Cross-platform CI run.
-This keeps release runs short and makes release a deployment of a verified commit rather than a
-second CI pipeline.
+The Release workflow remains publish-focused. Before any dry-run or publish step, it checks that the
+exact release commit (`GITHUB_SHA`) already has a successful branch-push Cross-platform CI run and
+that the target passes the fresh global tag-ordering gate. Stable automation additionally requires
+the immutable, provenance-verified candidate tarball produced for that exact `main` commit; after a
+successful stable run, `promote-dev.yml` alone verifies public metadata and advances `dev`.
 
 ## Remote Hub locale and release gate
 

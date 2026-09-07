@@ -27,7 +27,7 @@ Responses 표현이 이 연결의 중심입니다. 네이티브 호환 경로는
 | OpenAI Chat Completions | `POST /v1/chat/completions` | `chat.completion` JSON | `[DONE]`으로 끝나는 `chat.completion.chunk` SSE |
 | Anthropic Messages | `POST /v1/messages` | Anthropic `message` JSON | Anthropic Messages SSE |
 | Anthropic token count | `POST /v1/messages/count_tokens` | `{ "input_tokens": number }` | 해당 없음 |
-| 모델 탐색 | `GET /v1/models` | 세 가지 카탈로그 계약 중 하나 | 해당 없음 |
+| 모델 탐색 | `GET /v1/models` | 카탈로그 또는 명시적 Desktop 스냅샷 | 해당 없음 |
 | Voice and Realtime | `POST /v1/live`, `POST /v1/realtime/calls` | 릴레이된 call-creation 응답 | 별도의 sideband WebSocket이 양방향 프레임을 릴레이함 |
 | Responses compaction | `POST /v1/responses/compact` | 대체 히스토리 JSON | 해당 없음 |
 
@@ -208,16 +208,46 @@ Responses로 변환되어 일반적으로 라우팅된 뒤, Anthropic JSON 또�
 { "input_tokens": 123 }
 ```
 
+해석되지 않은 날짜형 Desktop ID는 탐색 결과에서 빠진 실제 네이티브 모델일 수도 있습니다.
+정보가 부족해 ID를 해석할 수 없으면 Messages와 count-tokens는 고정된 `desktop_model_mapping_unavailable` 오류와
+HTTP 503을 반환합니다. 모델이 잘못됐다는 판정은 아닙니다. 미등록 레거시 해시 별칭은 계속
+HTTP 400을 반환합니다. 두 경우 모두 날짜 제거나 다른 경로로의 폴백은 하지 않습니다.
+알려진 ID, 등록된 매핑, 정확한 `modelMap` 일치와 인식된 실제 네이티브 ID의 처리는 유지됩니다.
+모델 탐색을 갱신하거나 연결된 허브 프로필을 다시 적용한 뒤 시도하세요. 재시도만으로
+해결된다는 보장은 없습니다.
+
 ## `GET /v1/models`
 
-같은 경로가 서로 호환되지 않는 카탈로그 envelope를 기대하는 세 가지 클라이언트를 모두 처리합니다.
-`client_version`이 함께 있지 않으면 Anthropic 형식이 우선합니다.
+`format=desktop-config`를 지정하지 않으면 다음 기본 카탈로그 계약을 사용합니다.
 
 | 계약 | 트리거 | 최상위 형식 | 모델 id 동작 |
 | --- | --- | --- | --- |
 | Anthropic model list | `anthropic-version` 헤더 또는 `client_version`이 없는 `?flavor=anthropic` | Anthropic model-info 항목이 들어 있는 `{ "data": [...] }` | Claude Code는 읽기 쉬운 id를 받고, Desktop은 프로필별 alias 패밀리를 받을 수 있음 |
 | Codex 카탈로그 | `client_version` 쿼리 파라미터 | `{ "models": [...] }` | 네이티브 및 라우팅 항목은 더 풍부한 Codex 카탈로그 필드, 표시 여부, effort, WebSocket, 다중 에이전트 메타데이터를 담음 |
 | 일반 OpenAI list | 어느 트리거도 아님 | `{ "object": "list", "data": [...] }` | 보이는 네이티브 id는 그대로이며, 라우팅 id는 alias 또는 `provider/model` |
+
+### Desktop 설정 스냅샷
+
+`GET /v1/models?ids=desktop&format=desktop-config`는 user-agent와 관계없이 Desktop
+스냅샷을 선택합니다. 응답은 `{ "version": 1, "models": [...] }`이며
+`Cache-Control: no-store`를 포함합니다. 연결된 클라이언트는 `Accept: application/json`,
+`anthropic-version: 2023-06-01`과 기존 데이터 자격 증명을 보냅니다. 관리자 토큰이나 프로필
+업로드는 필요하지 않습니다. 항목은 Codex 카탈로그 행이 아니라 허브가 발급한 Desktop 설정용 모델입니다.
+
+이 형식에 `ids=cli` 또는 `client_version`을 함께 보내면 HTTP 400을 반환합니다. 형식 선택자가
+없으면 위의 기본 응답 계약을 유지합니다. Claude가 꺼져 있으면
+`{ "version": 1, "models": [] }`를 반환하며, 연결된 Desktop apply는 사용 불가로 처리하고
+대체 프로필을 쓰지 않습니다. 버전 1 대신 일반 카탈로그를 반환하는 구형 허브는 지원하지 않으며,
+클라이언트가 로컬에서 만든 ID로 대신 적용하지 않습니다.
+
+스냅샷은 읽기 전용 모델 목록이며 키 회전이나 프로필 업로드 API가 아닙니다. 연결된 Desktop의
+키 이전·복구·연결 해제는 기존 클라이언트 수명주기에서 처리합니다. 회전은 모델 항목과 선택을
+유지하며 CLI의 `rotation`은 `committed`와 `rolled_back`을 구분합니다. 연결 해제는 관리 설정을
+복원하거나 확인된 구형 프로필을 표준 모드로 전환하고, 사용자 필드와 이후의 유효한 선택을
+보존합니다. 충돌이나 미완료 복구를 완료로 표시하지 않습니다. 디스크 변경을 읽으려면 Desktop을
+재시작해야 하며, 연결 해제는 허브 키를 자동 폐기하지 않습니다.
+[Claude Desktop 안내](/ko/guides/claude-code/)를 참고하세요. thinking 재전송과 프롬프트 캐시는
+별도 [#3719](https://github.com/lidge-jun/opencodex/issues/3719)에서 다룹니다.
 
 ## `POST /v1/live`와 Realtime sideband
 
@@ -300,7 +330,7 @@ data-plane key는 management credential이 아닙니다. management API는 별�
 | 401 | `authentication_error` | 필요한 프록시 admission credential이 없거나 유효하지 않습니다 |
 | 403 | `origin_rejected` | Responses/OpenAI data-plane 요청 또는 WebSocket 업그레이드가 허용되지 않은 origin에서 들어왔습니다 |
 | 503 | `combo_unavailable` | 선택한 combo의 모든 대상이 사용할 수 없거나, cooldown 중이거나, 비활성화되어 있거나, 다른 이유로 부적합합니다 |
-| 400 | `unreadable_encrypted_agent_task` | 암호화된 v2 worker task를 소비할 수 있는 적격 네이티브 ChatGPT 대상이 없습니다 |
+| 400 | `unreadable_encrypted_agent_task` | 암호화된 v2 worker task를 처리할 수 있는 정규 ChatGPT 대상이나 명시적으로 신뢰한 Responses 대상이 없습니다 |
 | 426 | `upgrade_required` | Responses WebSocket transport가 비활성화되어 있거나 업그레이드에 실패했습니다. HTTP를 사용하십시오 |
 
 Anthropic-origin 실패는 Anthropic의 error envelope로 렌더링됩니다. 따라서 해당 방언에서 origin 거부는

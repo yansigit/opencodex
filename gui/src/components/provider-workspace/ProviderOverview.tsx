@@ -7,12 +7,12 @@ import { readJsonOrThrow } from "../../fetch-json";
 import { useT, useI18n } from "../../i18n/shared";
 import { IconAlert, IconCheck } from "../../icons";
 import { binProviderStatus, type WorkspaceItem } from "../../provider-workspace/catalog";
-import { formatRelativeTime, relativeTimeLabelsFromT, formatRequestCount, formatTokenCount } from "../../provider-workspace/usage";
-import { accountQuotaFromReport, formatQuotaSourceLabel, type ProviderQuotaReportView } from "../../provider-workspace/report";
-import type { ProviderUsageTotals } from "./types";
+import { formatRequestCount, formatTokenCount } from "../../provider-workspace/usage";
+import type { ProviderQuotaReportView } from "../../provider-workspace/report";
+import type { AccountQuotaReading, ProviderUsageTotals } from "./types";
 import { authModeLabel } from "./ProviderRail";
 import type { ProviderUpdatePatch, ProviderUpdateResult } from "./types";
-import { ProviderCapacityQuota } from "./ProviderCapacityQuota";
+import ProviderCurrentQuota from "./ProviderCurrentQuota";
 
 type ConnectionTestResult = {
   applicable?: boolean;
@@ -31,7 +31,7 @@ type ConnectionTestState = {
 };
 
 export default function ProviderOverview({
-  item, usageTotals, quotaReport, oauthEmail, oauth,
+  item, usageTotals, quotaReport, currentQuotaReading, onRefreshQuota, oauthEmail, oauth,
   apiBase, connectionIdentity,
   onEditSettings, onViewUsage, onUpdateProvider,
   onReauthenticate, onCancelLogin, reauthBusy = false,
@@ -40,6 +40,8 @@ export default function ProviderOverview({
   item: WorkspaceItem;
   usageTotals?: ProviderUsageTotals;
   quotaReport?: ProviderQuotaReportView;
+  currentQuotaReading?: AccountQuotaReading;
+  onRefreshQuota?: () => Promise<boolean>;
   oauthEmail?: string;
   /** Login state for OAuth summaries that carry no email (e.g. Cursor/Kimi). */
   oauth?: { loggedIn?: boolean };
@@ -56,7 +58,6 @@ export default function ProviderOverview({
 }) {
   const t = useT();
   const { locale } = useI18n();
-  const timeLabels = relativeTimeLabelsFromT(t);
   const status = binProviderStatus(item);
   const needsAttention = Boolean(item.activeNeedsReauth);
   const isAiStudioWeb = item.googleMode === "ai-studio-web" || item.name === "google-aistudio";
@@ -83,7 +84,6 @@ export default function ProviderOverview({
         : t("prov.disabledBadge");
   const requests = usageTotals?.requests;
   const tokens = usageTotals?.totalTokens;
-  const quota = accountQuotaFromReport(quotaReport);
   const connectionProbeKey = JSON.stringify([
     apiBase ?? null,
     item.name,
@@ -155,10 +155,10 @@ export default function ProviderOverview({
         });
       }
     } finally {
-     if (connectionAbortRef.current?.controller === controller) {
-       connectionAbortRef.current = null;
-     }
-   }
+      if (connectionAbortRef.current?.controller === controller) {
+        connectionAbortRef.current = null;
+      }
+    }
   }, [apiBase, connectionProbeKey, isAiStudioWeb, item.name, t]);
 
   const handleAiStudioReauth = useCallback(async () => {
@@ -193,17 +193,17 @@ export default function ProviderOverview({
         return;
       }
       setAiStudioReauthMsg(t("pws.aiStudio.loginFailed"));
-    } catch (e) {
-      if (controller.signal.aborted || (e instanceof DOMException && e.name === "AbortError")) return;
-      setAiStudioReauthMsg(e instanceof Error ? e.message : t("pws.aiStudio.loginFailed"));
-   } finally {
-     if (aiStudioReauthAbortRef.current === controller) {
-       aiStudioReauthAbortRef.current = null;
-     }
-     if (!controller.signal.aborted) {
-       setAiStudioReauthBusy(false);
-     }
-   }
+    } catch (error) {
+      if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) return;
+      setAiStudioReauthMsg(error instanceof Error ? error.message : t("pws.aiStudio.loginFailed"));
+    } finally {
+      if (aiStudioReauthAbortRef.current === controller) {
+        aiStudioReauthAbortRef.current = null;
+      }
+      if (!controller.signal.aborted) {
+        setAiStudioReauthBusy(false);
+      }
+    }
   }, [apiBase, onRefreshConfig, t]);
 
   useEffect(() => {
@@ -270,15 +270,14 @@ export default function ProviderOverview({
         {isAiStudioWeb && (needsAiStudioReauth || aiStudioReauthMsg) && (
           <div className="row" style={{ marginTop: 12, alignItems: "center" }}>
             {needsAiStudioReauth && (
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              disabled={aiStudioReauthBusy}
-              onClick={() => void handleAiStudioReauth()}
-            >
-              {/* oxlint-disable-next-line local-i18n/no-hardcoded-ui-strings -- labels for a11y test query; component text is driven by i18n below but oxlint rule fires on JSX string literals; functional display is t() via aiStudioCtaLabel */}
-              {aiStudioReauthBusy ? t("common.loading") : status !== "ready" ? t("pws.aiStudio.connect") : t("pws.reauthenticate")}
-            </button>
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={aiStudioReauthBusy}
+                onClick={() => void handleAiStudioReauth()}
+              >
+                {aiStudioReauthBusy ? t("common.loading") : status !== "ready" ? t("pws.aiStudio.connect") : t("pws.reauthenticate")}
+              </button>
             )}
             {aiStudioReauthMsg && (
               <span role="status" className="muted">{aiStudioReauthMsg}</span>
@@ -312,13 +311,6 @@ export default function ProviderOverview({
           </button>
         )}
       </section>
-
-      {quotaReport && (
-        <section className="pws-section" aria-label={t("pws.rateLimits")}>
-          <h3 className="pws-section-title">{t("pws.rateLimits")}</h3>
-          <ProviderCapacityQuota report={quotaReport} pending={false} />
-        </section>
-      )}
 
       <section className="pws-section" aria-label={t("pws.authSummary")}>
         <h3 className="pws-section-title">{t("pws.authSummary")}</h3>
@@ -387,18 +379,7 @@ export default function ProviderOverview({
               <dd className="pws-kv-mono">{formatTokenCount(tokens, locale)}</dd>
             </div>
           )}
-          {quotaReport && (
-            <div className="pws-kv-row">
-              <dt>{t("pws.stats.quotaUpdated")}</dt>
-              <dd
-                className="pws-kv-mono"
-                title={quotaReport.source ? formatQuotaSourceLabel(quotaReport.source) : undefined}
-              >
-                {formatRelativeTime(quotaReport.updatedAt, timeLabels)}
-              </dd>
-            </div>
-          )}
-          {typeof requests !== "number" && typeof tokens !== "number" && !quotaReport && (
+          {typeof requests !== "number" && typeof tokens !== "number" && (
             <div className="muted">{t("pws.usageUnavailable")}</div>
           )}
         </dl>
@@ -407,9 +388,9 @@ export default function ProviderOverview({
             {t("pws.viewUsage")} →
           </button>
         )}
-        {quota && <div className="muted pws-stats-note">{t("pws.stats.quotaTracked")}</div>}
       </section>
 
+      <ProviderCurrentQuota key={`${item.name}:${connectionIdentity ?? ""}`} report={quotaReport} reading={currentQuotaReading} onRefreshQuota={onRefreshQuota} />
       <NotesSection item={item} onUpdateProvider={onUpdateProvider} />
       </aside>
     </div>

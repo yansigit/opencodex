@@ -139,20 +139,12 @@ export const reasoningConfigSchema = z.object({
 });
 
 const googleSafetyCategorySchema = z.enum([
-  "HARM_CATEGORY_HATE_SPEECH",
-  "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-  "HARM_CATEGORY_DANGEROUS_CONTENT",
-  "HARM_CATEGORY_HARASSMENT",
-  "HARM_CATEGORY_CIVIC_INTEGRITY",
-  "HARM_CATEGORY_JAILBREAK",
+  "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT",
+  "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_CIVIC_INTEGRITY", "HARM_CATEGORY_JAILBREAK",
 ]);
 const googleSafetyThresholdSchema = z.enum([
-  "HARM_BLOCK_THRESHOLD_UNSPECIFIED",
-  "BLOCK_LOW_AND_ABOVE",
-  "BLOCK_MEDIUM_AND_ABOVE",
-  "BLOCK_ONLY_HIGH",
-  "BLOCK_NONE",
-  "OFF",
+  "HARM_BLOCK_THRESHOLD_UNSPECIFIED", "BLOCK_LOW_AND_ABOVE", "BLOCK_MEDIUM_AND_ABOVE",
+  "BLOCK_ONLY_HIGH", "BLOCK_NONE", "OFF",
 ]);
 const googleSafetySettingSchema = z.object({
   category: googleSafetyCategorySchema,
@@ -162,8 +154,7 @@ const googleProviderOptionsSchema = z.object({
   thinking_budget: z.number().safe().int().gte(-1).optional(),
   include_thoughts: z.boolean().optional(),
   safety_settings: z.array(googleSafetySettingSchema).max(16).superRefine((settings, ctx) => {
-    const categories = new Set(settings.map(setting => setting.category));
-    if (categories.size !== settings.length) {
+    if (new Set(settings.map(setting => setting.category)).size !== settings.length) {
       ctx.addIssue({ code: "custom", message: "safety_settings categories must be unique" });
     }
   }).optional(),

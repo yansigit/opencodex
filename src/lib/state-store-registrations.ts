@@ -6,7 +6,6 @@ import {
 import { reconcileCodexReauthState } from "../codex/account-runtime-state";
 import { reconcileCatalogWarningMemos } from "../codex/catalog/aggregation";
 import { reconcileProviderFetchWarnings } from "../codex/catalog/provider-fetch";
-import { reconcileModelMetadataSnapshot } from "../codex/catalog/model-metadata";
 import { reconcileModelCacheGeneration } from "../codex/model-cache";
 import { reconcilePoolRotationState } from "../codex/pool-rotation";
 import { reconcileCodexQuotaAccounts } from "../codex/quota";
@@ -33,7 +32,6 @@ import {
   sweepExpiredXaiPermanentFailureVerdicts,
 } from "../oauth";
 import { sweepExpiredAnthropicRoutingHealth } from "../oauth/anthropic-routing";
-import { sweepExpiredAntigravityRoutingHealth } from "../oauth/antigravity-routing";
 import { listLiveOAuthAccountKeys, reconcileOAuthReauthState } from "../oauth/store";
 import { reconcileGuardianBackoff } from "../oauth/token-guardian";
 import { sweepExpiredApiKeyCooldowns } from "../providers/key-failover";
@@ -86,7 +84,6 @@ export const STATE_STORE_REGISTRATIONS = [
     reconcileGeneration: reconcileComboTargetCooldowns,
   },
   { name: "anthropic-routing-health", sweepExpired: sweepExpiredAnthropicRoutingHealth },
-  { name: "antigravity-routing-health", sweepExpired: sweepExpiredAntigravityRoutingHealth },
   { name: "xai-refresh-verdicts", sweepExpired: sweepExpiredXaiPermanentFailureVerdicts },
   {
     name: "codex-quota-401-recovery",
@@ -112,7 +109,6 @@ export const STATE_STORE_REGISTRATIONS = [
   { name: "provider-quota-history", reconcileGeneration: reconcileProviderAccountQuotaRows },
   { name: "codex-routing-health", reconcileGeneration: reconcileCodexRoutingHealth },
   { name: "model-cache-history", reconcileGeneration: reconcileModelCacheGeneration },
-  { name: "model-metadata-snapshot", reconcileGeneration: reconcileModelMetadataSnapshot },
   { name: "pool-rotation", reconcileGeneration: reconcilePoolRotationState },
   { name: "combo-rotation", reconcileGeneration: reconcileComboRotationState },
   { name: "guardian-backoff", reconcileGeneration: reconcileGuardianBackoff },

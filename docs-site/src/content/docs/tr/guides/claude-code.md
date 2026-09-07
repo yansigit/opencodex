@@ -16,7 +16,7 @@ fazla Claude hesabına giriş yapabilirsiniz. Varsayılan olarak her istek yaln�
 
 **Deneysel, isteğe bağlı** bir Claude hesap havuzu
 (`anthropicAccountPool.enabled`), bu OAuth hesapları arasında yapışkan oturum
-bağlılığı ve 429 bekleme süresi (cooldown) yük devretmesi ekler. Yalnızca
+bağlılığı ve kullanıma dayalı yeni oturum seçimi ekler. Bu ayar atlandığında, iki veya daha fazla kullanılabilir hesabın varlığı 429 yük devretmesini varsayılan olarak etkinleştirir ve hız sınırına takılan bir istek başka bir hesaba geçebilir. Açık bir `anthropicAccountPool.enabled: false` değeri hem bu reaktif yük devretmeyi hem de havuzu kapatır. Yalnızca
 **yeni** oturumlar için `anthropicAccountPool.strategy` uygun hesaplar arasından
 seçim yapar: `quota` (varsayılan), `autoSwitchThreshold` üzerinde olduğunda
 `anthropicAccountPool.quotaWindow` ile yapılandırılan penceredeki bilinen en düşük kullanımı
@@ -27,7 +27,7 @@ olarak kapalıdır**, bir GUI uyarısı gösterir ve sahada kapsamlı olarak tes
 edilmemiştir — Anthropic otomatik rotasyona benzeyen hesapları kısıtlayabilir;
 rotasyon sağlayıcı yaptırımlarına karşı koruma sağlamaz.
 
-Etkinleştirildiğinde operasyonel sözleşme:
+Yük devretme etkinken operasyonel sözleşme:
 
 - Yukarı akıştan gelen **429**, varsa `Retry-After` (yoksa varsayılan bir geri
   çekilme) kullanarak o hesabı soğutur, bağlılıklarını temizler ve aynı istek
@@ -80,6 +80,37 @@ kimlik doğrulama modunda her zaman geçerlidir. Bir API anahtarını kasıtlı 
 kullanmak için, onu bir proje dosyasında bırakmak yerine dışa aktarın (`export
 ANTHROPIC_API_KEY=...`).
 
+### Claude yönlendirmesi kapalıyken yerel geri dönüş
+
+`ocx claude` eskiden Claude yönlendirmesi kapalıyken hata vererek çıkardı.
+Artık bunun yerine yerel `claude` ikili dosyasını başlatır; böylece komut,
+yönlendirme kapalıyken de kullanışlı kalır:
+
+| Yönlendirmenin kapalı olduğu yer | Ne olur |
+| --- | --- |
+| Yapılandırmada `claudeCode.enabled: false` | Yönlendirmenin kapalı olduğunu bildiren bir uyarıyla yerel başlatma |
+| Çalışan vekil `GET /api/claude-code` üzerinden `enabled: false` bildiriyor | Yerel başlatma ve yeniden etkinleştirdikten sonra servisi yeniden başlatma önerisi |
+| `claudeCode.enabled` yok veya `true` | Değişmeden vekil üzerinden yönlendirme |
+
+Geri dönüşü yalnızca açık bir `false` tetikler; bu alandan önceki bir vekil
+yönlendirilmiş kalır. Vekilin bulunmaması da bir tetikleyici değildir —
+yönlendirme açıkken `ocx claude` vekili yine başlatır.
+
+Yerel bir oturum vekil durumunu devralmamalıdır; bu nedenle geri dönüş yalnızca
+OpenCodex'in sahipliğini **kanıtlayabildiği** değerleri kaldırır:
+`ANTHROPIC_BASE_URL` yalnızca bu vekilin kendi geri döngü adresini ve
+yapılandırılmış bağlantı noktasını gösteriyorsa *ve* eşlenmiş kabul belirteci
+vekilin verdiği bir belirteçse; `CLAUDE_CODE_*` keşif ve otomatik bağlam
+anahtarları; ve yalnızca vekil üzerinden çözülen model yuvaları (yönlendirme
+takma adları ve `provider/model` kimlikleri). Geri kalan her şey sizindir ve
+korunur — ilgisiz bir `http://localhost:8080` ağ geçidi ve kendi `sk-ant-`
+kimlik bilginiz birlikte hayatta kalır.
+
+Kaydedilmiş `/model` seçici varsayılanınız yalnızca vekile özgü bir modelse,
+yerel oturum `claudeCode.model` yerel olarak kullanılabildiğinde ona döner;
+aksi hâlde `--model <Anthropic modeli>` geçmeniz için uyarır. Açık bir
+`--model` argümanı her zaman kazanır.
+
 ## Kimlik doğrulama modu (Auth mode)
 
 Claude Code'un bir ağ geçidiyle konuşabilmesi için `ANTHROPIC_AUTH_TOKEN` içinde
@@ -129,6 +160,8 @@ Kaydedilen bir varsayılan geçici olarak kullanılamıyorsa, geri dönene kadar
 ailedeki ilk kullanılabilir rota kullanılır.
 
 Aynı profili komut satırından da yönetebilirsiniz:
+
+Aşağıdaki profil düzenleme yönergeleri yerel profil içindir. Bağlı uzak hub üzerinden uygulama aşağıda ayrıca açıklanır.
 
 ```bash
 ocx claude desktop [apply]
@@ -216,6 +249,63 @@ ile görünmediği anlamına gelir.
 `claudeCode.nativePassthrough: false` ile devre dışı bırakın;
 `claudeCode.anthropicBaseUrl` ile başka bir yeri işaret edin.
 
+## Uzak hub'a bağlı Claude Desktop
+
+Bağlı makinede `ocx claude desktop apply` veya `ocx claude desktop`, hub'ın Desktop anlık
+görüntüsünü alır ve hub origin'ini ve verdiği model kimliklerini yerel Desktop yapılandırmasına
+aynen yazar. Yerel takma ad üretmez. static/hybrid model listesini de kopyalar;
+discovery-only listeyi gömmeden hub origin'ini kullanır.
+
+Profil, aile atamaları ve varsayılanlar hub'da yönetilir. Hub'da değiştirin, istemcide yeniden
+uygulayın ve Desktop'ta modeli yeniden seçin. Yalnızca istemcide oluşturulmuş eski takma adlar
+için de yeniden uygulama/seçim gerekir. `show`, yerel düzenleme ve import/export yerel kalır.
+Bağlıyken `ocx claude desktop import <path> --apply` desteklenmez ve kaydetmeden reddedilir;
+`--apply` olmadan import yerel bir işlemdir.
+
+Okuma, mevcut bağlantının veri erişim kimlik bilgilerini kullanır; yönetici belirteci veya profil
+yüklemesi gerekmez. Eski hub desteği yoksa, yanıt geçersizse veya Desktop listesi boşsa uygulama
+başarısız olur; yerel katalog ya da loopback adresi kullanılmaz. Hub'ı güncelleyin veya
+yapılandırın, ardından yeniden uygulayın.
+
+Bu takma ad değişikliği, [#3719](https://github.com/lidge-jun/opencodex/issues/3719)'daki ayrı `thinking` / `redacted_thinking` yeniden gönderim ve
+istem önbelleği talebini çözmez. Proxy erişimi tek başına yerel Anthropic geçişini etkinleştirmez;
+çevrilen Anthropic rotaları yine de önbellek kullanabilir. Yeniden gönderim doğruluğu ve önbellek
+isabetlerinin karşılaştırılması ayrı iş olarak kalır.
+
+### Anahtar döndürme, kurtarma ve bağlantıyı kesme
+
+Anahtar döndürme ve kurtarma, yerel bağlantı kimlik bilgileriyle birlikte bağlantının yönettiği
+Desktop profilindeki anahtarı da günceller. Yalnızca anahtarı taşımak için elle apply gerekmez.
+Model kimlikleri, aileler, varsayılanlar ve geçerli profil seçimi korunur; yönetilen profil tekrar
+seçilmez veya kapalı entegrasyon açılmaz. CLI JSON'unda `rotation: "committed"` yeni anahtarın
+etkin olduğunu, `rotation: "rolled_back"` önceki anahtarın korunduğunu ya da geri yüklendiğini
+belirtir. Geri alma, yeni anahtarın kesinleştiği veya öncekinin iptal edildiği anlamına gelmez.
+Belirsiz veya eksik kurtarma başarılı döndürme olarak bildirilmez.
+
+İlk bağlı uygulama, geri yüklemek için önceki yönetilen ayarları ve seçimi kaydeder. Tekrar
+uygulama ve döndürme bu ilk kaydı değiştirmez. `ocx disconnect`, kullanıcı alanlarını ve diğer
+profilleri koruyarak bağlantıya ait ayarları geri yükler. Önceki seçim yalnızca yönetilen profil
+hâlâ seçiliyse geri gelir; kullanıcının sonradan seçtiği başka geçerli profil korunur. Yeni
+oluşturulmuş profile kullanıcı eklemeleri yapılmışsa silinmez, okunabilir standart modda kalır.
+`--keep-catalog`, Desktop bağlantı anahtarını değil kataloğu tutar.
+
+İlk ayar kaydı olmayan eski yönetilen profil, geçerli hub'a ve tanınan bağlantı anahtarına açıkça
+aitse taşınabilir. Apply, döndürme/kurtarma veya doğrudan disconnect bunu yeni bayrak ya da önceden
+apply gerektirmeden yapar. Önceki ayarlar kaydedilmediği için bağlantı kesildiğinde standart moda
+geçileceği uyarısı gösterilir. Yalnızca bağlantıya ait ağ geçidi ayarları kaldırılır; kullanıcı
+alanları ve ayrı geçerli seçim korunur. Sonuç özgün ayarların geri yüklenmesi değil standart
+moda dönüş olarak bildirilir.
+
+Yönetilen ayar çatışmaları, tanınmayan kimlik bilgileri ve bozuk geri yükleme kayıtları korunup
+bildirilir. Kesilen temizlik yalnızca aynı bağlantı için sürdürülür; yeni bağlantı silinmez ve
+eksik geri yükleme tamamlanmış sayılmaz. Bağlantıyı kesmeden bekleyen döndürme kurtarmasını bitirin;
+yeniden denerken katalog saklama tercihini değiştirmeyin.
+
+Uygulama, döndürme/kurtarma veya geri yükleme sonrası Claude Desktop'ı tamamen kapatıp yeniden
+açın; disk değişikliği çalışan uygulamanın anahtarını değiştirmez. Uygulama otomatik yeniden
+başlatılmaz. Yerel bağlantı kesme hub anahtarını iptal etmez veya dış kopyaları silmez;
+gerekirse anahtarı hub'da ayrıca iptal edin.
+
 ## /model seçici ("From gateway")
 
 Claude Code 2.1.129+, `GET /v1/models?limit=1000` aracılığıyla ağ geçidi
@@ -271,6 +361,15 @@ slug'lar karma forma geri döner.
 **Model çözümleme sırası:** `[1m]` işaretçisi kaldırılır → okunabilir takma ad
 çözülür → Desktop karma takma adı çözülür → `modelMap` tam eşleşmesi → tarih
 kaldırılmış eşleşme (`-20250514` kaldırılır) → doğrudan geçiş.
+
+Çözümlenemeyen tarih biçimli bir Desktop kimliği, keşifte yer almayan gerçek bir yerel model
+kimliği de olabilir. Mevcut bilgi kimliği çözmeye yetmiyorsa Messages ve count-tokens sabit
+`desktop_model_mapping_unavailable` hatasıyla HTTP 503 döndürür; bu, modelin geçersiz olduğunu kanıtlamaz.
+Bilinmeyen eski hash takma adları HTTP 400 ile reddedilmeye devam eder. Her iki durumda da tarih
+kaldırılmaz ve başka rotaya geçilmez. Bilinen kimlikler, kayıtlı eşlemeler, tam `modelMap`
+eşleşmeleri ve tanınan gerçek yerel kimlikler aynı şekilde işlenir. Yeniden denemeden önce model
+keşfini yenileyin veya bağlı hub profilini yeniden uygulayın; yalnızca tekrar denemek çözümü
+garanti etmez.
 
 Her girdi, `gemini-3-pro (gemini)` gibi bir görünen adın yanı sıra resmi
 `ModelInfo` biçiminde tam model yeteneklerini (akıl yürütme çabası merdiveni,
@@ -417,6 +516,15 @@ yeniden yazar:
 
 Arama sırası: keşif takma adı → tam kimlik → tarih soneki kaldırılmış kimlik
 (`-20250514` kaldırılır) → doğrudan geçiş.
+
+Çözümlenemeyen tarih biçimli bir Desktop kimliği, keşifte yer almayan gerçek bir yerel model
+kimliği de olabilir. Mevcut bilgi kimliği çözmeye yetmiyorsa Messages ve count-tokens sabit
+`desktop_model_mapping_unavailable` hatasıyla HTTP 503 döndürür; bu, modelin geçersiz olduğunu kanıtlamaz.
+Bilinmeyen eski hash takma adları HTTP 400 ile reddedilmeye devam eder. Her iki durumda da tarih
+kaldırılmaz ve başka rotaya geçilmez. Bilinen kimlikler, kayıtlı eşlemeler, tam `modelMap`
+eşleşmeleri ve tanınan gerçek yerel kimlikler aynı şekilde işlenir. Yeniden denemeden önce model
+keşfini yenileyin veya bağlı hub profilini yeniden uygulayın; yalnızca tekrar denemek çözümü
+garanti etmez.
 
 ## Sidecar matrisi: web araması ve görsel anlama
 

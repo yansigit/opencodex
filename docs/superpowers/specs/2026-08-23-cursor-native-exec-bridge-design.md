@@ -64,7 +64,7 @@ Continuation is the next `/v1/responses` with `function_call_output` (existing 3
 
 ## Tests
 
-- Pure mapper tests in `tests/cursor-native-exec-bridge.test.ts` cover shell/read/ls/grep/fetch mapping, quoting, catalog preference, policy gates, and write/delete refusal.
+- Pure mapper tests in `tests/providers/cursor/cursor-native-exec-bridge.test.ts` cover shell/read/ls/grep/fetch mapping, quoting, catalog preference, policy gates, and write/delete refusal.
 - Live-transport harness tests prove bridged native exec emits `tool_call_*` events, does not `stream.write` Connect payloads, and does not surface `#604` text; `nativeLocalExec: "on"` and `writeArgs` stay on the native policy path.
 - Existing MCP and native-exec regression files must stay green.
 

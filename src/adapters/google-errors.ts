@@ -1,11 +1,10 @@
 import { parseUpstreamJsonPayload, safeUpstreamErrorString, sanitizeUpstreamErrorText } from "./upstream-http-error";
+import { isLocationUnsupportedMessage } from "../lib/errors";
 
 /** Pull the human detail out of the Google API error envelope `{error:{message,status,code}}`. */
 function googleErrorDetail(payloadText: string): { message?: string; status?: string } {
   let trimmed = payloadText.trim();
-  if (trimmed.startsWith("data:")) {
-    trimmed = trimmed.replace(/^data:\s*/, "").trim();
-  }
+  if (trimmed.startsWith("data:")) trimmed = trimmed.replace(/^data:\s*/, "").trim();
   if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) {
     return { message: trimmed || undefined };
   }
@@ -17,6 +16,8 @@ function googleErrorDetail(payloadText: string): { message?: string; status?: st
     status: safeUpstreamErrorString(err?.status),
   };
 }
+
+
 
 const GOOGLE_QUOTA_EXHAUSTED_NEEDLES = [
   "quotafailure",
@@ -55,12 +56,10 @@ export function isGoogleQuotaExhaustedText(text: string): boolean {
   return GOOGLE_QUOTA_EXHAUSTED_NEEDLES.some(needle => lower.includes(needle));
 }
 
-const ANTIGRAVITY_GEO_BLOCKED_MARKER = "user location is not supported for the api use";
-
 export function isAntigravityGeoBlockedBody(payloadText: string): boolean {
-  const lower = payloadText.toLowerCase();
-  return lower.includes(ANTIGRAVITY_GEO_BLOCKED_MARKER) || lower.includes("location is not supported");
+  return isLocationUnsupportedMessage(payloadText);
 }
+
 
 function classifyGoogle(label: string, status: number | undefined, enumStatus: string | undefined, text: string): string {
   const lower = `${enumStatus ?? ""} ${text}`.toLowerCase();
@@ -72,9 +71,15 @@ function classifyGoogle(label: string, status: number | undefined, enumStatus: s
   if (status === 401 || enumStatus === "UNAUTHENTICATED" || lower.includes("unauthenticated") || lower.includes("invalid authentication") || lower.includes("expired")) {
     return `${label} authentication failed`;
   }
-  if (isAntigravityGeoBlockedBody(lower)) return `${label} location not supported`;
-  if (status === 403 || enumStatus === "PERMISSION_DENIED" || lower.includes("permission denied") || lower.includes("access denied")) {
+  if (status === 403 || enumStatus === "PERMISSION_DENIED" || lower.includes("permission_denied") || lower.includes("permission denied") || lower.includes("access denied")) {
     return `${label} access denied`;
+  }
+  // Google rejects unsupported geographic / datacenter locations with HTTP 400
+  // FAILED_PRECONDITION. The payload is not malformed, so it must not fall through to
+  // "invalid request" (#3467). Only the observed 400/precondition envelope permits
+  // this inference; other explicit enums and server statuses remain authoritative.
+  if (status === 400 && (!enumStatus || enumStatus === "FAILED_PRECONDITION") && isLocationUnsupportedMessage(lower)) {
+    return `${label} location not supported`;
   }
   if (status === 503 || enumStatus === "UNAVAILABLE" || lower.includes("overloaded") || lower.includes("unavailable")) {
     return `${label} server overloaded`;

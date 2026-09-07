@@ -66,6 +66,26 @@ deleting, or editing a provider's shape clears that per-provider cache; a disabl
 deliberately does not, because a disabled provider is already excluded from the catalog gather
 instead. Codex's own `models_cache.json` is a different cache, invalidated by catalog refresh.
 
+For `liveModels: false`, a static provider publishes the ordered union of `models` and
+`retainModels`. When `models` is absent or empty, its configured `defaultModel` seeds that
+union before retained ids; a nonempty explicit list does not import a different default.
+Without any default or configured/retained ids, the static result stays empty. The existing
+forward-auth native path remains separate. Static gathering does not refresh OAuth or call
+the provider's model endpoint, and normal selection and visibility filters still apply.
+
+The provider workspace uses the existing `/api/models` projection for displayed rows,
+model identity and inventory counts. Counts cover distinct non-disabled selectors within
+each provider, before search or the render cap; they are not selected-model or live-discovery
+counts. The full available list and discovery provenance remain separate inputs.
+
+Deleting a custom definition uses its stable record id and does not also hide the underlying
+model. Native or discovered metadata can therefore reappear without changing the inventory
+count. Hide uses the represented row's native/routed identity and changes visibility only.
+The Models page can restore existing hidden rows; adding a definition does not implicitly
+clear a previous hide or provider allowlist. Actions wait for current row and custom-ownership
+observations, and mutations reconcile those observations instead of retaining browser-only
+removal markers. These presentation operations do not grant routing or account entitlement.
+
 ### Windows request-path catalog-state discovery
 
 [Decision Log]
@@ -108,6 +128,23 @@ This overlay never changes route identity or the upstream wire model, and its ca
 a label edit refresh Codex output.
 
 ## Native passthrough
+
+Astra has its own pinned native row: 272,000 default context, 872,000 opt-in ceiling,
+low-through-ultra effort, low default, and native multi-agent effort `xhigh`. The native-alias
+fallback passes the same configured limits to context, max input and compaction. Unrelated routed
+templates clear the native multi-agent effort; canonical Astra-forward custom rows retain it and
+the pinned Fast speed description. Sync repairs only the exact old built-in Astra Fast description,
+preserving custom descriptions and other stored row fields.
+
+The API registry separately owns Astra's 1,050,000 context / 922,000 input / 128,000 output and
+five API effort levels. Trusted discovery snapshots carry the output ceiling as well as input
+and context, so reconstruction cannot drop it. User output limits may only lower that ceiling.
+Pricing remains provider-scoped and API-referenced for every built-in dollar estimate, including
+Codex-login routes. Both OpenAI identities use the same Astra/Sol API base and cache prices,
+API Fast multipliers and published long-context bands; Fast stacks with long context for Astra,
+GPT-5.6 and the Daybreak Blue selectors. No subscription-specific exception or credit multiplier
+enters the estimate. Explicit user price overrides remain authoritative. See the public provider
+reference for the dated source table.
 
 Native bare OpenAI entries form one `openai` group. The provider's Pool(default)/Direct option
 changes account selection without changing those ids; `openai-apikey/<model>` creates the separate
@@ -226,11 +263,23 @@ advertises) but `expose_spawn_agent_model_overrides` on V2 (default `true`; when
 is omitted *and* the `model`/`reasoning_effort` schema fields are removed). And V2's
 `hide_spawn_agent_metadata` defaults true, which removes `service_tier`.
 
-`modelPickerOrder` (#1649) deliberately does **not** feed this window: it rewrites only the
-Codex-visible `priority` while `SPAWN_PRIORITY_FIELD` preserves the natural priority the roster
-sorts by, so a display reorder can never change candidate membership. That divergence from
-upstream's own ordering is the feature's purpose, not a defect —
-`tests/codex-catalog-model-picker-order.test.ts` pins it.
+`modelPickerOrder` (#1649) separates **OpenCodex guidance** from native advertisement.
+`SPAWN_PRIORITY_FIELD` preserves the natural priority used by `effectiveSubagentRoster`, so
+OpenCodex's preferred/guidance candidate calculation stays independent of display order.
+Native Codex ignores that private field: its advertised five on V1 and exposed V2 follow the
+native `priority` and may change when the picker is reordered. Exact-name override lookup is
+not restricted to those five advertised rows. V1 receives no OpenCodex preferred-roster
+injection; V2 can additionally receive natural-priority guidance when its catalog state permits.
+The helper tests pin guidance behavior, not native tool-description equivalence.
+
+A nonblank bare id in `modelPickerOrder` opts into complete-picker display ordering. Exact
+ids take precedence over raw/encoded equivalents; routed-only and empty lists keep the legacy
+ordering behavior. This does not change the separate `opencodex_spawn_priority` contract.
+Retained rows recompute their natural ranks from the current featured roster and account-selector
+stride before display order is applied, so a discovery outage cannot preserve an obsolete
+featured or picker rank. Canonical `opencode-go` rows retain their configured reasoning ladder
+both when generated and when merged from retained catalog state; synthetic max/ultra choices
+are not added to that provider's declared ladder.
 
 Full derivation with per-line citations: `devlog/_plan/260816_codexrs_multiagent_v2_and_history_perf/013_five_cap_v1_vs_v2.md`.
 
@@ -331,6 +380,21 @@ the request, and they never raise it.
 
 ## Subagents
 
+New non-OAuth provider registrations carry `initialModelSelection` with a unique
+registration identity. Until reliable live/static discovery completes, public
+catalogs and model candidates withhold those providers' models; the provider itself
+stays active. At 20 or more canonical Models switch rows, initialization appends
+all corresponding disabled selectors once. Existing registrations and later manual
+choices are not reinitialized. OAuth/ChatGPT forwarding is exempt using the same
+usable-key override predicate as routing. Display aliases do not add switch rows.
+
+`src/providers/initial-model-selection-runtime.ts` commits the decision against a
+matching registration/inventory snapshot before catalog authority is captured.
+Ordinary management discovery also completes it with Codex integration OFF. The
+final catalog merge fences pending retained rows, including delete/re-add recovery.
+Raw management rows remain visible as pending/OFF. Config listener bindings are
+excluded from inventory identity because live and persisted bindings may differ.
+
 Codex `spawn_agent` advertises only the highest-priority first five picker-visible catalog rows.
 Use at most five configured `subagentModels` ids; they may contain bare catalog ids, routed
 `provider/model` ids, or exact account-qualified `<selector>/<native-openai-model>` ids. The
@@ -339,8 +403,14 @@ through `ocx agent subagents set` or the opencodex configuration.
 
 When account selectors are active, one featured bare native id expands into a complete selector row
 group. Catalog priorities use the selector count as a stride so each group stays together without
-widening Codex's five-row advertisement window. Startup seeds bare native GPT defaults only when
-`subagentModels` is unset; an explicit empty list persists.
+widening Codex's five-row advertisement window. Fresh defaults are Astra, Sol, Terra, Luna, 5.5.
+Startup upgrades unmarked rosters once: prepend `gpt-6-astra`, retain the first four unique
+non-Astra choices, then move retained bare `gpt-5.5` last. The old fifth choice is dropped;
+an unmarked empty list becomes Astra only, and an unset list receives the fresh defaults.
+`subagentModelsVersion: 1` records completion, so later user edits (including an empty list or
+removing Astra) persist. The migration rebases on the latest disk config under the existing
+mutation lock; failed persistence degrades to an in-memory roster for that run without a stale
+whole-config overwrite. Existing disabled-model visibility rules remain unchanged.
 
 Quota-aware fallback walks a configured chain when the featured model is exhausted, probing
 availability on a bounded interval (default 60 s, `src/codex/subagent-model-fallback.ts`). It rewrites
@@ -355,17 +425,6 @@ the active Codex routing; external user-managed provider configs remain untouche
 cause delegation. The TOML edit owns only marker-tagged values, preserves existing unmarked
 user-owned `[agents]` defaults rather than overwriting them, and rejects ambiguous table shapes
 without changing the file.
-
-Named specialist roles (`subagentRoles`) are a separate catalog: id, when-to-use
-description, model, optional effort, and child developer instructions. Enabled role
-models are unioned into the five-slot `subagentModels` roster on save. When
-`syncCodexAgentRoles` is effective (unset defaults on once any enabled role exists;
-explicit `false` always wins), OpenCodex writes marker-owned
-`$CODEX_HOME/agents/ocx-<id>.toml` with only `name`, `description`,
-`developer_instructions`, `model`, and optional `model_reasoning_effort`. It never
-writes `model_fallback` (#1190). Files without the marker, including `reviewer.toml`,
-are never touched; a user-owned file whose TOML `name` matches a role id wins.
-Owned files for disabled or removed ids are pruned.
 
 Claude Code `ocx-*` agent definitions consume the same effective `claudeCode.blockedSkills` policy
 as inbound bundle elision. When the list is non-empty (default: `claude-api`), generated definitions

@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { initialModelSelection } from "../providers/initial-model-selection";
 import { extractAccountId } from "../oauth/chatgpt";
 import { formatErrorResponse } from "../bridge";
 import {
@@ -7,26 +8,26 @@ import {
   providerModelCostsConfigError,
   requestPacingConfigError,
   retryOn429PolicyConfigError,
+  transientRetryOn5xxPolicyConfigError,
   sanitizeModelCostsForDisplay,
 } from "../config";
 import {
   apiKeyTransportConfigError,
   azureCredentialConfigError,
   booleanRecordConfigError,
-  maxWsFrameBytesConfigError,
   modelAdapterRecordConfigError,
   modelDisplayNamesConfigError,
   nonBlankStringArrayConfigError,
   positiveIntegerConfigError,
   positiveIntegerRecordConfigError,
   providerBaseUrlConfigError,
-  providerEmptyToolOutputConfigError,
   providerHeadersConfigError,
+  providerEmptyToolOutputConfigError,
   reasoningSummaryDeliveryRecordConfigError,
+  maxWsFrameBytesConfigError,
   upstreamHttpVersionConfigError,
   wsUpstreamConfigError,
 } from "../config/provider-validation";
-import { antigravityOAuthDestinationConfigError, providerTlsProfileConfigError } from "../lib/provider-tls-profile";
 import { providerDestinationConfigError } from "../lib/destination-policy";
 import { assertServerTlsFiles, serverTlsConfigError } from "../lib/server-tls";
 import { redactSecretString } from "../lib/redact";
@@ -39,6 +40,7 @@ import { vercelGatewayRoutingConfigError } from "../providers/vercel-gateway-rou
 import { googleVertexLocationConfigError } from "../providers/google-vertex-location";
 import { xaiResponsesOptInState } from "../providers/xai-responses-opt-in";
 import { resolveAiStudioCredentials } from "../oauth/aistudio-credentials";
+import { antigravityOAuthDestinationConfigError, providerTlsProfileConfigError } from "../lib/provider-tls-profile";
 
 let _corsOrigin = "http://localhost:10100";
 export function setCorsOrigin(port: number): void { _corsOrigin = `http://localhost:${port}`; }
@@ -70,7 +72,7 @@ export function isLoopbackRequestHost(value: string | null): boolean {
   // Scope of that guarantee: it holds for Hosts `parseHttpHost` can parse. An unparseable
   // Host still returns true above — pre-existing behavior, not browser-reachable (a browser
   // composes Host from its own connection), and pinned by a characterization test in
-  // tests/server-loopback-host-gate.test.ts. Tightening it is separate work.
+  // tests/server/server-loopback-host-gate.test.ts. Tightening it is separate work.
   return isLoopbackHostname(parsed.hostname);
 }
 
@@ -546,6 +548,7 @@ export function requireResponsesApiAuth(req: Request, config: RequestPolicyView)
 const FORBIDDEN_PROVIDER_RUNTIME_FIELDS = [
   "virtualModels", "codexAuthContext", "selectedForwardHeaders",
   "sidecarOutcomeRecorder", "_codexAccountOverride", "_codexAccountRequired",
+  "_apiKeyAttempt",
 ] as const;
 
 function sameCanonicalProviderSeed(actual: Record<string, unknown>, expected: OcxProviderConfig): boolean {
@@ -642,12 +645,6 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     return `provider ${name} must not include codexAccountMode`;
   }
   const typed = provider as unknown as OcxProviderConfig;
-  const tlsProfileError = providerTlsProfileConfigError(name, typed);
-  if (tlsProfileError) {
-    return `provider ${JSON.stringify(redactSecretString(name))} ${tlsProfileError}`;
-  }
-  const antigravityError = antigravityOAuthDestinationConfigError(name, typed);
-  if (antigravityError) return `provider ${name} ${antigravityError}`;
   const baseUrlError = providerBaseUrlConfigError(typed.baseUrl);
   if (baseUrlError) return `provider ${name} ${baseUrlError}`;
   if (effectiveGoogleMode(name, typed) === "vertex" && typed.location !== undefined) {
@@ -656,6 +653,10 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   }
   const destinationError = providerDestinationConfigError(name, typed);
   if (destinationError) return `provider ${name} ${destinationError}`;
+  const tlsProfileError = providerTlsProfileConfigError(name, typed);
+  if (tlsProfileError) return `provider ${JSON.stringify(redactSecretString(name))} ${tlsProfileError}`;
+  const antigravityError = antigravityOAuthDestinationConfigError(name, typed);
+  if (antigravityError) return `provider ${JSON.stringify(redactSecretString(name))} ${antigravityError}`;
   const headersError = providerHeadersConfigError(typed.headers);
   if (headersError) return `provider ${name} ${headersError}`;
   const retryOn429Error = retryOn429PolicyConfigError(raw.retryOn429);
@@ -663,6 +664,10 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     // The provider name is caller-controlled and can be token-shaped; redact and JSON-escape
     // it before it reaches the management API response.
     return `provider ${JSON.stringify(redactSecretString(name))} ${retryOn429Error}`;
+  }
+  const transientRetryError = transientRetryOn5xxPolicyConfigError(raw.transientRetryOn5xx);
+  if (transientRetryError) {
+    return `provider ${JSON.stringify(redactSecretString(name))} ${transientRetryError}`;
   }
   const requestPacingError = requestPacingConfigError(raw.requestPacing);
   if (requestPacingError) {
@@ -824,6 +829,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   modelSupportsServiceTier: "editor",
   preserveResponsesReasoningContent: "editor",
   decodesNativeCompactionBlobs: "editor",
+  allowEncryptedV2AgentTasks: "editor",
   allowPrivateNetwork: "editor",
   wsUpstream: "editor",
   maxWsFrameBytes: "editor",
@@ -833,13 +839,15 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   disabled: "editor",
   codexAccountMode: "editor",
   apiKey: "redacted",
-  azureCredential: "redacted",
   apiKeyTransport: "editor",
   apiKeyPool: "redacted",
+  apiKeySelectionRevision: "runtime",
+  _apiKeyAttempt: "runtime",
   defaultModel: "editor",
   models: "editor",
   liveModels: "editor",
   selectedModels: "editor",
+  initialModelSelection: "runtime",
   retainModels: "editor",
   newModelPolicy: "editor",
   modelPreset: "editor",
@@ -873,6 +881,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   modelPreferHostedTools: "editor",
   supportsOpenAiWebSearchToolFields: "editor",
   xaiResponsesXSearch: "editor",
+  xaiResponsesDefaultVersion: "runtime",
   supportsResponsesCustomTools: "editor",
   responsesSnapshotRepair: "editor",
   reasoningEffortMap: "editor",
@@ -912,6 +921,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   unsafeAllowNativeLocalExec: "editor",
   nativeLocalExec: "editor",
   tlsProfile: "editor",
+  azureCredential: "redacted",
 } as const satisfies Record<keyof OcxProviderConfig, ProviderConfigFieldPolicy>;
 
 type ProviderFieldWithPolicy<Policy extends ProviderConfigFieldPolicy> = {
@@ -1054,6 +1064,8 @@ export function safeConfigDTO(config: OcxConfig): unknown {
         ? "checking"
         : process.platform !== "darwin" ? "unsupported" : "needs_reauth";
     }
+    const selection = initialModelSelection(provider);
+    if (selection) dto.initialModelSelection = selection;
     providers[name] = dto;
   }
   return {

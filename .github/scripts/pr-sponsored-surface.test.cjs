@@ -53,7 +53,7 @@ describe("isAgentProtectedPath", () => {
     for (const file of [
       { filename: "README.md" },
       { filename: "docs-site/src/content/docs/x.md" },
-      { filename: "tests/router.test.ts" },
+      { filename: "tests/routing/router.test.ts" },
     ]) {
       assert.equal(isAgentProtectedPath(file), false, JSON.stringify(file));
     }

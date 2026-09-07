@@ -1,5 +1,7 @@
+import { collectAmbiguousDottedAliases, dottedAliasIsUnambiguous, wireToolInnerName } from "../responses/tool-name-aliases";
 import {
   CODE_MODE_EXEC_TOOL_NAME,
+  dottedToolName,
   namespacedToolName,
   normalizeDeclaredToolName,
 } from "../types";
@@ -74,16 +76,14 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function addWireToolName(names: Set<string>, tool: unknown, namespace?: string): void {
+function addWireToolName(
+  names: Set<string>,
+  tool: unknown,
+  namespace?: string,
+  ambiguousDottedAliases?: ReadonlySet<string>,
+): void {
   if (!isPlainObject(tool)) return;
-  const nestedFunction = tool.type === "function" && isPlainObject(tool.function)
-    ? tool.function
-    : undefined;
-  const name = typeof tool.name === "string" && tool.name.length > 0
-    ? tool.name
-    : typeof nestedFunction?.name === "string" && nestedFunction.name.length > 0
-      ? nestedFunction.name
-      : undefined;
+  const name = wireToolInnerName(tool);
   if (!name) return;
   // Codex routes MCP calls by an explicit `namespace` field, so the same tool is reachable
   // as a bare inner name or as the flattened form; accept both rather than guess which
@@ -93,6 +93,17 @@ function addWireToolName(names: Set<string>, tool: unknown, namespace?: string):
     return;
   }
   names.add(namespacedToolName(namespace, name));
+  // Some routed providers echo the flattened wire name with a dot (`ns.name`, observed with
+  // muse-spark via opencode-go) instead of `ns__name`. It is the same tool identity, so register
+  // the dotted spelling too, mirroring `toolChoiceAliases` (#3402) -- but only while that
+  // spelling names exactly one declared tool. Dots are legal inside both a namespace and a
+  // name, so two distinct identities can flatten onto one dotted alias; accepting it then would
+  // authorize a call the caller never declared under that identity. Ambiguous aliases fall back
+  // to the unambiguous `ns__name` form.
+  const dotted = dottedToolName(namespace, name);
+  if (dottedAliasIsUnambiguous(namespace, name) && !ambiguousDottedAliases?.has(dotted)) {
+    names.add(dotted);
+  }
   // `exec` is the one name that also switches on nested-helper normalization, so a bare alias
   // for a namespaced MCP tool would silently authorize `exec_command`/`shell_command`/
   // `apply_patch` the request never declared. Every other inner name keeps the bare alias.
@@ -118,16 +129,20 @@ export function currentTurnWireToolCatalogBody(
   return { ...body, input: body.input.slice(start) };
 }
 
-function addWireToolSpecs(names: Set<string>, specs: unknown): void {
+function addWireToolSpecs(
+  names: Set<string>,
+  specs: unknown,
+  ambiguousDottedAliases?: ReadonlySet<string>,
+): void {
   if (!Array.isArray(specs)) return;
   for (const spec of specs) {
     if (!isPlainObject(spec)) continue;
     if (spec.type === "namespace" && Array.isArray(spec.tools)) {
       const namespace = typeof spec.name === "string" ? spec.name : undefined;
-      for (const inner of spec.tools) addWireToolName(names, inner, namespace);
+      for (const inner of spec.tools) addWireToolName(names, inner, namespace, ambiguousDottedAliases);
       continue;
     }
-    addWireToolName(names, spec);
+    addWireToolName(names, spec, undefined, ambiguousDottedAliases);
   }
 }
 
@@ -142,15 +157,17 @@ function addWireToolSpecs(names: Set<string>, specs: unknown): void {
 export function collectDeclaredWireToolNames(body: unknown): Set<string> {
   const names = new Set<string>();
   if (!isPlainObject(body)) return names;
-  addWireToolSpecs(names, body.tools);
+  const specGroups: unknown[] = [body.tools];
   if (Array.isArray(body.input)) {
     for (const item of body.input) {
       if (
         isPlainObject(item)
         && (item.type === "additional_tools" || item.type === "tool_search_output")
-      ) addWireToolSpecs(names, item.tools);
+      ) specGroups.push(item.tools);
     }
   }
+  const ambiguousDottedAliases = collectAmbiguousDottedAliases(specGroups);
+  for (const specs of specGroups) addWireToolSpecs(names, specs, ambiguousDottedAliases);
   return names;
 }
 
@@ -208,23 +225,6 @@ function isAuthorizedProviderExecutedCall(
     ) return true;
   }
   return false;
-}
-
-function uniquelyMatchesNamespacedDeclaration(
-  name: string,
-  declared: ReadonlySet<string>,
-): boolean {
-  let matches = 0;
-  for (const candidate of declared) {
-    const separator = candidate.lastIndexOf(":");
-    if (separator < 1) continue;
-    const bare = candidate.slice(separator + 1);
-    const sanitized = candidate.replaceAll(":", "_");
-    if (name !== bare && name !== sanitized) continue;
-    matches += 1;
-    if (matches > 1) return false;
-  }
-  return matches === 1;
 }
 
 /** Nameless client-call item types authorized by supported request tool declarations. */
@@ -310,13 +310,17 @@ function undeclaredNameInItem(
   if (typeof item.namespace === "string") {
     // Namespaced calls are matched by their full wire name only — never legacy-normalize
     // them, or an undeclared namespaced `exec_command` could slip through as bare `exec`.
+    // Both flattened spellings (`ns__name` and the dotted `ns.name` some providers echo,
+    // #3402) name the same tool identity.
     if (declared.has(namespacedToolName(item.namespace, name))) return undefined;
+    // Only consult the dotted spelling when it cannot double as another identity's canonical
+    // name; otherwise a stranger's `ns__name` would authorize this call.
+    if (
+      dottedAliasIsUnambiguous(item.namespace, name)
+      && declared.has(dottedToolName(item.namespace, name))
+    ) return undefined;
     return name;
   }
-  // Some Responses providers echo a namespaced declaration as its bare inner
-  // name, or sanitize ':' to '_'. Accept that compatibility spelling only
-  // when it identifies exactly one declared wire tool; ambiguity stays denied.
-  if (uniquelyMatchesNamespacedDeclaration(name, declared)) return undefined;
   const effectiveName = normalizeDeclaredToolName(name, declared);
   if (declared.has(effectiveName)) return undefined;
   return name;

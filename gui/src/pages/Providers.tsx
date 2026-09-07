@@ -1,14 +1,14 @@
 import { usageSummary30dResourceKey } from "../usage-summary-resource";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ProviderWorkspaceShell, { type AddProviderIntent } from "../components/provider-workspace/ProviderWorkspaceShell";
 import ProviderDetails from "../components/provider-workspace/ProviderDetails";
-import type { WorkspaceProvider } from "../provider-workspace/catalog";
+import { isAccountProvider, type WorkspaceProvider } from "../provider-workspace/catalog";
 import { ensureOpenAiProvider, openAiAccountProviderState, OpenAiEnableError } from "../provider-payload";
 import { oauthTosRisk } from "../oauth-tos-risk";
 import { Notice, ToastNotice, type NoticeTone } from "../ui";
 import { IconPlus } from "../icons";
 import { useT } from "../i18n/shared";
-import { useProviderAccountPools } from "../hooks/useProviderAccountPools";
+import { useProviderAccountPools, type AccountSelectionTarget } from "../hooks/useProviderAccountPools";
 import { useCodexAccountPool } from "../hooks/useCodexAccountPool";
 import { useJsonConfigEditor } from "../hooks/useJsonConfigEditor";
 import { useKeyedClientResource } from "../client-resource";
@@ -20,6 +20,191 @@ import { useProvidersFetch } from "./use-providers-fetch";
 import { ProvidersPageModals } from "./providers-page-modals";
 import { buildAccountLoginStatus, buildAddModalAccountRows } from "./providers-page-utils";
 import type { CodexAccountMutationCompletion } from "../codex-account-mutation";
+import { useProviderModelsNotice } from "./use-provider-models-notice";
+import { navigateHash } from "../hash-routing";
+
+/** The page's real refresh tickets: only the captured report epoch and account read can settle them. */
+// oxlint-disable-next-line react/only-export-components -- keep the page-owned coordinator and its direct race tests in the authorized owner.
+export function useQuotaRefreshCoordinator(apiBase: string) {
+  const [quotaRefresh, setQuotaRefresh] = useState({ epoch: 0, force: false });
+  const epochRef = useRef(0);
+  const mountedRef = useRef(true);
+  const ticketsRef = useRef(new Map<number, {
+    resolve: (ok: boolean) => void;
+    accounts?: boolean;
+    report?: boolean;
+  }>());
+  const cancelTickets = useCallback(() => {
+    for (const ticket of ticketsRef.current.values()) ticket.resolve(false);
+    ticketsRef.current.clear();
+  }, []);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; cancelTickets(); };
+  }, [apiBase, cancelTickets]);
+  const invalidateProviderQuotas = useCallback((force = false) => {
+    cancelTickets();
+    const epoch = ++epochRef.current;
+    if (mountedRef.current) setQuotaRefresh({ epoch, force });
+    return epoch;
+  }, [cancelTickets]);
+  const finish = useCallback((epoch: number, part: "accounts" | "report", ok: boolean) => {
+    const ticket = ticketsRef.current.get(epoch);
+    if (!ticket || !mountedRef.current) return;
+    ticket[part] = ok;
+    if (ticket.accounts !== undefined && ticket.report !== undefined) {
+      ticketsRef.current.delete(epoch);
+      ticket.resolve(ticket.accounts && ticket.report);
+    }
+  }, []);
+  const settleQuotaRefresh = useCallback((ok: boolean, epoch: number) => finish(epoch, "report", ok), [finish]);
+  const beginQuotaRefresh = useCallback((readAccounts?: () => Promise<boolean>): Promise<boolean> => {
+    if (!mountedRef.current) return Promise.resolve(false);
+    const epoch = invalidateProviderQuotas(true);
+    const settled = new Promise<boolean>(resolve => {
+      ticketsRef.current.set(epoch, { resolve, accounts: readAccounts ? undefined : true });
+    });
+    if (readAccounts) {
+      void Promise.resolve().then(readAccounts).then(
+        ok => finish(epoch, "accounts", ok),
+        () => finish(epoch, "accounts", false),
+      );
+    }
+    return settled;
+  }, [finish, invalidateProviderQuotas]);
+  return { quotaRefresh, invalidateProviderQuotas, settleQuotaRefresh, beginQuotaRefresh };
+}
+
+/** One authenticated SSE connection, with bounded reconnect backoff and scheduler recovery. */
+function useAccountSelectionEvents(
+  apiBase: string,
+  enabled: boolean,
+  refresh: (target?: AccountSelectionTarget) => Promise<boolean>,
+) {
+  const refreshRef = useRef(refresh);
+  useLayoutEffect(() => { refreshRef.current = refresh; });
+  const recoverRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    if (!enabled) return;
+    let stopped = false;
+    let retryTimer: ReturnType<typeof window.setTimeout> | null = null;
+    let retryDelay = 250;
+    type Connection = { controller: AbortController; reader?: ReadableStreamDefaultReader<Uint8Array>; lastActivity: number; openedAt?: number };
+    let connection: Connection | null = null;
+    const clearRetry = () => {
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      retryTimer = null;
+    };
+    const close = (current: Connection) => {
+      current.controller.abort();
+      void current.reader?.cancel().catch(() => {});
+    };
+    const connect = () => {
+      if (stopped || connection) return;
+      clearRetry();
+      const current: Connection = { controller: new AbortController(), lastActivity: Date.now() };
+      connection = current;
+      void (async () => {
+        try {
+          // Native EventSource cannot send the session/relay headers installed by api.ts.
+          const response = await fetch(`${apiBase}/api/accounts/events`, {
+            signal: current.controller.signal, credentials: "same-origin", headers: { Accept: "text/event-stream" },
+          });
+          if (!response.ok || !response.headers.get("content-type")?.includes("text/event-stream") || !response.body) {
+            throw new Error("Account selection stream unavailable");
+          }
+          if (stopped || current.controller.signal.aborted) { await response.body.cancel(); return; }
+          const reader = response.body.getReader();
+          current.reader = reader;
+          current.openedAt = Date.now();
+          const decoder = new TextDecoder();
+          const revisions = new Map<string, number>();
+          const pending = new Map<string, AccountSelectionTarget>();
+          let refreshAll = false;
+          let queued = false;
+          const flush = () => {
+            if (queued) return;
+            queued = true;
+            void Promise.resolve().then(async () => {
+              queued = false;
+              if (stopped || current.controller.signal.aborted) return;
+              const targets = refreshAll ? [undefined] : [...pending.values()];
+              refreshAll = false;
+              pending.clear();
+              await Promise.all(targets.map(target => refreshRef.current(target)));
+            }).catch(() => { /* The recovery tick retries failed invalidation reads. */ });
+          };
+          let buffer = "";
+          let event = "";
+          let data: string[] = [];
+          let frameSize = 0;
+          const dispatch = () => {
+            let value: { provider?: unknown; kind?: unknown; revision?: unknown };
+            try { value = JSON.parse(data.join("\n")) as typeof value; } catch { return; }
+            if (!value || typeof value !== "object" || typeof value.revision !== "number" || !Number.isSafeInteger(value.revision) || value.revision < 0) return;
+            if (event === "ready") {
+              revisions.clear();
+              refreshAll = true;
+              flush();
+            } else if (event === "account-selection" && typeof value.provider === "string" && value.provider
+              && (value.kind === "oauth" || value.kind === "api-key")) {
+              const key = `${value.kind}:${value.provider}`;
+              if (value.revision <= (revisions.get(key) ?? -1)) return;
+              revisions.set(key, value.revision);
+              pending.set(key, { provider: value.provider, kind: value.kind });
+              flush();
+            }
+          };
+          while (!stopped && !current.controller.signal.aborted) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            current.lastActivity = Date.now();
+            buffer += decoder.decode(chunk.value, { stream: true });
+            let end: number;
+            while ((end = buffer.indexOf("\n")) !== -1) {
+              const line = buffer.slice(0, end).replace(/\r$/, "");
+              buffer = buffer.slice(end + 1);
+              frameSize += line.length;
+              if (frameSize > 16_384) throw new Error("Account selection event too large");
+              if (!line) { dispatch(); event = ""; data = []; frameSize = 0; }
+              else if (line.startsWith("event:")) event = line.slice(6).replace(/^ /, "");
+              else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+            }
+            if (buffer.length + frameSize > 16_384) throw new Error("Account selection event too large");
+          }
+        } catch {
+          // api.ts owns authentication. Transport failures follow the same retry path as EOF.
+        } finally {
+          close(current);
+          if (connection === current) {
+            connection = null;
+            if (!stopped) {
+              // Only a stable connection resets backoff; repeated ready-then-EOF cannot spin.
+              if (current.openedAt !== undefined && Date.now() - current.openedAt >= 10_000) retryDelay = 250;
+              const delay = retryDelay;
+              retryDelay = Math.min(retryDelay * 2, 5_000);
+              retryTimer = window.setTimeout(() => { retryTimer = null; connect(); }, delay);
+            }
+          }
+        }
+      })();
+    };
+    const recover = () => {
+      // Also retire a hung handshake or a silent connection that lost its heartbeat.
+      if (connection && Date.now() - connection.lastActivity > 60_000) { close(connection); connection = null; }
+      connect();
+    };
+    recoverRef.current = recover;
+    connect();
+    return () => {
+      stopped = true;
+      recoverRef.current = () => {};
+      clearRetry();
+      if (connection) close(connection);
+    };
+  }, [apiBase, enabled]);
+  return useCallback(() => recoverRef.current(), []);
+}
 
 export default function Providers({ apiBase }: { apiBase: string }) {
   const t = useT();
@@ -140,15 +325,20 @@ export default function Providers({ apiBase }: { apiBase: string }) {
    * A counter only moves when something actually invalidates the quotas, so account arrival
    * is silent while every real mutation path still forces a re-read.
    */
-  const [quotaRefresh, setQuotaRefresh] = useState({ epoch: 0, force: false });
-  const invalidateProviderQuotas = useCallback((force = false) => {
-    setQuotaRefresh(previous => ({ epoch: previous.epoch + 1, force }));
-  }, []);
-  const { fetchConfig, fetchOauth, fetchProviderQuotas } = useProvidersFetch({
-    apiBase, setConfig, setOauthProviders, setOauthStatus, setConfigLoadFailed,
+  const { quotaRefresh, invalidateProviderQuotas, settleQuotaRefresh, beginQuotaRefresh } = useQuotaRefreshCoordinator(apiBase);
+  const { fetchConfig: refreshConfigResult, fetchOauth, fetchProviderQuotas } = useProvidersFetch({
+    apiBase, t, setConfig, setOauthProviders, setOauthStatus, notify,
     invalidateProviderQuotas,
+    setConfigLoadFailed,
     configCacheKey,
   });
+  const fetchConfig = useCallback(async () => { await refreshConfigResult(); }, [refreshConfigResult]);
+  const modelsNotice = useProviderModelsNotice(apiBase, refreshConfigResult);
+  const openModelsNotice = modelsNotice.open;
+  const onProviderLoginSettled = useCallback((provider: string) => {
+    revealProviderAccounts(provider);
+    openModelsNotice(provider, false);
+  }, [revealProviderAccounts, openModelsNotice]);
 
   // WP3: one Codex account controller for the whole Providers page, shared by the
   // Overview tab and the Accounts tab so a mutation on either is instantly visible on
@@ -186,14 +376,31 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     fetchConfig, fetchOauth, fetchProviderQuotas, codexActiveNeedsReauth,
   });
   const {
-    accountSets, setAccountSets, accountLoadStates, switchingAccount, keyPools, fetchAccountSets,
+    accountSets, setAccountSets, accountLoadStates, switchingAccount, keyPools, fetchAccountSets, fetchKeyPools,
+    refreshAccountRosters, oauthCardProviders, keyCardProviders,
     switchAccount, switchApiKey, removeApiKey, addApiKeyValue, editCredentialAlias,
-    removeAccount, clearCooldown, activeAccountNeedsReauth,
+    removeAccount, activeAccountNeedsReauth,
   } = pools;
+  const refreshSelection = useCallback((target?: AccountSelectionTarget) => {
+    if (target && !(target.kind === "oauth" ? oauthCardProviders : keyCardProviders).includes(target.provider)) return Promise.resolve(true);
+    return refreshAccountRosters(target);
+  }, [refreshAccountRosters, oauthCardProviders, keyCardProviders]);
+  const recoverSelectionStream = useAccountSelectionEvents(apiBase, config !== null, refreshSelection);
+  const rosterKey = JSON.stringify([apiBase, oauthCardProviders.toSorted(), keyCardProviders.toSorted()]);
+  const rosterRecoveryKeyRef = useRef<string | null>(null);
+  useKeyedClientResource(`provider-rosters:${rosterKey}`, [rosterKey], async signal => {
+    // Existing bootstrap effects own the first enriched reads. This resource is recovery only.
+    if (rosterRecoveryKeyRef.current !== rosterKey) { rosterRecoveryKeyRef.current = rosterKey; return true; }
+    recoverSelectionStream();
+    return refreshAccountRosters(undefined, signal);
+  }, { enabled: config !== null, pollMs: 30_000 });
   const jsonEditor = useJsonConfigEditor({
     apiBase, config,
     notify,
-    fetchConfig, fetchProviderQuotas, onSaved: () => setModelsRefreshToken(n => n + 1),
+    fetchConfig, fetchProviderQuotas, onSaved: added => {
+      if (added.length) modelsNotice.open(added, true);
+      setModelsRefreshToken(n => n + 1);
+    },
     t: t as unknown as Parameters<typeof useJsonConfigEditor>[0]["t"],
   });
   const {
@@ -201,6 +408,41 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     saveConfig, openJsonEditor, discardJsonEditor, requestCloseJsonEditor, restoreJsonEditor,
     jsonIsDirty, setJsonLeaveOpen,
   } = jsonEditor;
+
+  /**
+   * Force a fresh quota read for one provider and resolve with what actually happened.
+   *
+   * Declared here because it needs `fetchAccountSets` from the account-pool hook above.
+   * Per-account bars come from a different read (`&quota=1` inside `fetchAccountSets`),
+   * so both must fire or the rows beside each account keep their old numbers. That read's
+   * forced enrichment must settle as well as the matching provider-report epoch.
+   */
+  const refreshProviderQuota = useCallback((provider: string): Promise<boolean> => {
+    const configured = config?.providers[provider];
+    const mode = configured?.authMode;
+    const readAccounts = configured && isAccountProvider(provider, configured)
+      ? () => codexPool.load(true)
+      : mode === "oauth"
+        ? () => fetchAccountSets([provider], true)
+        : mode === "forward" || mode === "local"
+          ? undefined
+          : () => fetchKeyPools([provider], true);
+    return beginQuotaRefresh(readAccounts);
+  }, [config, codexPool, fetchAccountSets, fetchKeyPools, beginQuotaRefresh]);
+
+  /**
+   * Force a fresh read of EVERY provider's quota, for the overview where no provider
+   * is selected.
+   *
+   * Deliberately without `fetchAccountSets`: that is the per-account enrichment read
+   * the account panels use, it costs two upstream requests per OAuth provider, and the
+   * overview renders provider-level bars from `quotaReports` rather than account sets.
+   * `/api/provider-quotas?refresh=1` already fans out across every configured provider
+   * server-side, so this is one request that answers exactly what the overview shows.
+   */
+  const refreshAllProviderQuotas = useCallback((): Promise<boolean> => {
+    return beginQuotaRefresh();
+  }, [beginQuotaRefresh]);
 
   useEffect(() => {
     // Deferred by a microtask, not a timer. A timer had to be cancelled in cleanup, so navigating
@@ -223,7 +465,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     apiBase, t, aliveRef, accountSets, setAccountSets,
     setBusy, setStatus, setLoginInfo, setOauthStatus, notify,
     fetchConfig, fetchOauth, fetchAccountSets, fetchProviderQuotas, bumpModelsRefresh,
-    onLoginSettled: revealProviderAccounts,
+    onLoginSettled: onProviderLoginSettled,
   });
 
   const { removeProvider, confirmRemoveProvider, setProviderDisabled, setDefaultProvider, updateProvider } = useProvidersCrud({
@@ -356,9 +598,12 @@ export default function Providers({ apiBase }: { apiBase: string }) {
         }}
         jsonSaving={jsonSaving}
         modelsRefreshToken={modelsRefreshToken}
+        onModelsSettled={modelsNotice.modelsSettled}
         activeAccountNeedsReauth={activeAccountNeedsReauth}
         quotaRefreshEpoch={quotaRefresh.epoch}
         quotaForceRefresh={quotaRefresh.force}
+        onQuotaRefreshSettled={settleQuotaRefresh}
+        onRefreshAllQuotas={refreshAllProviderQuotas}
         detail={(item, data) => {
           const loginStatus = accountLoginStatus[item.name] ?? oauthStatus[item.name];
           return (
@@ -367,11 +612,14 @@ export default function Providers({ apiBase }: { apiBase: string }) {
             item={item}
             usageTotals={data.usageTotals}
             modelUsage={data.modelUsage}
-            accountUsage={data.accountUsage}
             quotaReport={data.quotaReport}
             availableModels={data.availableModels}
             hasLiveModels={data.hasLiveModels}
             selectedModels={data.selectedModels}
+            modelRows={data.modelRows}
+            modelRevision={data.modelRevision}
+            modelRowsReady={data.modelRowsReady}
+            onOpenModels={() => navigateHash("models")}
             modelsLoading={data.modelsLoading}
             modelsLoadFailed={data.modelsLoadFailed}
             onRetryModels={data.onRetryModels}
@@ -399,8 +647,9 @@ export default function Providers({ apiBase }: { apiBase: string }) {
               onSwitchApiKey: switchApiKey,
               onRemoveApiKey: removeApiKey,
               onEditAlias: editCredentialAlias,
-              onClearCooldown: clearCooldown,
+              onRefreshQuota: refreshProviderQuota,
             }}
+            onRefreshQuota={() => refreshProviderQuota(item.name)}
             isDefault={item.name === config.defaultProvider}
             onRemoveProvider={removeProvider}
             onSetDisabled={setProviderDisabled}
@@ -416,6 +665,25 @@ export default function Providers({ apiBase }: { apiBase: string }) {
         config={config}
         adding={adding}
         replitWizardOpen={replitWizardOpen}
+        modelsNotice={modelsNotice.notice ? {
+          provider: modelsNotice.notice.context.provider,
+          initialRegistration: modelsNotice.notice.context.initialRegistration,
+          catalogRefreshPending: modelsNotice.notice.context.catalogRefreshPending,
+          loading: modelsNotice.notice.loading,
+          failed: modelsNotice.notice.failed,
+          providerKnown: modelsNotice.notice.context.providers.every(name => !!config.providers[name]),
+          selection: modelsNotice.notice.context.providers.length === 1
+            ? config.providers[modelsNotice.notice.context.provider]?.initialModelSelection
+            : modelsNotice.notice.context.providers.some(name => config.providers[name]?.initialModelSelection?.status === "pending")
+              ? { status: "pending" } : undefined,
+          onClose: modelsNotice.close,
+          onOpenModels: () => { modelsNotice.close(); navigateHash("models"); },
+          onRetry: () => {
+            const current = modelsNotice.notice!.context;
+            modelsNotice.open(current.providers, current.initialRegistration, current.catalogRefreshPending);
+            bumpModelsRefresh();
+          },
+        } : null}
         addIntent={addIntent}
         busy={busy}
         addModalAccountRows={addModalAccountRows}
@@ -438,15 +706,16 @@ export default function Providers({ apiBase }: { apiBase: string }) {
         onReplitInstalled={(name) => {
           setReplitWizardOpen(false);
           notify(t("prov.added", { name, cmd: "ocx sync" }), true);
-          fetchConfig();
-          fetchProviderQuotas(true);
+          void fetchConfig();
+          void fetchProviderQuotas(true);
           bumpModelsRefresh();
           setWorkspaceSelected(name);
         }}
         onAdded={(name) => {
           setAdding(false);
           setAddIntent(null);
-          notify(t("prov.added", { name, cmd: "ocx sync" }), true);
+          clearStatus();
+          modelsNotice.open(name, !config.providers[name]);
           fetchConfig();
           fetchOauth();
           fetchProviderQuotas(true);
@@ -461,6 +730,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
         onCodexAdded={(completion) => {
           setCodexLoginOpen(false);
           notifyCodexCompletion(completion);
+          modelsNotice.open("openai", !config.providers.openai, completion.catalogRefreshPending);
           void fetchConfig();
           void fetchOauth();
           void fetchProviderQuotas(true);

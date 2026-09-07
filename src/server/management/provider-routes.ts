@@ -44,10 +44,12 @@ import { DAILY_ANTIGRAVITY_HOST, PROD_ANTIGRAVITY_HOST } from "../../adapters/go
 import { parseAntigravityAvailableModels } from "../../providers/antigravity-models";
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/key-providers";
 import { deriveProviderPresets, providerConfigSeed } from "../../providers/derive";
+import { initializeProviderModelSelection } from "../../providers/initial-model-selection";
 import { effectiveGoogleMode, providerCodexAccountMode, providerMatchesRegistryTransport } from "../../providers/registry";
 import {
   extractModelEnvelopeRows,
   extractProviderModelItems,
+  isRegistryModelDiscoveryUrl,
   readBoundedDiscoveryJson,
   resolveProviderModelDiscovery,
 } from "../../providers/model-discovery";
@@ -111,6 +113,7 @@ import { refreshUserCostOverlays } from "../../usage/user-cost-overlays";
 import { redactSecretString } from "../../lib/redact";
 import {
   XAI_RESPONSES_OPT_IN_MODELS,
+  XAI_RESPONSES_DEFAULT_VERSION,
   xaiResponsesOptInState,
 } from "../../providers/xai-responses-opt-in";
 import { dropProviderCustomModels } from "../../providers/provider-id-rewrite";
@@ -198,13 +201,11 @@ function isAiStudioHtmlSignIn(text: string): boolean {
 async function probeAiStudioLiveSession(
   name: string,
   prov: OcxProviderConfig,
-): Promise<{ ok: boolean; latencyMs: number; authState?: "connected" | "checking" | "needs_reauth" | "unsupported"; message?: string; error?: string }> {
-  const credentials = resolveAiStudioCredentials(prov);
-  if (credentials.kind !== "ready") {
-    return { ok: false, latencyMs: 0, error: AI_STUDIO_REAUTH_ERROR };
-  }
+): Promise<{ ok: boolean; latencyMs: number; authState?: "connected"; message?: string; error?: string }> {
   const base = (prov.baseUrl || "https://alkalimakersuite-pa.clients6.google.com").replace(/\/+$/, "");
   const url = base + "/v1internal:generateContent";
+  const credentials = resolveAiStudioCredentials(prov, undefined, url);
+  if (credentials.kind !== "ready") return { ok: false, latencyMs: 0, error: AI_STUDIO_REAUTH_ERROR };
   const jar = parseGoogleCookieJar(credentials.cookieHeader);
   const headers = await buildAiStudioHeaders(jar, AI_STUDIO_ORIGIN);
   const body = JSON.stringify({
@@ -212,43 +213,24 @@ async function probeAiStudioLiveSession(
     contents: [{ role: "user", parts: [{ text: "ping" }] }],
     generationConfig: { maxOutputTokens: 1 },
   });
-
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), AI_STUDIO_PROBE_TIMEOUT_MS);
   const started = Date.now();
   try {
-    const outboundProvider = aiStudioProbeFetchForTests
-      ? { ...prov, fetch: aiStudioProbeFetchForTests }
-      : prov;
-    const response = await providerOutboundPost(name, outboundProvider, url, {
-      headers,
-      body,
-      signal: controller.signal,
-    });
+    const outboundProvider = aiStudioProbeFetchForTests ? { ...prov, fetch: aiStudioProbeFetchForTests } : prov;
+    const response = await providerOutboundPost(name, outboundProvider, url, { headers, body, signal: controller.signal });
     const latencyMs = Date.now() - started;
     const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
     const text = await response.text().catch(() => "");
-
     if ((response.status >= 300 && response.status < 400) || response.status === 401 || response.status === 403) {
       return { ok: false, latencyMs, error: AI_STUDIO_REAUTH_ERROR };
     }
     if (contentType.includes("text/html") || isAiStudioHtmlSignIn(text)) {
       return { ok: false, latencyMs, error: AI_STUDIO_REAUTH_ERROR };
     }
-    if (response.status !== 200) {
-      return { ok: false, latencyMs, error: "AI Studio connection probe failed" };
-    }
-    try {
-      JSON.parse(text);
-    } catch {
-      return { ok: false, latencyMs, error: "AI Studio connection probe failed" };
-    }
-    return {
-      ok: true,
-      latencyMs,
-      authState: "connected",
-      message: "AI Studio session verified",
-    };
+    if (response.status !== 200) return { ok: false, latencyMs, error: "AI Studio connection probe failed" };
+    try { JSON.parse(text); } catch { return { ok: false, latencyMs, error: "AI Studio connection probe failed" }; }
+    return { ok: true, latencyMs, authState: "connected", message: "AI Studio session verified" };
   } catch (error) {
     if (error instanceof ProviderOutboundPolicyError && /\breturned 3\d\d redirect\b/.test(error.message)) {
       return { ok: false, latencyMs: Date.now() - started, error: AI_STUDIO_REAUTH_ERROR };
@@ -424,6 +406,10 @@ function adoptProviderEditorCandidate(live: OcxConfig, persisted: OcxConfig): vo
   else live.customModels = structuredClone(persisted.customModels);
   if (persisted.providerContextCaps === undefined) delete live.providerContextCaps;
   else live.providerContextCaps = structuredClone(persisted.providerContextCaps);
+  if (persisted.disabledModels === undefined) delete live.disabledModels;
+  else live.disabledModels = [...persisted.disabledModels];
+  if (persisted.modelDiscovery === undefined) delete live.modelDiscovery;
+  else live.modelDiscovery = structuredClone(persisted.modelDiscovery);
 }
 
 /**
@@ -504,6 +490,10 @@ function applyProviderPatchFields(
         credential.managedIdentityClientId = credential.managedIdentityClientId.trim();
       }
       next.azureCredential = credential as OcxProviderConfig["azureCredential"];
+      // Selecting Azure identity is an explicit credential replacement. A stale key or
+      // pool must not survive underneath the new keyless identity mode.
+      delete next.apiKey;
+      delete next.apiKeyPool;
     }
     touched = true;
   }
@@ -565,10 +555,11 @@ function applyProviderPatchFields(
     const modelAdapters = { ...(next.modelAdapters ?? {}) };
     for (const model of XAI_RESPONSES_OPT_IN_MODELS) {
       if (rawBody.xaiResponsesOptIn) modelAdapters[model] = "openai-responses";
-      else delete modelAdapters[model];
+      else modelAdapters[model] = "openai-chat";
     }
     if (Object.keys(modelAdapters).length > 0) next.modelAdapters = modelAdapters;
     else delete next.modelAdapters;
+    next.xaiResponsesDefaultVersion = Math.max(next.xaiResponsesDefaultVersion ?? 0, XAI_RESPONSES_DEFAULT_VERSION);
     touched = true;
   }
   if (Object.hasOwn(rawBody, "requestPacing")) {
@@ -606,6 +597,28 @@ function applyProviderPatchFields(
       // `upstreamHttpVersionConfigError` is the shared write boundary; the assertion is
       // explicit because the incoming value is an unknown JSON scalar.
       next.upstreamHttpVersion = value as OcxProviderConfig["upstreamHttpVersion"];
+    }
+    touched = true;
+  }
+  if (Object.hasOwn(rawBody, "wsUpstream")) {
+    const value = rawBody.wsUpstream;
+    if (value === null) {
+      delete next.wsUpstream;
+    } else {
+      const error = wsUpstreamConfigError(value);
+      if (error) return { error };
+      next.wsUpstream = value as boolean;
+    }
+    touched = true;
+  }
+  if (Object.hasOwn(rawBody, "maxWsFrameBytes")) {
+    const value = rawBody.maxWsFrameBytes;
+    if (value === null) {
+      delete next.maxWsFrameBytes;
+    } else {
+      const error = maxWsFrameBytesConfigError(value);
+      if (error) return { error };
+      next.maxWsFrameBytes = value as number;
     }
     touched = true;
   }
@@ -1020,8 +1033,15 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       const changed = !isDeepStrictEqual(providerEditorConfigDTO(persisted), nextResult.value);
       if (!changed) return { changed: false, value: candidate };
 
+      for (const [name, provider] of Object.entries(candidate.config.providers)) {
+        if (!Object.hasOwn(persisted.providers, name)) {
+          initializeProviderModelSelection(name, provider, undefined, candidate.config);
+        }
+      }
       persisted.defaultProvider = candidate.config.defaultProvider;
       persisted.providers = structuredClone(candidate.config.providers);
+      persisted.disabledModels = candidate.config.disabledModels;
+      persisted.modelDiscovery = candidate.config.modelDiscovery;
       for (const name of candidate.removedProviders) {
         dropProviderCustomModels(persisted, name);
         setProviderContextCap(persisted, name, false);
@@ -1091,6 +1111,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     if (prov && prov.upstreamHttpVersion === null) delete prov.upstreamHttpVersion;
     if (prov && prov.wsUpstream === null) delete prov.wsUpstream;
     if (prov && (prov as unknown as Record<string, unknown>).upstreamWebsocket === null) delete (prov as unknown as Record<string, unknown>).upstreamWebsocket;
+    if (prov && (prov as unknown as Record<string, unknown>).maxWsFrameBytes === null) delete prov.maxWsFrameBytes;
     if (!name || !prov?.adapter || !prov?.baseUrl) {
       return jsonResponse({ error: "name, provider.adapter and provider.baseUrl are required" }, 400);
     }
@@ -1209,11 +1230,24 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         return { changed: false, value: { error: namespaceCollision, status: 409 } };
       }
       const persisted = fresh.providers[name];
+      const nextSubmitted = structuredClone(submitted);
+      // The editor omits dedicated alias and xAI wire-choice state. Re-read it under
+      // the persistence mutation so a concurrent switch remains authoritative.
+      restorePersistedAliasOverlays(nextSubmitted, persisted);
+      if (name === "xai") {
+        if (!Object.hasOwn(body.provider as object, "modelAdapters") && persisted?.modelAdapters) {
+          nextSubmitted.modelAdapters = { ...persisted.modelAdapters };
+        }
+        if (persisted?.xaiResponsesDefaultVersion !== undefined) {
+          nextSubmitted.xaiResponsesDefaultVersion = persisted.xaiResponsesDefaultVersion;
+        }
+      }
+      initializeProviderModelSelection(name, nextSubmitted, persisted, fresh);
       const committed = {
         ...(persisted ? structuredClone(persisted) : {}),
-        ...structuredClone(submitted),
+        ...nextSubmitted,
       } as OcxProviderConfig;
-      if (submitted.azureCredential) {
+      if (nextSubmitted.azureCredential) {
         // Switching identity modes is an explicit credential replacement. The atomic merge
         // preserves omitted secrets generally, but Azure identity cannot coexist with a stale
         // key or key pool from the prior row.
@@ -1252,6 +1286,9 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const canonicalBudgetOnly = name === "openai"
       && keys.length === 1
       && keys[0] === "modelAutoCompactTokenLimits";
+    const canonicalEmptyToolOutputOnly = name === "openai"
+      && keys.length === 1
+      && keys[0] === "annotateEmptyToolOutputs";
 
     // codexAccountMode keeps its dedicated side-effect path (quota cache clear, thread map
     // clear, pool prime) and is mutually exclusive with every other patch field.
@@ -1332,15 +1369,17 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
 
     const pacingOnly = keys.every(key => key === "requestPacing");
     if (applied.editorTouched && !pacingOnly) {
-      const providerError = canonicalBudgetOnly
-        ? canonicalOpenAiBudgetPatchError(next, rawBody, keys, config)
-        : providerManagementConfigError(
+      const providerError = canonicalEmptyToolOutputOnly
+        ? providerEmptyToolOutputConfigError(name, next)
+        : canonicalBudgetOnly
+          ? canonicalOpenAiBudgetPatchError(next, rawBody, keys, config)
+          : providerManagementConfigError(
             name,
             providerTransportValidationCandidate(next as unknown as Record<string, unknown>),
           )
-          ?? providerEmptyToolOutputConfigError(name, next);
+            ?? providerEmptyToolOutputConfigError(name, next);
       if (providerError) return jsonResponse({ error: providerError }, 400);
-      if (!canonicalBudgetOnly) {
+      if (!canonicalBudgetOnly && !canonicalEmptyToolOutputOnly) {
         const serviceTierError = providerServiceTierConfigError(name, next);
         if (serviceTierError) return jsonResponse({ error: serviceTierError }, 400);
         // Same DNS gate as POST and re-enable: the canonical built-in OpenAI forward
@@ -1376,17 +1415,19 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         return { changed: false, value: { error: replay.error, status: 409 } };
       }
       if (replay.editorTouched && !pacingOnly) {
-        const syncError = canonicalBudgetOnly
-          ? canonicalOpenAiBudgetPatchError(replay.next, rawBody, keys, fresh)
-          : providerManagementConfigError(
+        const syncError = canonicalEmptyToolOutputOnly
+          ? providerEmptyToolOutputConfigError(name, replay.next)
+          : canonicalBudgetOnly
+            ? canonicalOpenAiBudgetPatchError(replay.next, rawBody, keys, fresh)
+            : providerManagementConfigError(
               name,
               providerTransportValidationCandidate(replay.next as unknown as Record<string, unknown>),
             )
-            ?? providerEmptyToolOutputConfigError(name, replay.next);
+              ?? providerEmptyToolOutputConfigError(name, replay.next);
         if (syncError) {
           return { changed: false, value: { error: syncError, status: 409 } };
         }
-        if (!canonicalBudgetOnly) {
+        if (!canonicalBudgetOnly && !canonicalEmptyToolOutputOnly) {
           const serviceTierError = providerServiceTierConfigError(name, replay.next);
           if (serviceTierError) {
             return { changed: false, value: { error: serviceTierError, status: 409 } };
@@ -1490,16 +1531,20 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const discovery = resolveProviderModelDiscovery(name, prov);
     const started = Date.now();
     try {
+      // Same canonical-URL TUN transparency as catalog discovery: the registry's
+      // own fixed discovery URL survives purely-benchmark (Clash/Surge/Mihomo
+      // fake-IP) DNS without proxy env.
+      const outboundDependencies = { isCanonicalUrl: isRegistryModelDiscoveryUrl };
       const res = method === "POST"
         ? await providerOutboundPost(name, prov, modelsUrl, {
           headers,
           body: JSON.stringify({ project }),
           signal: AbortSignal.timeout(8000),
-        })
+        }, outboundDependencies)
         : await providerOutboundGet(name, prov, modelsUrl, {
           headers,
           signal: AbortSignal.timeout(8000),
-        });
+        }, outboundDependencies);
       const latencyMs = Date.now() - started;
       const redirectError = await providerRedirectError(res, modelsUrl);
       if (redirectError) {

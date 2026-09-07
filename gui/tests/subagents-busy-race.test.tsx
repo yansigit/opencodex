@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import Subagents from "../src/pages/Subagents";
 import { LanguageProvider } from "../src/i18n/provider";
+import { en } from "../src/i18n/en";
 
 /**
  * While a Subagents save is in flight, toggle/remove/reorder must be blocked;
@@ -100,8 +101,9 @@ async function mount() {
 }
 
 function addToggle(id: string): HTMLButtonElement {
+  const label = en["sub.workspace.addToFeatured"].replace("{m}", id);
   const row = Array.from(container.querySelectorAll("button")).find((b) =>
-    (b.getAttribute("aria-label") ?? "").includes(`Add ${id} to advertised overrides`),
+    b.getAttribute("aria-label") === label,
   );
   if (!row) throw new Error(`add toggle not found: ${id}`);
   return row as unknown as HTMLButtonElement;
