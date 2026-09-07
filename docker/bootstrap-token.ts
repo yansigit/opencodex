@@ -1,6 +1,6 @@
 import { writeServiceApiTokenFile } from "../src/lib/service-secrets";
 
-const MAX_TOKEN_BYTES = 512;
+const MAX_TOKEN_BYTES = 4096;
 const MAX_INPUT_BYTES = MAX_TOKEN_BYTES + 2;
 
 export async function readBoundedToken(stream: ReadableStream<Uint8Array>): Promise<string> {
@@ -14,7 +14,7 @@ export async function readBoundedToken(stream: ReadableStream<Uint8Array>): Prom
       const { done, value } = await reader.read();
       if (done) break;
       bytes += value.byteLength;
-      if (bytes > MAX_INPUT_BYTES) throw new Error("token input exceeds 512 bytes");
+      if (bytes > MAX_INPUT_BYTES) throw new Error("token input exceeds 4096 bytes");
       raw += decoder.decode(value, { stream: true });
     }
     raw += decoder.decode();
@@ -27,7 +27,7 @@ export async function readBoundedToken(stream: ReadableStream<Uint8Array>): Prom
 
   const token = line.trim();
   if (!token) throw new Error("token input is empty");
-  if (Buffer.byteLength(token) > MAX_TOKEN_BYTES) throw new Error("token input exceeds 512 bytes");
+  if (Buffer.byteLength(token) > MAX_TOKEN_BYTES) throw new Error("token input exceeds 4096 bytes");
   return token;
 }
 
