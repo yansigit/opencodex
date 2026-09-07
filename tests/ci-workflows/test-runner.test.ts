@@ -207,7 +207,16 @@ describe("test runner isolation", () => {
  */
 describe("bun test argv", () => {
   test("a filter-less run gets isolate, bounded parallelism and the suite path", () => {
-    expect(resolveBunTestArgs([])).toEqual(["--isolate", "--parallel=4", "./tests/"]);
+    expect(resolveBunTestArgs([])).toEqual(["--isolate", "--parallel=4", "--timeout=60000", "./tests/"]);
+  });
+
+  test("full-suite framework ceiling matches CI while explicit short deadlines survive", () => {
+    expect(readFileSync(repoPath("scripts/ci/run-bun-test-batches.sh"), "utf8")).toContain("--timeout 60000");
+    expect(resolveBunTestArgs(["--timeout=250"]))
+      .toEqual(["--isolate", "--parallel=4", "--timeout=250", "./tests/"]);
+    expect(resolveBunTestArgs(["--timeout", "250"]))
+      .toEqual(["--isolate", "--parallel=4", "--timeout", "250", "./tests/"]);
+    expect(resolveBunTestArgs(["tests/example.test.ts"])).not.toContain("--timeout=60000");
   });
 
   test("the default full suite quarantines load-sensitive and dedicated files into one-worker lanes", () => {
@@ -297,9 +306,9 @@ describe("bun test argv", () => {
 
   test("a caller-supplied concurrency is left alone", () => {
     expect(resolveBunTestArgs(["--parallel=2"]))
-      .toEqual(["--isolate", "--parallel=2", "./tests/"]);
+      .toEqual(["--isolate", "--timeout=60000", "--parallel=2", "./tests/"]);
     expect(resolveBunTestArgs(["--parallel"]))
-      .toEqual(["--isolate", "--parallel", "./tests/"]);
+      .toEqual(["--isolate", "--timeout=60000", "--parallel", "./tests/"]);
     expect(resolveBunTestArgs(["--parallel", "tests/foo.test.ts"]))
       .toEqual(["--isolate", "--parallel", "tests/foo.test.ts"]);
     expect(resolveBunTestArgs(["--parallel=2", "tests/foo.test.ts"]))
@@ -317,17 +326,19 @@ describe("bun test argv", () => {
       .toEqual([
         "--isolate",
         "--parallel=4",
+        "--timeout=60000",
         "--timings",
         ".bun-test-timings/current.json",
         "./tests/",
       ]);
     for (const configFlag of ["-c", "--config"]) {
       expect(resolveBunTestArgs([configFlag, "ci.bunfig.toml"]))
-        .toEqual(["--isolate", "--parallel=4", configFlag, "ci.bunfig.toml", "./tests/"]);
+        .toEqual(["--isolate", "--parallel=4", "--timeout=60000", configFlag, "ci.bunfig.toml", "./tests/"]);
     }
     expect(resolveBunTestArgs(["-t", "serial test"])).toEqual([
       "--isolate",
       "--parallel=4",
+      "--timeout=60000",
       "-t",
       "serial test",
       "./tests/",

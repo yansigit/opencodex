@@ -316,6 +316,12 @@ export function resolveBunTestArgs(
   if (!hasCliFlag(effectiveRequested, "--parallel")) {
     args.push(`--parallel=${DEFAULT_TEST_PARALLELISM}`);
   }
+  // Match the existing CI batch runner's 60s framework ceiling. The default
+  // 5s is too short for real subprocess-backed catalog tests under full-pool
+  // load. Focused runs and explicit caller/test deadlines remain unchanged.
+  if (isFullSuiteRun(effectiveRequested) && !hasCliFlag(effectiveRequested, "--timeout")) {
+    args.push("--timeout=60000");
+  }
   args.push(...effectiveRequested);
   if (isFullSuiteRun(effectiveRequested)) args.push("./tests/");
   return args;
