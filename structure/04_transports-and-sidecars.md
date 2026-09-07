@@ -330,6 +330,34 @@ whole result is examined; populated text, image/file parts, unpaired results, sh
 compaction and OpenAI-operated destinations are untouched. This does not rewrite valid JavaScript
 or reconstruct output that the code-mode host never emitted.
 
+Routed code-mode turns also carry the host contract for the nested helpers, stated in the same three
+injection sites as the result-emission rule (shared catalog nudge, Cursor code-mode guidance, native
+routed Responses instructions): `tools.apply_patch` takes one string that opens and closes with the
+bare patch marker lines (blank lines or indentation around them are tolerated; a decorated or missing
+marker is rejected), the isolate has no `import`/`require`, and a command that outlives
+`yield_time_ms` is polled through `write_stdin` with empty `chars` rather than a shell sleep loop.
+When a code-mode exec result still carries one of the host's failure strings ("expects a string
+input", "The first line of the patch must be", "The last line of the patch must be", "Unsupported
+import in exec"), the native routed Responses, Kiro, and Cursor result paths append a one-line
+recovery hint naming the broken rule; flat shell bridges and foreign MCP namespaces are never
+annotated, Responses and Kiro additionally require the request's verified code-mode catalog, Cursor
+matches the exact `exec` name under its `opencodex-responses` provider without catalog context, and
+Cursor's error classification and Kiro's whitespace and failed-wrapper grouping are unchanged. Both
+halves live in `src/adapters/exec-tool-result-normalize.ts`
+so the pre-call and post-hoc wording cannot drift. This guidance and annotation change rewrites
+neither the model's JavaScript nor its patch payload; the existing name-alias delimiter
+normalization in `src/responses/code-mode-helper-compat.ts` is unchanged, and the host still rejects a
+malformed call exactly as before. Anthropic, Google, OpenAI-chat and command-code result paths
+have no exec-result seam today and are not annotated.
+
+[Decision Log]
+- 목적과 의도: Stop routed models from abandoning `apply_patch` after the Codex host rejects an object argument or a decorated marker, and from blocking a turn in a shell sleep loop when the host offers `session_id` polling.
+- 기존 구현 및 제약 조건: The shared nudge, Cursor guidance and native Responses instructions already carry the result-emission rule from `exec-tool-result-normalize.ts`, but none stated the helper's argument type, the marker rule, the import ban, or the polling protocol; `260905_apply_patch_envelope_gap` refused to rewrite JavaScript bodies (MODE B), so payload repair is off the table.
+- 검토한 주요 대안: Repair the argument shape inside the proxy (rejected: same body ambiguity as MODE B and it turns a rejected write into a performed one); Cursor-only guidance (rejected: the incident was native routed Responses on xAI); annotate every adapter's tool results (rejected: Anthropic/Google/OpenAI-chat/command-code have no exec-result seam and would need a new one).
+- 선택한 방식: One pre-call sentence and one marker→recovery table in the module that already owns the echo pair; inject the sentence at the three existing code-mode sites; annotate at the three existing exec-result seams with an exec-gated, idempotent helper that never changes error status.
+- 다른 대안 대신 이 방식을 선택한 이유: The safe repair for a host contract the model broke is to state it before the call and name it after the failure; keeping both halves in one file is what keeps them consistent.
+- 장점, 단점 및 영향: Code-mode system prompts grow by roughly 600 characters on routed turns; OpenAI destinations, flat catalogs and compaction requests are untouched. An exec result that legitimately prints one of the four phrases gains a recovery line, which is additive text and never an error flip. On Cursor, a structured tool literally named `exec` whose output quotes one of those phrases would also gain that line. The effect on the live Grok defect rate is unmeasured until a re-probe.
+
 [Decision Log]
 - 목적과 의도: Keep Codex hosted web search usable on xAI's public Responses endpoint without forwarding private OpenAI-only fields that xAI rejects.
 - 기존 구현 및 제약 조건: Codex emits `external_web_access`, `search_context_size`, `search_content_types`, and `user_location`; xAI documents a live-only `web_search` tool with domain filters and image flags, while Codex cached mode explicitly forbids external access.
@@ -1451,6 +1479,23 @@ Unsupported constraints remain in `description` as model guidance instead of dis
 - 장점, 단점 및 영향: Both OpenAI-shaped input surfaces gain native Anthropic schema enforcement and unsupported intent remains visible to the model; the copied subset must track upstream SDK changes, description-carried constraints are guidance rather than hard validation, and the root-reference fix is an intentional divergence to keep definitions reachable.
 
 ## Reasoning display parity (hideThinkingSummary)
+
+Reasoning-envelope serialization uses preflight byte sizing and transient reservations before
+creating JSON, UTF-8, or base64 copies. Encoding also admits the matching decode projection, so
+a successfully encoded standalone envelope fits the standalone decoder's limit. Callers retain
+ownership of returned values; the helper releases only its temporary reservation. Inbound
+Anthropic translation carries one budget across all assistant blocks and accounts for retained
+envelopes until the response lifecycle disposes it. Standalone translation owns a temporary
+budget and disposes it on success or failure. Final translated-request sizing uses plain-JSON
+measurement rather than allocating a serialized copy just to measure it.
+
+[Decision Log]
+- 목적과 의도: Keep reasoning replay bounded while preserving opaque values exactly.
+- 기존 구현 및 제약 조건: Reasoning continuity needs JSON/base64 envelopes, and existing callers already own retained accounting and typed overflow handling.
+- 검토한 주요 대안: Per-field truncation, an independent fixed field limit, or shared transient admission plus cumulative inbound ownership.
+- 선택한 방식: Reserve conservative copy projections in the envelope helpers and use the existing request budget across inbound blocks.
+- 다른 대안 대신 이 방식을 선택한 이유: Truncation changes signed values; one field limit does not describe aggregate ownership. Existing budget errors retain the established HTTP and stream error contracts.
+- 장점, 단점 및 영향: Normal replay is unchanged; envelope admission includes copy overhead and is stricter than a raw-string length ceiling. These are translator accounting limits, not a process-wide RSS guarantee.
 
 `hideThinkingSummary` (request reasoning summary absent/"none" — the routed catalog default) is
 honored by BOTH reasoning paths: anthropic `thinking_delta` AND raw `reasoning_raw_delta`

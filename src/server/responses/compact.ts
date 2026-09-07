@@ -1119,7 +1119,8 @@ export async function handleResponsesCompact(
         }
       }
     }
-    return buffered;
+    // A native compact 404 falls back to a regular Responses compaction turn.
+    if (buffered.status !== 404) return buffered;
     } finally {
       releaseUpstreamHostAdmission(compactHostAdmissionLease);
       releaseCodexAuthContextProbeLease(authCtx);
@@ -1136,7 +1137,7 @@ export async function handleResponsesCompact(
     // the completed event back into the v1 compact JSON contract below. Combo-dispatched
     // turns also go out as SSE: failover can land on a canonical child that rejects a
     // non-streaming turn, and every combo-capable provider already serves streaming traffic.
-    stream: accountGatedCompactWireModel || route.combo ? true : false,
+    stream: isCanonicalOpenAiForwardProvider(route.provider) || accountGatedCompactWireModel || route.combo ? true : false,
     input: [...inputItems, { type: "compaction_trigger" }],
   };
   const internalHeaders = new Headers({ "content-type": "application/json" });

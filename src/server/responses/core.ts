@@ -300,7 +300,7 @@ import {
   upstreamErrorMessageFromPayload,
 } from "../../lib/errors";
 import type { AdmissionLease } from "../../lib/admission";
-import { supportedLadderFor } from "../effort-policy";
+import { prepareEffortNormalization, supportedLadderFor } from "../effort-policy";
 import { classifyAgentKind, isThreadSpawnRequest } from "../effort-policy";
 import {
   applySubagentModelFallback,
@@ -2352,6 +2352,7 @@ async function applyFinalRouteRequestNormalization(args: {
   inboundTransport?: "websocket";
 }): Promise<void> {
   const { parsed, route, config, req, logCtx, inboundWire, inboundTransport } = args;
+  const effortSelector = prepareEffortNormalization(parsed, route);
 
   // Only Anthropic message routes retain the Codex-facing selector. Other providers must keep
   // their existing response.model contract even when their public and wire model ids differ.
@@ -2376,7 +2377,8 @@ async function applyFinalRouteRequestNormalization(args: {
 
   // Settle the wire once so logging, fast-mode, auth, and sidecars read the adapter
   // this request will actually use (#404).
-  route.provider = resolveOpenCodeGoTransport(route.provider, sessionLaneIdFromRequest(req.headers));
+  route.provider = resolveOpenCodeGoTransport(route.provider,
+    sessionLaneIdFromRequest(req.headers) ?? normalizeLogConversationId(req.headers.get("x-opencode-session")));
   route.provider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire);
   if (preserveAnthropicResponseModel) parsed._responseModelId = responseModelId;
   logCtx.model = route.modelId;
@@ -2486,6 +2488,17 @@ async function applyFinalRouteRequestNormalization(args: {
       }
     } else if (isInjectionDebugEnabled() && collabSurface(parsed) !== null) {
       injectionDebugLog(`[opencodex] ${route.modelId}: collab surface=${collabSurface(parsed)}, guidance silent (effort=${parsed.options.reasoning ?? "unset"}, injectionModel=${config.injectionModel ?? "unset"})`);
+    }
+  }
+
+  {
+    const { applyPinnedEffort } = await import("../effort-policy");
+    const pinned = applyPinnedEffort(parsed, route, config, effortSelector);
+    if (pinned) {
+      logCtx.requestedEffort = pinned.from ? `${pinned.from}->${pinned.to}` : pinned.to;
+      if (isInjectionDebugEnabled()) {
+        injectionDebugLog(`[opencodex] ${route.modelId}: pinned reasoning effort applied (${pinned.from ?? "none"} -> ${pinned.to})`);
+      }
     }
   }
 
@@ -3947,7 +3960,7 @@ async function handleResponsesInner(
     }
   }
   const isOAuth401ReplayProvider = isAntigravityOAuth
-    || ((route.providerName === "xai" || route.providerName === "github-copilot" || route.providerName === "kiro" || route.providerName === "cursor")
+    || ((route.providerName === "xai" || route.providerName === "github-copilot" || route.providerName === "kiro" || route.providerName === "cursor" || route.providerName === "orcarouter-oauth")
       && route.provider.authMode === "oauth");
   let sentOAuthSnapshot: OAuthAccessSnapshot | undefined;
   let replayOAuthCredentialSnapshot: Pick<OAuthAccessSnapshot, "accountId" | "generation"> | undefined;

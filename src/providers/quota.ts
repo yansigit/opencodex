@@ -23,7 +23,7 @@ import {
 import { antigravityHostCandidates, isAntigravityHttpsHost } from "../adapters/google-antigravity-hosts";
 import { antigravityOAuthDestinationConfigError, providerTlsFetch } from "../lib/provider-tls-profile";
 import { isCanonicalOllamaCloudUrl } from "../adapters/ollama-native-url";
-import { ProviderOutboundPolicyError, providerOutboundPost, providerRedirectError, type ProviderOutboundDependencies } from "../lib/provider-outbound";
+import { providerOutboundPost, providerRedirectError, type ProviderOutboundDependencies } from "../lib/provider-outbound";
 import { apiKeyPoolEntryId } from "./api-keys";
 import { XAI_GROK_CLIENT_VERSION, XAI_GROK_COMPATIBILITY } from "./xai-transport";
 import { getProviderRegistryEntry, providerCodexAccountMode, registryEntryForProviderDestination } from "./registry";
@@ -2787,8 +2787,11 @@ async function fetchAntigravitySummaryQuota(accessToken: string, projectId: stri
     if (!summaryResponse.ok) return { kind: "unavailable" };
     const quota = parseAntigravityQuotaSummary(asRecord(await readQuotaJson(summaryResponse)));
     return quota ? { kind: "quota", quota } : { kind: "unavailable" };
-  } catch (error) {
-    return { kind: error instanceof ProviderOutboundPolicyError ? "terminal" : "unavailable" };
+  } catch {
+    // Transport failures (including destination-policy rejections) are merely
+    // unavailable: the fixed models transport is still attempted below. A
+    // policy rejection there aborts the probe without a second transport.
+    return { kind: "unavailable" };
   }
 }
 
@@ -2834,7 +2837,6 @@ async function fetchAntigravityAccountQuota(accountId: string): Promise<Provider
 }
 
 async function fetchAntigravityQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
-  if (antigravityOAuthDestinationConfigError(provider, config)) return null;
   let snapshot: OAuthAccessSnapshot;
   try {
     snapshot = await getValidAccessTokenSnapshot("google-antigravity");
@@ -2851,7 +2853,52 @@ async function fetchAntigravityQuota(provider: string, config: OcxProviderConfig
   if (summary.kind === "quota") {
     return report(provider, "google-antigravity:retrieveUserQuotaSummary", summary.quota);
   }
-  const fetchImpl = providerTlsFetch(provider, config, globalThis.fetch);
+
+  // Upstream #3781 fixed transport: the catalog fallback is pinned to the same
+  // canonical accounting URLs through the provider-outbound transport. A
+  // redirect or non-2xx (except a transient 404/503 on the daily host) ends the
+  // probe without ever escaping to a second transport; a usable catalog body is
+  // reported directly.
+  const modelsUrl = ANTIGRAVITY_QUOTA_MODELS_URL;
+  {
+    const response = await providerOutboundPost("google-antigravity", { baseUrl: ANTIGRAVITY_ACCOUNT_QUOTA_BASE }, modelsUrl, {
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": antigravityUserAgent(),
+        Authorization: `Bearer ${snapshot.accessToken}`,
+      },
+      body: JSON.stringify({ project: snapshot.projectId }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    }, antigravityOutboundDependencies);
+    if (await providerRedirectError(response, modelsUrl)) return null;
+    if (!response.ok) {
+      if (response.status !== 404 && response.status !== 503) return null;
+    } else {
+      const windows = antigravityWindowsFromModels(asRecord(await readQuotaJson(response)));
+      if (windows.length === 0) return null;
+      return report(provider, "google-antigravity:fetchAvailableModels", {
+        customWindows: windows,
+        updatedAt: Date.now(),
+      });
+    }
+  }
+
+  // Fork live-quota path (only reachable when the pinned catalog transport was
+  // transiently unavailable): merge the richer retrieveUserQuota/Summary RPCs
+  // with the host catalog before reporting. Every fallback RPC must retain the
+  // validated, pinned diagnostic transport; routing TLS overrides do not apply
+  // to accounting credentials, even when the primary host returns 404/503.
+  if (antigravityOAuthDestinationConfigError(provider, config)) return null;
+  const fetchImpl = (async (input, init) => {
+    const url = String(input);
+    if (typeof init?.body !== "string") throw new Error("Invalid quota RPC body");
+    return providerOutboundPost("google-antigravity", { baseUrl: new URL(url).origin }, url, {
+      headers: init.headers,
+      body: init.body,
+      signal: init.signal,
+    }, antigravityOutboundDependencies);
+  }) as typeof fetch;
   let liveQuota: ProviderQuota | null;
   try {
     liveQuota = await fetchAntigravityLiveQuota({

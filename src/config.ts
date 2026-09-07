@@ -10,6 +10,9 @@ import {
   apiKeyTransportConfigError,
   azureCredentialConfigError,
   booleanRecordConfigError,
+  configReasoningPinsConfigError,
+  modelPinnedEffortsConfigError,
+  pinnedReasoningEffortConfigError,
   modelAdapterRecordConfigError,
   modelDisplayNamesConfigError,
   nonBlankStringArrayConfigError,
@@ -130,6 +133,13 @@ export {
   type AtomicWriteAsyncTestSeam,
   type AtomicWriteIO,
 } from "./config/atomic-write";
+import {
+  InitialConfigPublicationError,
+  publishInitialConfigNoReplace as publishInitialConfigNoReplaceExclusive,
+  setInitialConfigBeforePublishForTests,
+  takeInitialConfigBeforePublishForTests,
+  type InitialConfigPublicationIO,
+} from "./config/initialize";
 import { getConfigDir, getConfigPath, hardenConfigDir } from "./config/paths";
 import {
   describeProxyForLog,
@@ -526,11 +536,25 @@ const modelDisplayNamesSchema = z.unknown().superRefine((value, ctx) => {
   return labels;
 });
 
+const pinnedReasoningEffortSchema = z.unknown().superRefine((value, ctx) => {
+  const error = pinnedReasoningEffortConfigError(value);
+  if (error) ctx.addIssue({ code: "custom", message: error });
+}).transform(value => value as string);
+
+const modelPinnedEffortsSchema = z.unknown().superRefine((value, ctx) => {
+  const error = modelPinnedEffortsConfigError(value);
+  if (error) ctx.addIssue({ code: "custom", message: error });
+}).transform(value => Object.fromEntries(
+  Object.entries(value as Record<string, string>).map(([key, effort]) => [key.trim(), effort]),
+));
+
 /**
  * Zod schema for one provider entry: known fields are validated strictly while unknown
  * fields pass through (preserved for runtime extensions).
  */
 const providerConfigSchema = z.object({
+  pinnedReasoningEffort: pinnedReasoningEffortSchema.optional(),
+  modelPinnedReasoningEfforts: modelPinnedEffortsSchema.optional(),
   adapter: z.string().min(1),
   baseUrl: z.string().min(1),
   azureCredential: z.object({
@@ -881,6 +905,8 @@ const codexQuotaAutoRefreshEntrySchema = z.object({
   weekly: z.boolean().optional(),
   lastFiveHourResetAt: z.number().finite().nonnegative().optional(),
   lastWeeklyResetAt: z.number().finite().nonnegative().optional(),
+  nextFiveHourResetAt: z.number().finite().nonnegative().optional(),
+  nextWeeklyResetAt: z.number().finite().nonnegative().optional(),
 }).strict();
 const CODEX_QUOTA_AUTO_REFRESH_KEY_ERROR =
   "quota auto-refresh keys must be a Codex pool-account id or the main Codex account and cannot be reserved JavaScript object keys";
@@ -1155,6 +1181,7 @@ const configSchema = z.object({
     z.object({ enabled: z.literal(true), port: z.number().int().min(1).max(65535) }),
   ]).optional().catch(undefined),
   providers: z.record(z.string(), providerConfigSchema),
+  modelPinnedEfforts: modelPinnedEffortsSchema.optional(),
   defaultProvider: z.string().min(1).default("openai"),
   defaultModelAliases: z.boolean().optional(),
   // Malformed hand edits disable this opt-in projection without rejecting providers.
@@ -1687,6 +1714,49 @@ export function hardenExistingSecret(path: string): void {
     }
   }
 }
+/** Load only: discard invalid optional pins without rewriting the file or losing providers. */
+function sanitizeReasoningPinsForLoad(parsed: unknown): void {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+  const root = parsed as Record<string, unknown>;
+  let degraded = false;
+  const sanitizeMap = (owner: Record<string, unknown>, field: string) => {
+    const value = owner[field];
+    if (value === undefined) return;
+    if (!value || typeof value !== "object" || Array.isArray(value)
+      || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+      delete owner[field];
+      degraded = true;
+      return;
+    }
+    const counts = new Map<string, number>();
+    for (const key of Object.keys(value)) counts.set(key.trim(), (counts.get(key.trim()) ?? 0) + 1);
+    const valid: Record<string, string> = Object.create(null);
+    for (const [key, effort] of Object.entries(value)) {
+      if (counts.get(key.trim()) !== 1 || modelPinnedEffortsConfigError({ [key]: effort }) !== null) {
+        degraded = true;
+        continue;
+      }
+      valid[key.trim()] = effort as string;
+    }
+    if (Object.keys(valid).length) owner[field] = valid;
+    else delete owner[field];
+  };
+  sanitizeMap(root, "modelPinnedEfforts");
+  if (root.providers && typeof root.providers === "object" && !Array.isArray(root.providers)) {
+    for (const value of Object.values(root.providers)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      const provider = value as Record<string, unknown>;
+      if (pinnedReasoningEffortConfigError(provider.pinnedReasoningEffort)) {
+        delete provider.pinnedReasoningEffort;
+        degraded = true;
+      }
+      sanitizeMap(provider, "modelPinnedReasoningEfforts");
+    }
+  }
+  // Never include a provider/model name or value: malformed pins can contain secrets.
+  if (degraded) console.warn("config.json contains invalid optional reasoning pins — ignoring invalid fields or entries");
+}
+
 /**
  * The schema's `.catch(undefined)` silently degrades an invalid persisted
  * `streamMode` to "auto"; surface that once so a hand-edited typo (e.g.
@@ -2286,6 +2356,7 @@ export function loadConfig(): OcxConfig {
     const raw = readFileSync(configPath, "utf-8").replace(/^\uFEFF/, "");
     const parsed = JSON.parse(raw);
     sanitizeAliasesForLoad(parsed);
+    sanitizeReasoningPinsForLoad(parsed);
     sanitizeModelDisplayNamesForLoad(parsed);
     sanitizeRetryOn429ForLoad(parsed);
     sanitizeModelCostsForLoad(parsed);
@@ -2877,7 +2948,8 @@ function managementIngressConfigError(value: unknown): string | null {
 }
 
 export function validateConfigCandidate(value: unknown): { ok: true; config: OcxConfig } | { ok: false; error: string } {
-  const boundaryError = blankHostnameError(value)
+  const boundaryError = configReasoningPinsConfigError(value)
+    ?? blankHostnameError(value)
     ?? (() => {
       const raw = rawConfigRecord(value);
       const error = raw ? serverTlsConfigError(raw.tls) : null;
@@ -2916,6 +2988,7 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
 function configDiagnosticsFromRaw(raw: string): ConfigDiagnostics {
   try {
     const parsed = JSON.parse(raw.replace(/^\uFEFF/, ""));
+    sanitizeReasoningPinsForLoad(parsed);
     // Same degradation as loadConfig: a hand-edited invalid retryOn429 must not trip the
     // schema and send the caller a default-config fallback (the config command could then
     // persist that fallback over the user's providers/keys).
@@ -3267,6 +3340,8 @@ export const withExpectedConfigGenerationSync: WithExpectedConfigGenerationSync 
 type PersistConfigAuthority = "ordinary" | "mutation" | "replacement";
 
 function persistConfigUnlocked(config: OcxConfig, authority: PersistConfigAuthority = "ordinary"): boolean {
+  const pinError = configReasoningPinsConfigError(config);
+  if (pinError) throw new Error(pinError);
   const configPath = getConfigPath();
   // Check the resolved file target before reading it: a symlink can point from an
   // isolated test home into the protected real home, where another write guard
@@ -3332,6 +3407,8 @@ function persistConfigUnlocked(config: OcxConfig, authority: PersistConfigAuthor
 
 /** Persist `config` to config.json under the config-mutation lock. */
 export function saveConfig(config: OcxConfig): void {
+  const pinError = configReasoningPinsConfigError(config);
+  if (pinError) throw new Error(pinError);
   // Keep the real-home assertion ahead of even lock-directory preparation.
   assertNotRealHomeUnderTest(getConfigDir());
   withConfigMutationLockSync(() => {
@@ -3365,168 +3442,55 @@ export function replacePersistedConfig(config: OcxConfig): void {
 
 export type PersistedConfigInitializationOutcome = "created" | "exists" | "invalid";
 
-export class PersistedConfigInitializationCleanupError extends Error {
-  constructor(options?: ErrorOptions) {
-    super("Initial config publication cleanup failed after rollback", options);
-    this.name = "PersistedConfigInitializationCleanupError";
-  }
-}
-
-export class PersistedConfigInitializationRollbackError extends Error {
-  constructor(options?: ErrorOptions) {
-    super("Initial config publication rollback failed", options);
-    this.name = "PersistedConfigInitializationRollbackError";
-  }
-}
-
-export interface PersistedConfigInitializationIO {
-  createExclusive(path: string): void;
-  write(path: string, bytes: string): void;
-  harden(path: string): void;
-  publishNoReplace(temp: string, target: string): void;
-  truncate(path: string): void;
-  unlink(path: string): void;
-}
-
-let persistedConfigInitializationBeforePublishForTests: (() => void) | null = null;
-
 /** Test-only one-shot seam: create a competing config after staging, before no-replace publication. */
 export function setPersistedConfigInitializationBeforePublishForTests(hook: (() => void) | null): void {
-  persistedConfigInitializationBeforePublishForTests = hook;
+  setInitialConfigBeforePublishForTests(hook);
 }
 
-function publishInitialConfigNoReplace(
-  config: OcxConfig,
-  io: PersistedConfigInitializationIO,
-): boolean {
-  const configPath = getConfigPath();
-  const target = resolveWriteTarget(configPath);
-  assertNotRealHomeUnderTest(dirname(target));
-  recordOwnedConfigPath(getConfigDir(), configPath);
-  const persisted = projectConfigRebaseProvenance(config);
-  const bytes = JSON.stringify(persisted, null, 2) + "\n";
-  const temp = `${target}.ocx.${process.pid}.${nextAtomicTempSequence()}.tmp`;
-  let staged = false;
-  let hardened = false;
-  let published = false;
-  let cleanupAttempted = false;
-
-  const scrubUnpublishedTemp = (cause?: unknown): void => {
-    cleanupAttempted = true;
-    let scrubbed = false;
-    try {
-      io.truncate(temp);
-      scrubbed = true;
-    } catch (error) {
-      if (isMissingPathError(error)) scrubbed = true;
-      else {
-        try { io.write(temp, ""); scrubbed = true; } catch { /* removal may still succeed */ }
-      }
-    }
-    let removed = false;
-    try {
-      io.unlink(temp);
-      removed = true;
-    } catch (error) {
-      if (isMissingPathError(error)) removed = true;
-      else {
-        try { io.unlink(temp); removed = true; }
-        catch (retryError) { if (isMissingPathError(retryError)) removed = true; }
-      }
-    }
-    if (removed) forgetEphemeralSecretPath(temp);
-    if (!removed && !scrubbed) throw new AtomicWriteSecretResidualError(temp, { cause });
-    if (!removed) throw new AtomicWriteResidualTempError(temp, hardened, { cause });
-  };
-
-  try {
-    io.createExclusive(temp);
-    staged = true;
-    io.write(temp, bytes);
-    io.harden(temp);
-    hardened = true;
-    const hook = persistedConfigInitializationBeforePublishForTests;
-    persistedConfigInitializationBeforePublishForTests = null;
-    hook?.();
-    try {
-      io.publishNoReplace(temp, target);
-    } catch (cause) {
-      if (!isAlreadyExistsError(cause)) throw cause;
-      scrubUnpublishedTemp(cause);
-      return false;
-    }
-    published = true;
-    try {
-      io.unlink(temp);
-      forgetEphemeralSecretPath(temp);
-    } catch (firstError) {
-      if (isMissingPathError(firstError)) {
-        forgetEphemeralSecretPath(temp);
-      } else try {
-        io.unlink(temp);
-        forgetEphemeralSecretPath(temp);
-      } catch (secondError) {
-        if (isMissingPathError(secondError)) {
-          forgetEphemeralSecretPath(temp);
-        } else {
-          // Both names point to one inode. Remove the published name before scrubbing.
-          try { io.unlink(target); }
-          catch (cause) { throw new PersistedConfigInitializationRollbackError({ cause }); }
-          published = false;
-          scrubUnpublishedTemp(secondError);
-          throw new PersistedConfigInitializationCleanupError({ cause: secondError });
-        }
-      }
-    }
-    refreshUserCostOverlays(persisted);
-    return true;
-  } catch (cause) {
-    if (staged && !published && !cleanupAttempted) scrubUnpublishedTemp(cause);
-    throw cause;
-  }
-}
-
-function defaultPersistedConfigInitializationIO(configPath: string): PersistedConfigInitializationIO {
-  return {
-    createExclusive: target => { writeFileSync(target, "", { flag: "wx", mode: 0o600 }); },
-    write: (target, bytes) => writeFileSync(target, bytes),
-    harden: target => {
-      try { chmodSync(target, 0o600); } catch { /* platform may ignore chmod */ }
-      if (process.platform === "win32") hardenSecretPath(target, { required: true, timeoutMemoKey: configPath });
-    },
-    publishNoReplace: (temp, target) => linkSync(temp, target),
-    truncate: target => truncateSync(target, 0),
-    unlink: unlinkSync,
-  };
-}
-
-/** Create the initial config under the shared lock, but never replace existing bytes. */
+/**
+ * Create the initial config under the shared lock, but never replace existing bytes.
+ * Single production engine: exclusive no-replace publication through
+ * src/config/initialize.ts. Occupied or unsafe config entries are classified
+ * before the coordinator database is created, so a refusal leaves no lock
+ * residue behind.
+ */
 export function initializePersistedConfigIfMissing(
   config: OcxConfig,
-  io = defaultPersistedConfigInitializationIO(getConfigPath()),
+  io?: Partial<InitialConfigPublicationIO>,
 ): PersistedConfigInitializationOutcome {
   assertNotRealHomeUnderTest(getConfigDir());
-  return withConfigMutationLockSync(() => {
-    const snapshot = readConfigFileSnapshot();
-    if (snapshot.diagnostics.source === "file") return "exists";
-    if (snapshot.diagnostics.source !== "default") return "invalid";
-    const projected = projectCustomModelCatalogMigration(
-      readRawConfigJson(),
-      projectConfigRebaseProvenance(config),
-    );
-    // Validate before creating the private staging inode so an invalid
-    // candidate cannot leave any publication residue or alter the target.
-    if (!validateConfigCandidate(projected).ok) {
-      throw new Error("Initial configuration is invalid.");
-    }
-    if (!publishInitialConfigNoReplace(projected, io)) {
-      const winner = readConfigFileSnapshot();
-      return winner.diagnostics.source === "file" ? "exists" : "invalid";
-    }
-    bumpGenerationForCooperatingConfigWrite();
-    adoptCustomModelCatalogMigration(config, projected);
+  const before = observeInitialConfigState();
+  if (before !== "missing") return before;
+  let published = false;
+  try {
+    const persisted = withConfigMutationLockSync((): OcxConfig | "exists" | "invalid" => {
+      const current = observeInitialConfigState();
+      if (current !== "missing") return current;
+      const projected = projectCustomModelCatalogMigration(undefined, projectConfigRebaseProvenance(config));
+      // Validate before creating the private staging inode so an invalid
+      // candidate cannot leave any publication residue or alter the target.
+      if (!validateConfigCandidate(projected).ok) {
+        throw new Error("Initial configuration is invalid.");
+      }
+      if (!publishInitialConfigNoReplaceExclusive(getConfigPath(), JSON.stringify(projected, null, 2) + "\n", io)) {
+        return observeInitialConfigState() === "exists" ? "exists" : "invalid";
+      }
+      published = true;
+      recordOwnedConfigPath(getConfigDir(), getConfigPath());
+      bumpGenerationForCooperatingConfigWrite();
+      return projected;
+    });
+    if (typeof persisted === "string") return persisted;
+    adoptCustomModelCatalogMigration(config, persisted);
+    if (persisted.configRebaseProvenance === undefined) delete config.configRebaseProvenance;
+    else config.configRebaseProvenance = structuredClone(persisted.configRebaseProvenance);
+    clearPendingConfigTopLevelDeletions(config);
+    refreshUserCostOverlays(persisted);
     return "created";
-  });
+  } catch (cause) {
+    if (published) throw new InitialConfigPublicationError("published", false, false, { cause });
+    throw cause;
+  }
 }
 
 export type PersistedConfigMutation<T> = {
@@ -3980,6 +3944,8 @@ function readPersistedServerBinding(
  * edits and deletions across stale whole-config saves.
  */
 export function saveConfigPreservingClaudeCode(config: OcxConfig): void {
+  const pinError = configReasoningPinsConfigError(config);
+  if (pinError) throw new Error(pinError);
   withConfigMutationLockSync(() => {
     const bindingBaseline = persistedLiveServerBinding.get(config);
     // One authoritative pre-write read feeds both the live-config reconciliation and

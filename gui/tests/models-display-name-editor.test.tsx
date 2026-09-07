@@ -448,8 +448,16 @@ describe("Models dashboard discovered display name integration", () => {
         expect(currentNameText()).toContain("Current name unavailable until refresh");
         expect(currentNameText()).not.toContain("Your name");
         expect(container.textContent).toContain("The change may have been saved");
+        expect(dialogInput().disabled).toBe(true);
+        expect(dialogButton("Reset name").disabled).toBe(true);
         expect(dialogButton("Retry").disabled).toBe(false);
         expect(dialogButton("Cancel").disabled).toBe(false);
+        await act(async () => {
+          setInputValue(dialogInput(), "Replacement intent");
+          dialogButton("Reset name").dispatchEvent(new testWindow.MouseEvent("click", { bubbles: true }));
+        });
+        expect(dialogButton("Retry").disabled).toBe(false);
+        expect(mutationBodies).toHaveLength(1);
         await act(async () => container.querySelector("dialog form")!.dispatchEvent(
           new testWindow.Event("submit", { bubbles: true, cancelable: true }),
         ));
@@ -522,12 +530,12 @@ describe("Models dashboard discovered display name integration", () => {
         if (stage === "reload") expect(seenSignals[1]).toBe(seenSignals[0]);
         await act(async () => deadline.abort(new DOMException("Timed out", "TimeoutError")));
         await flush();
-        expect(dialogInput().disabled).toBe(false);
+        expect(dialogInput().disabled).toBe(stage === "mutation");
         expect(dialogButton("Cancel").disabled).toBe(false);
         expect(dialogInput().value).toBe("Possibly saved");
         expect(container.textContent).toContain(stage === "mutation"
           ? "The change may have been saved" : "The change was saved");
-        expect(testWindow.document.activeElement).toBe(dialogInput());
+        expect(testWindow.document.activeElement).toBe(stage === "mutation" ? dialogButton("Retry") : dialogInput());
         stall = false;
         if (descriptor) Object.defineProperty(AbortSignal, "timeout", descriptor);
         await act(async () => dialogButton("Retry").click());

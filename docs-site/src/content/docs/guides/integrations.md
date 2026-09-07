@@ -62,14 +62,22 @@ One caveat specific to Aside: the running app rewrites `models.json` itself, so
 fully quit and reopen Aside after applying, the same way Claude Desktop needs a
 restart. Aside's block is loopback-only and never carries a real credential.
 
-Raycast has two prerequisites. Custom Providers is a **Raycast Pro** feature: on a
-free plan the file is still written, but `ocx integration client status --client
-raycast` and the Integrations page report a warning, because Raycast will not
-read it. And Raycast only creates its `ai` folder when you open Raycast →
-Settings → AI → **Reveal Providers Config** once; opencodex uses that folder as
-the install signal and reports the client as not installed until then. Raycast
-reads `~/.config/raycast/ai/providers.yaml` on macOS and Windows alike and does
-not honor `XDG_CONFIG_HOME`, so that path is not relocatable.
+The managed Raycast integration supports **macOS and Windows**. Custom Providers
+is a **Raycast Pro** feature: on a free plan the file is still written, but
+`ocx integration client status --client raycast` and the Integrations page report
+a warning, because Raycast will not read it. On macOS or Windows, open Raycast →
+Settings → AI → **Reveal Providers Config** once so the `ai` folder exists.
+On these supported platforms, opencodex uses that folder as its install signal
+and reports the client as not installed until it exists. Linux is unsupported,
+even if the folder exists.
+
+The status field `aiDirPresent` reports only whether `~/.config/raycast/ai` exists,
+independently of whether the Raycast app is installed or the platform is supported.
+It does not prove that Raycast is installed or usable. The CLI prints `plan` on a
+separate line and adds the macOS/Windows setup instruction when `aiDirPresent` is
+false; `--json` preserves the raw status, including the nested `raycast` block.
+Raycast reads `~/.config/raycast/ai/providers.yaml` on macOS and Windows alike and
+does not honor `XDG_CONFIG_HOME`, so that path is not relocatable.
 
 The managed block is one element, `id: opencodex`, in the file's `providers`
 sequence: `name: OpenCodex`, `base_url: http://<host>:<port>/v1`, and every

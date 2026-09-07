@@ -555,26 +555,35 @@ test("a late picker GET cannot overwrite a saved order or its session cache", as
   const available = ["anthropic/claude-sonnet-5", "anthropic/claude-opus-4-5"];
   const old = { pickerAvailable: available, pickerOrder: [], pickerOrderMode: null };
   testWindow.sessionStorage.setItem("ocx.models.catalog.v1:http://localhost:picker-order", JSON.stringify(old));
-  let releaseGet!: (response: Response) => void;
+  const gets: Array<{ resolve: (response: Response) => void; signal: AbortSignal | null | undefined }> = [];
+  let saved: { pickerOrder: string[]; pickerOrderMode: string | null } = { pickerOrder: [], pickerOrderMode: null };
   let writes = 0;
   globalThis.fetch = (async (input, init) => {
     if (String(input).endsWith("/api/subagent-models")) {
       if (init?.method === "PUT") {
         writes++;
-        return Response.json({ ok: true, ...JSON.parse(String(init.body)),
+        saved = JSON.parse(String(init.body));
+        return Response.json({ ok: true, ...saved,
           catalogRefresh: { status: "committed", changed: true, degraded: false, notices: [] } });
       }
-      return new Promise<Response>(resolve => { releaseGet = resolve; });
+      return new Promise<Response>(resolve => { gets.push({ resolve, signal: init?.signal }); });
     }
     return baseFetch(input, init);
   }) as typeof fetch;
   await mountModelsForRefreshWarning();
-  await waitForModelsFeedback(() => !!releaseGet && !!pickerApply() && !pickerApply().disabled);
+  await waitForModelsFeedback(() => gets.length === 1 && !!pickerApply() && !pickerApply().disabled);
   await choosePickerOrder("Group by provider");
   const button = pickerApply();
   await act(async () => { button.click(); button.click(); });
-  await waitForModelsFeedback(() => writes === 1 && !!container.querySelector(".action-toast.notice-ok"));
-  await act(async () => { releaseGet(Response.json(old)); });
+  await waitForModelsFeedback(() => writes === 1 && gets.length === 2 && !!container.querySelector(".action-toast.notice-ok"));
+  expect(gets[0]!.signal?.aborted).toBe(true);
+  await act(async () => { gets[0]!.resolve(Response.json(old)); });
+  expect(container.querySelector('[aria-label="Picker order"]')?.textContent).toContain("Group by provider");
+  const afterOld = JSON.parse(testWindow.sessionStorage.getItem("ocx.models.catalog.v1:http://localhost:picker-order")!);
+  expect(afterOld.pickerOrderMode).toBe("provider");
+  expect(afterOld.pickerOrder).toEqual(["anthropic/claude-opus-4-5", "anthropic/claude-sonnet-5"]);
+  // The new revalidation is a different request and reads the acknowledged PUT state.
+  await act(async () => { gets[1]!.resolve(Response.json({ pickerAvailable: available, ...saved })); });
   expect(container.querySelector('[aria-label="Picker order"]')?.textContent).toContain("Group by provider");
   const cached = JSON.parse(testWindow.sessionStorage.getItem("ocx.models.catalog.v1:http://localhost:picker-order")!);
   expect(cached.pickerOrderMode).toBe("provider");
@@ -606,6 +615,8 @@ test("leaving Models aborts its pending picker save", async () => {
 
 function holdPostSaveAppServerRead() {
   const baseFetch = globalThis.fetch;
+  const pickerByOrigin = new Map<string, { pickerOrder: string[]; pickerOrderMode: string | null }>();
+  const available = ["anthropic/claude-sonnet-5", "anthropic/claude-opus-4-5"];
   let aReads = 0;
   let heldSignal: AbortSignal | null | undefined;
   let release: ((response: Response) => void) | undefined;
@@ -620,9 +631,17 @@ function holdPostSaveAppServerRead() {
       }
       return Response.json({ state: "fresh", runningCount: 1 });
     }
-    if (url.endsWith("/api/subagent-models") && init?.method === "PUT") {
-      return Response.json({ ok: true, ...JSON.parse(String(init.body)),
-        catalogRefresh: { status: "committed", changed: true, degraded: false, notices: [] } });
+    if (url.endsWith("/api/subagent-models")) {
+      const origin = new URL(url).origin;
+      if (init?.method === "PUT") {
+        const body = JSON.parse(String(init.body));
+        const saved = { pickerOrder: body.pickerOrder ?? [], pickerOrderMode: body.pickerOrderMode ?? null };
+        pickerByOrigin.set(origin, saved);
+        return Response.json({ ok: true, ...saved,
+          catalogRefresh: { status: "committed", changed: true, degraded: false, notices: [] } });
+      }
+      return Response.json({ pickerAvailable: available,
+        ...(pickerByOrigin.get(origin) ?? { pickerOrder: [], pickerOrderMode: null }) });
     }
     return baseFetch(input, init);
   }) as typeof fetch;

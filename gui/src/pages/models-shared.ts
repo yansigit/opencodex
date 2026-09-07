@@ -37,6 +37,7 @@ export interface ModelRow {
   displayName?: string;
   displayNameOverride?: string;
   displayNameSource?: "operator" | "provider" | "fallback";
+  manualPricing?: boolean;
   inputModalities?: string[];
   contextWindow?: number;
   contextCap?: number;

@@ -15,8 +15,11 @@
  * - web_search_tool: hosted web_search tool/block (has lossless Responses mapping)
  * - code_execution: code_execution tool/block (no lossless routed mapping)
  * - computer_use: computer tool/block (no lossless routed mapping)
- * - mcp_tool: mcp tool declarations (no lossless routed mapping)
+ * - mcp_tool: mcp tool declarations and top-level mcp_servers (no lossless routed mapping)
  * - server_tool: generic fallback for other hosted/server tool types
+ * - tool_reference: tool_reference declaration/call (no lossless routed mapping)
+ * - strict_tools: tool strict flag (preserved on OpenAI Responses)
+ * - caller_mode: non-direct tool callers (allowed_callers / caller) (no lossless routed mapping)
  * - tool_search: tool_search declaration/call (lossless via tool_search)
  * - deferred_tools: tools with defer/defer_loading or deferred beta markers
  * - structured_output: output_config.format json_schema (lossless via text.format)
@@ -52,6 +55,18 @@ export function claudeCompatibilityReason(codes: readonly ClaudeFeatureCode[], s
   return `${shadow ? "shadow: would reject" : "unsupported translated Claude features"}: ${unsupported.join(", ")}`.slice(0, 512);
 }
 
+/**
+ * Codes that never drive a rejection on any routed adapter. Persisted shadow
+ * evidence may include these from the pre-route scan without tainting the
+ * regenerated reason; every other persisted code must be backed by the final
+ * per-attempt evaluation.
+ */
+const TOLERATED_FEATURE_CODES = new Set(["cache_control", "thinking_block", "thinking_settings", "unknown_beta"]);
+
+export function isToleratedClaudeFeatureCode(code: string): boolean {
+  return TOLERATED_FEATURE_CODES.has(code);
+}
+
 export const CLAUDE_COMPATIBILITY_MODES = ["shadow", "enforce"] as const;
 
 export function isClaudeCompatibilityMode(value: unknown): value is ClaudeCompatibilityMode {
@@ -68,6 +83,8 @@ export type ClaudeCompatibilityDecision = "allow" | "reject" | "shadow";
 
 export interface ClaudeCompatibilityResult {
   featureCodes: string[];
+  /** Closed rejection evidence for shadow logging; excludes route-supported features. */
+  shadowFeatureCodes?: string[];
   compatible: boolean;
   decision: ClaudeCompatibilityDecision;
   /** Human-readable reason when rejected, otherwise undefined. */
@@ -87,11 +104,16 @@ function sanitizeBetaToken(raw: string): string {
 }
 
 function walkForCacheControl(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  if (Array.isArray(value)) return value.some(walkForCacheControl);
-  const rec = value as Rec;
-  if (Object.prototype.hasOwnProperty.call(rec, "cache_control")) return true;
-  return Object.values(rec).some(walkForCacheControl);
+  if (!isRec(value)) return false;
+  const hasHint = (block: unknown): boolean => isRec(block) && Object.hasOwn(block, "cache_control");
+  if (hasHint(value)) return true;
+  for (const blocks of [value.tools, value.system]) {
+    if (Array.isArray(blocks) && blocks.some(hasHint)) return true;
+  }
+  if (!Array.isArray(value.messages)) return false;
+  return value.messages.some(message => isRec(message) && Array.isArray(message.content)
+    && message.content.some(block => hasHint(block) || (isRec(block) && block.type === "tool_result"
+      && Array.isArray(block.content) && block.content.some(hasHint))));
 }
 
 function hasThinkingBlock(body: Rec): boolean {
@@ -143,7 +165,7 @@ function hasGenuineSignedThinking(body: Rec): boolean {
 const KNOWN_CONTENT_TYPES = new Set([
   "text", "image", "tool_use", "tool_result", "thinking", "redacted_thinking",
   "document", "server_tool_use", "web_search_tool_result", "code_execution_tool_result",
-  "tool_search_tool_result", "mcp_tool_use", "mcp_tool_result",
+  "tool_search_tool_result", "mcp_tool_use", "mcp_tool_result", "tool_reference",
 ]);
 
 function hasDocuments(body: Rec): boolean {
@@ -185,6 +207,15 @@ function hasUnknownContentBlock(body: Rec): boolean {
       if (!isRec(b)) continue;
       const t = typeof b.type === "string" ? b.type : "";
       if (t && !KNOWN_CONTENT_TYPES.has(t)) return true;
+      // Upstream parity: tool_result children are visited at the one supported
+      // nesting level; an unknown nested block type is as opaque as a top one.
+      if (b.type === "tool_result" && Array.isArray(b.content)) {
+        for (const nested of b.content) {
+          if (!isRec(nested)) continue;
+          const nestedType = typeof nested.type === "string" ? nested.type : "";
+          if (nestedType && !KNOWN_CONTENT_TYPES.has(nestedType)) return true;
+        }
+      }
     }
   }
   return false;
@@ -239,6 +270,7 @@ function hasComputerUse(body: Rec): boolean {
 }
 
 function hasMcpTool(body: Rec): boolean {
+  if (Object.hasOwn(body, "mcp_servers")) return true;
   const tools = body.tools;
   if (Array.isArray(tools)) {
     for (const t of tools) {
@@ -253,6 +285,53 @@ function hasMcpTool(body: Rec): boolean {
     if (!isRec(m) || !Array.isArray(m.content)) continue;
     for (const b of m.content) {
       if (isRec(b) && (b.type === "mcp_tool_use" || b.type === "mcp_tool_result")) return true;
+    }
+  }
+  return false;
+}
+
+function hasToolReference(body: Rec): boolean {
+  const msgs = body.messages;
+  if (!Array.isArray(msgs)) return false;
+  for (const m of msgs) {
+    if (!isRec(m) || !Array.isArray(m.content)) continue;
+    for (const b of m.content) {
+      if (!isRec(b)) continue;
+      if (b.type === "tool_reference") return true;
+      if (b.type === "tool_result" && Array.isArray(b.content)) {
+        for (const nested of b.content) {
+          if (isRec(nested) && nested.type === "tool_reference") return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function hasStrictTools(body: Rec): boolean {
+  const tools = body.tools;
+  if (!Array.isArray(tools)) return false;
+  return tools.some(t => isRec(t) && t.strict === true);
+}
+
+function hasNonDirectCaller(value: unknown): boolean {
+  return value !== undefined && !(Array.isArray(value) && value.length === 1 && value[0] === "direct");
+}
+
+function hasCallerMode(body: Rec): boolean {
+  const tools = body.tools;
+  if (Array.isArray(tools)) {
+    for (const t of tools) {
+      if (isRec(t) && hasNonDirectCaller(t.allowed_callers)) return true;
+    }
+  }
+  const msgs = body.messages;
+  if (!Array.isArray(msgs)) return false;
+  for (const m of msgs) {
+    if (!isRec(m) || !Array.isArray(m.content)) continue;
+    for (const b of m.content) {
+      if (!isRec(b) || b.type !== "tool_use") continue;
+      if (b.caller !== undefined && (!isRec(b.caller) || b.caller.type !== "direct")) return true;
     }
   }
   return false;
@@ -296,7 +375,7 @@ function hasGenericServerTool(body: Rec): boolean {
           if (!isRec(b)) continue;
           if (b.type !== "server_tool_use") continue;
           const name = typeof b.name === "string" ? b.name : "";
-          if (name.includes("web_search") || name.includes("code_execution") || name.includes("computer") || name.startsWith("tool_search_tool_")) continue;
+          if (name === "tool_search" || name.startsWith("tool_search_tool_") || name.includes("web_search") || name.includes("code_execution") || name.includes("computer")) continue;
           return true;
         }
       }
@@ -322,7 +401,7 @@ function hasGenericServerTool(body: Rec): boolean {
         if (!isRec(b)) continue;
         if (b.type === "server_tool_use") {
           const n = typeof b.name === "string" ? b.name : "";
-          if (n.includes("web_search") || n.includes("code_execution") || n.includes("computer") || n.startsWith("tool_search_tool_")) continue;
+          if (n === "tool_search" || n.startsWith("tool_search_tool_") || n.includes("web_search") || n.includes("code_execution") || n.includes("computer")) continue;
           return true;
         }
       }
@@ -364,13 +443,11 @@ function hasDeferredTools(body: Rec): boolean {
       if (!isRec(t)) continue;
       if (t.defer === true) return true;
       if ((t as Rec).defer_loading === true) return true;
-      if (Object.hasOwn(t, "defer") || Object.hasOwn(t, "defer_loading")) {
-        // presence with truthy already handled; presence with explicit true is deferred
-      }
     }
   }
-  if (Object.hasOwn(body, "defer_tools") || Object.hasOwn(body, "deferred_tools")) return true;
-  return false;
+  const active = (value: unknown): boolean => value === true
+    || (Array.isArray(value) ? value.length > 0 : isRec(value) && Object.keys(value).length > 0);
+  return active(body.defer_tools) || active(body.deferred_tools);
 }
 
 function hasInputExamples(body: Rec): boolean {
@@ -425,7 +502,7 @@ const KNOWN_BODY_FIELDS = new Set([
   "model", "max_tokens", "messages", "system", "tools", "tool_choice", "thinking",
   "output_config", "output_format", "metadata", "service_tier", "stop_sequences", "stream",
   "temperature", "top_p", "top_k", "cache_control", "context_management",
-  "container", "inference_geo", "user_profile_id", "defer_tools", "deferred_tools",
+  "container", "inference_geo", "user_profile_id", "mcp_servers", "defer_tools", "deferred_tools",
 ]);
 
 const KNOWN_OUTPUT_CONFIG_FIELDS = new Set(["effort", "format"]);
@@ -461,6 +538,9 @@ export function collectClaudeFeatureCodes(
     if (hasCodeExecution(rec)) codes.push("code_execution");
     if (hasComputerUse(rec)) codes.push("computer_use");
     if (hasMcpTool(rec)) codes.push("mcp_tool");
+    if (hasToolReference(rec)) codes.push("tool_reference");
+    if (hasStrictTools(rec)) codes.push("strict_tools");
+    if (hasCallerMode(rec)) codes.push("caller_mode");
     if (hasGenericServerTool(rec)) codes.push("server_tool");
     if (hasToolSearch(rec)) codes.push("tool_search");
     if (hasDeferredTools(rec)) codes.push("deferred_tools");
@@ -507,11 +587,16 @@ export function analyzeClaudeCompatibility(
     "code_execution",
     "computer_use",
     "mcp_tool",
+    "tool_reference",
+    "caller_mode",
     "server_tool",
     "input_examples",
     "signed_thinking",
   ]);
-  if (opts.adapter !== "openai-responses") INCOMPATIBLE.add("deferred_tools");
+  if (opts.adapter !== "openai-responses") {
+    INCOMPATIBLE.add("deferred_tools");
+    INCOMPATIBLE.add("strict_tools");
+  }
   const incompatible = featureCodes.filter(c =>
     INCOMPATIBLE.has(c) && (c !== "context_management" || !isNoopContextManagement(body))
   );
@@ -530,6 +615,9 @@ export function analyzeClaudeCompatibility(
       featureCodes,
       compatible: true,
       decision: incompatible.length > 0 ? "shadow" : "allow",
+      ...(incompatible.length > 0 ? { shadowFeatureCodes: [
+        ...incompatible, ...featureCodes.filter(isToleratedClaudeFeatureCode),
+      ] } : {}),
       ...(incompatible.length > 0 ? { reason: `shadow: would reject for ${incompatible.join(", ")}` } : {}),
     };
   }

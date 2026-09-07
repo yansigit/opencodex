@@ -317,8 +317,16 @@ canonical ids. The synthetic 2026 date is an internal slot, not a release date. 
 and `claude-ocx-<provider>--<model>` ids from older configs still resolve.
 
 If Claude Desktop's footer picker does not change the model for an already-running 3P
-conversation, use `/model <id>` in that conversation. OpenCodex cannot observe picker state; it
-routes the model id carried by each request. Confirm the result under **Logs → requestedModel**.
+conversation, you can try `/model <id>`, but this workaround may also fail on affected Desktop
+builds. [Issue #3782](https://github.com/lidge-jun/opencodex/issues/3782) reports that on Windows
+with Claude Desktop 1.46388.4, the conversation continues using its initial model after both
+footer-picker and `/model` changes. The report does not establish which client or routing
+component causes the behavior.
+
+You can also try selecting the intended default model in the OpenCodex Claude Desktop profile,
+reapplying the profile, and starting a new conversation. This is a troubleshooting step, not a
+guaranteed fix. OpenCodex cannot observe picker state; it routes the model id carried by each
+request. Confirm what the client sends under **Logs → requestedModel**.
 
 Models with an authoritative 1M context window get an extra `…[1m]` picker row: selecting it makes
 Claude Code account a full 1M context for that model (auto-compaction stays on) — the proxy strips
@@ -506,6 +514,8 @@ Feature codes (stable, also visible in the bounded debug ring):
 | `tool_search` | Claude tool-search declaration, call, or result | translate through Responses tool search |
 | `web_search_tool` | Claude web-search declaration, call, or result | translate through the existing web-search path |
 | `deferred_tools` | Tools with `defer_loading: true` or a top-level deferred flag | translate only on the native Responses adapter; reject elsewhere |
+| `strict_tools` | Strict function-tool schema flag | preserve on OpenAI Responses; reject on other translated adapters |
+| `tool_reference`, `caller_mode` | Standalone tool-reference blocks or non-direct programmatic callers | reject on translated targets; preserve on Anthropic targets |
 | `input_examples` | Anthropic-native tool input examples | preserve on Anthropic targets; reject on translated targets |
 | `documents`, `code_execution`, `computer_use`, `mcp_tool`, `server_tool` | Anthropic-native content or server tools without a lossless Responses lowering | reject on translated targets; preserve on Anthropic targets |
 | `container`, `inference_geo`, `user_profile`, `unknown_body_field`, `unknown_content_block` | Anthropic-only or unrecognized semantic request fields | reject on translated targets; preserve on Anthropic targets |
@@ -514,6 +524,11 @@ Feature codes (stable, also visible in the bounded debug ring):
 | `beta_*` | Each `anthropic-beta` token, sanitized to `beta_<name>` (sorted, de-duplicated) | allowed (informational) |
 
 Diagnostics: the inbound debug ring (`GET /api/claude/inbound-debug`) carries `featureCodes`, `adapter`, and `decision` (`allow`/`reject`/`shadow`) per entry when capture is enabled. Check `featureCodes` there before changing the mode. Native passthrough is unchanged and never gated by this mode.
+
+Shadow decisions also persist in request and usage logs using fixed feature codes and derived
+reasons, never raw beta headers or request content. Only unsupported features from the final
+adapter evaluation contribute to the rejection reason; supported features do not become
+"would reject" diagnostics merely because they accompany an unsupported document.
 
 ## Sidecar matrix: web search and image understanding
 

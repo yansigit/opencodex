@@ -159,6 +159,10 @@ choice 增量、带 `finish_reason` 的终止 choice，以及 `data: [DONE]`。�
 
 这些端点使用 Claude Code 和兼容客户端所采用的 Anthropic Messages 方言。大多数请求会被转换为 Responses，按常规路由，然后再转换回 Anthropic JSON 或 Anthropic SSE。
 
+转换后的 Messages 请求在重放推理数据时共享整个请求的转换预算，其中包含编码和解码产生的副本开销。
+超出预算时返回 HTTP 413 和 `translation_buffer_limit`，不会为了满足限制而截断签名或不透明推理数据。
+原生 Anthropic 透传使用独立的请求体大小限制。
+
 只有在满足以下全部条件时，原生 Anthropic 透传才有资格启用：
 
 - Claude Code 配置中尚未禁用原生透传；

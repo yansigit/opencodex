@@ -201,6 +201,12 @@ metadata，使用 Codex 的 `low | medium | high | xhigh | max | ultra` 檔位�
 歷史編碼成上游 function tool，再於 Codex 看見前將串流 function-call lifecycle 還原成
 `custom_tool_call`。原生 OpenAI forward 路由與受支援的 `apply_patch` custom tool 維持不變。
 
+路由的 code-mode 回合也會在首次呼叫前收到主機對巢狀輔助工具的規則：`tools.apply_patch`
+接收一個字串，開頭與結尾必須是沒有額外包裝的獨立補丁標記行；isolate 中沒有 `import`，長時間執行的
+命令透過 `write_stdin` 輪詢。如果原生路由 Responses、Kiro 或 Cursor 路徑上的 code-mode exec
+結果仍包含主機的某則失敗訊息，opencodex 會附加一行提示，指出對應規則。這項變更不會重寫模型的
+程式碼或補丁文字。
+
 所選 provider 必須支援 function/tool calling。不支援 tool call 的純文字 provider 無法使用 `exec`、
 Browser 或 Computer Use。原生 OpenAI 列保留上游 tool mode 不變。
 

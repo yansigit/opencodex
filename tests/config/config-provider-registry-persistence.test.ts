@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AtomicWriteResidualTempError, ConfigMutationValidationError, getConfigPath, getDefaultConfig, initializePersistedConfigIfMissing, mutatePersistedConfig, PersistedConfigInitializationCleanupError, PersistedConfigInitializationRollbackError, saveConfig, setPersistedConfigInitializationBeforePublishForTests, setPersistedConfigMutationBeforeCommitForTests, type PersistedConfigInitializationIO } from "../../src/config";
+import { ConfigMutationValidationError, getConfigPath, getDefaultConfig, initializePersistedConfigIfMissing, mutatePersistedConfig, readConfigGeneration, saveConfig, setPersistedConfigInitializationBeforePublishForTests, setPersistedConfigMutationBeforeCommitForTests } from "../../src/config";
+import { InitialConfigPublicationError, type InitialConfigPublicationIO } from "../../src/config/initialize";
 import { handleConfigCommand } from "../../src/cli/config-command";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 
@@ -41,34 +42,6 @@ function diskConfig(): OcxConfig {
 function writeDiskConfig(config: OcxConfig): void {
   mkdirSync(home, { recursive: true });
   writeFileSync(getConfigPath(), JSON.stringify(config, null, 2) + "\n");
-}
-
-function failingInitializationIO(failures: { harden?: number; tempUnlink?: number; targetUnlink?: number } = {}) {
-  const calls: string[] = [];
-  const fail = (key: keyof typeof failures): boolean => {
-    const remaining = failures[key] ?? 0;
-    if (remaining === 0) return false;
-    failures[key] = remaining - 1;
-    return true;
-  };
-  const io: PersistedConfigInitializationIO = {
-    createExclusive(path) { calls.push(`create:${path}`); writeFileSync(path, "", { flag: "wx", mode: 0o600 }); },
-    write(path, bytes) { calls.push(`write:${path}`); writeFileSync(path, bytes); },
-    harden(path) {
-      calls.push(`harden:${path}`);
-      if (fail("harden")) throw new Error("harden failed");
-      chmodSync(path, 0o600);
-    },
-    publishNoReplace(temp, target) { calls.push(`publish:${target}`); linkSync(temp, target); },
-    truncate(path) { calls.push(`truncate:${path}`); truncateSync(path, 0); },
-    unlink(path) {
-      calls.push(`unlink:${path}`);
-      const target = path === getConfigPath();
-      if (fail(target ? "targetUnlink" : "tempUnlink")) throw new Error(`${target ? "target" : "temp"} unlink failed`);
-      unlinkSync(path);
-    },
-  };
-  return { calls, io };
 }
 
 function initializationTemps(): string[] {
@@ -200,49 +173,68 @@ test("initialization never replaces a config created immediately before publicat
   expect(readFileSync(getConfigPath(), "utf8")).toBe(competingBytes);
 });
 
-test("initialization reports a scrubbed residual when pre-publication cleanup cannot unlink", () => {
-  const state = failingInitializationIO({ harden: 1, tempUnlink: 2 });
-  expect(() => initializePersistedConfigIfMissing(getDefaultConfig(), state.io)).toThrow(AtomicWriteResidualTempError);
+test("initialization flags a residual temp when pre-publication cleanup cannot unlink", () => {
+  const expected = JSON.stringify(getDefaultConfig(), null, 2) + "\n";
+  let failure: unknown;
+  try {
+    initializePersistedConfigIfMissing(getDefaultConfig(), {
+      write(fd, bytes) { writeFileSync(fd, bytes); throw new Error("disk full"); },
+      unlink() { throw new Error("sharing violation"); },
+    } satisfies Partial<InitialConfigPublicationIO>);
+  } catch (error) { failure = error; }
+  expect(failure).toMatchObject({ publication: "not-published", residualTemp: true });
   expect(existsSync(getConfigPath())).toBe(false);
   const [temp] = initializationTemps();
-  expect(temp).toBeDefined();
-  expect(readFileSync(join(home, temp!), "utf8")).toBe("");
+  expect(readFileSync(join(home, temp!), "utf8")).toBe(expected);
 });
 
 test("initialization preserves an EEXIST winner when loser cleanup cannot unlink", () => {
   const competingBytes = JSON.stringify(sixProviderConfig(), null, 2) + "\n";
-  const state = failingInitializationIO({ tempUnlink: 2 });
   setPersistedConfigInitializationBeforePublishForTests(() => {
     writeFileSync(getConfigPath(), competingBytes, { flag: "wx", mode: 0o600 });
   });
 
-  expect(() => initializePersistedConfigIfMissing(getDefaultConfig(), state.io)).toThrow(AtomicWriteResidualTempError);
+  let failure: unknown;
+  try {
+    initializePersistedConfigIfMissing(getDefaultConfig(), {
+      unlink() { throw new Error("sharing violation"); },
+    } satisfies Partial<InitialConfigPublicationIO>);
+  } catch (error) { failure = error; }
+  expect(failure).toMatchObject({ residualTemp: true });
   expect(readFileSync(getConfigPath(), "utf8")).toBe(competingBytes);
   const [temp] = initializationTemps();
-  expect(readFileSync(join(home, temp!), "utf8")).toBe("");
+  expect(readFileSync(join(home, temp!), "utf8")).toBe(JSON.stringify(getDefaultConfig(), null, 2) + "\n");
 });
 
-test("initialization rolls back publication before scrubbing after unlink failure", () => {
-  const state = failingInitializationIO({ tempUnlink: 2 });
-  expect(() => initializePersistedConfigIfMissing(getDefaultConfig(), state.io))
-    .toThrow(PersistedConfigInitializationCleanupError);
-  expect(existsSync(getConfigPath())).toBe(false);
-  expect(initializationTemps()).toEqual([]);
-  const rollback = state.calls.indexOf(`unlink:${getConfigPath()}`);
-  const scrub = state.calls.findIndex(call => call.startsWith("truncate:"));
-  expect(rollback).toBeGreaterThan(-1);
-  expect(scrub).toBeGreaterThan(rollback);
-});
-
-test("initialization rollback failure preserves both complete hardened links", () => {
-  const state = failingInitializationIO({ tempUnlink: 2, targetUnlink: 1 });
-  expect(() => initializePersistedConfigIfMissing(getDefaultConfig(), state.io))
-    .toThrow(PersistedConfigInitializationRollbackError);
+test("cleanup failure retains the published config and flags the residual temp", () => {
   const expected = JSON.stringify(getDefaultConfig(), null, 2) + "\n";
+  const generation = readConfigGeneration();
+  let failure: unknown;
+  try {
+    initializePersistedConfigIfMissing(getDefaultConfig(), {
+      unlink() { throw new Error("sharing violation"); },
+    } satisfies Partial<InitialConfigPublicationIO>);
+  } catch (error) { failure = error; }
+  expect(failure).toMatchObject({ publication: "published", residualTemp: true });
   expect(readFileSync(getConfigPath(), "utf8")).toBe(expected);
   const [temp] = initializationTemps();
   expect(readFileSync(join(home, temp!), "utf8")).toBe(expected);
-  expect(state.calls.some(call => call.startsWith("truncate:"))).toBe(false);
+  expect(readConfigGeneration()).toEqual(generation);
+});
+
+test("a shared unpublished candidate inode is never scrubbed", () => {
+  const otherName = join(home, "shared-candidate");
+  const expected = JSON.stringify(getDefaultConfig(), null, 2) + "\n";
+  let failure: unknown;
+  try {
+    initializePersistedConfigIfMissing(getDefaultConfig(), {
+      link(temp) { linkSync(temp, otherName); throw new Error("publication failed"); },
+    } satisfies Partial<InitialConfigPublicationIO>);
+  } catch (error) { failure = error; }
+  expect(failure).toBeInstanceOf(InitialConfigPublicationError);
+  expect(readFileSync(otherName, "utf8")).toBe(expected);
+  expect(existsSync(getConfigPath())).toBe(false);
+  expect(initializationTemps()).toEqual([]);
 });
 
 test("config import with --yes replaces the provider registry", async () => {

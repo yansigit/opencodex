@@ -3137,6 +3137,27 @@ describe("fetchProviderQuotaReports", () => {
       }
     });
 
+    for (const status of [404, 503]) {
+      test(`unavailable catalog ${status} keeps richer quota fallback on pinned transport`, async () => {
+        const posted: string[] = [];
+        setAntigravityAccountQuotaTransportForTests({
+          resolveAddresses: async () => publicAddress,
+          pinnedPost: async (url, _pinned, _body, _signal, options) => {
+            posted.push(url);
+            expect(options?.rejectUnauthorized).toBe(true);
+            if (url.endsWith(":retrieveUserQuota")) {
+              return new Response(JSON.stringify({ buckets: [{ modelId: "gemini-3.6-pro", remainingFraction: 0.4 }] }));
+            }
+            return new Response(null, { status });
+          },
+        });
+        const result = await fetchProviderQuotaReports(config(), true);
+        expect(posted).toContain("https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota");
+        expect(result.reports[0]?.quota.customWindows).toContainEqual({ label: "Gem", percent: 60 });
+        expect(plainFetchCalls).toEqual([]);
+      });
+    }
+
     for (const fallback of [false, true]) {
       test(`production proof survives reset for Fake-IP ${fallback ? "fallback" : "summary"}`, async () => {
         const resolved: Array<{ url: string; benchmark?: boolean; private?: boolean; mihomo?: boolean }> = [];
@@ -3159,7 +3180,7 @@ describe("fetchProviderQuotaReports", () => {
         });
         const result = await fetchProviderQuotaReports(config(), true);
         const urls = fallback ? [summaryUrl, modelsUrl] : [summaryUrl];
-        expect(resolved).toEqual(urls.map(url => ({ url, benchmark: true, private: false, mihomo: false })));
+        expect(resolved).toEqual(urls.map(url => ({ url, benchmark: true, private: false, mihomo: true })));
         expect(posted).toEqual(urls.map(url => ({ url, address: "198.18.56.214", tls: true, auth: "Bearer agy-canonical-access", body: JSON.stringify({ project: "agy-canonical-project" }), signal: true })));
         expect(result.reports[0]?.source).toBe(fallback ? "google-antigravity:fetchAvailableModels" : "google-antigravity:retrieveUserQuotaSummary");
         expect(result.reports[0]?.quota.customWindows).toEqual([{ label: "Gem", percent: fallback ? 25 : 40 }]);

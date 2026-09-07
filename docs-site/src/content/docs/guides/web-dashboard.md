@@ -134,6 +134,10 @@ on. **Logs** works the same way with `#logs` and `#logs/debug`. An older `#provi
 bookmark now lands on `#providers`.
 
 Cost values in **Logs** and **Usage** are API list-price equivalents calculated from reported tokens.
+For a custom usage interval, the server must confirm the exact requested start and end times.
+If an older running proxy does not support those bounds, the dashboard and CLI reject its report;
+upgrade and restart that proxy before retrying. Resetting a manual model price affects only that
+model, preserving other rates saved independently.
 They are not billing receipts or evidence of an actual charge; subscription usage or provider credits
 may apply instead.
 

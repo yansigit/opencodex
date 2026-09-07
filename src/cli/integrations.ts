@@ -189,7 +189,7 @@ function singleClientStatusLines(result: unknown): string[] {
   const rest = Object.fromEntries(Object.entries(result as Record<string, unknown>).filter(([key]) => key !== "raycast"));
   const lines = [...summaryLines(rest), `plan: ${raycast.plan}`];
   if (!raycast.aiDirPresent) {
-    lines.push('Open Raycast → Settings → AI → "Reveal Providers Config" once so the ai folder exists.');
+    lines.push('On macOS or Windows, open Raycast → Settings → AI → "Reveal Providers Config" once so the ai folder exists.');
   }
   return lines;
 }

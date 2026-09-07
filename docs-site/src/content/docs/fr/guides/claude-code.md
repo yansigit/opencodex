@@ -290,8 +290,16 @@ anciens alias hachés et les identifiants `claude-ocx-<provider>--<model>` des c
 toujours résolus.
 
 Si le sélecteur situé au bas de Claude Desktop ne modifie pas le modèle d'une conversation 3P déjà en cours,
-utilisez `/model <id>` dans cette conversation. OpenCodex ne peut pas observer l'état du sélecteur ; il
-achemine l’identifiant du modèle porté par chaque requête. Confirmez le résultat sous **Journaux → requestModel**.
+vous pouvez essayer `/model <id>`, mais ce contournement peut également échouer sur les versions de Desktop
+concernées. Le [ticket #3782](https://github.com/lidge-jun/opencodex/issues/3782) rapporte que sous Windows,
+avec Claude Desktop 1.46388.4, la conversation continue d'utiliser son modèle initial après des changements
+via le sélecteur du bas comme via `/model`. Ce signalement ne permet pas d'établir quel composant du client
+ou du routage est à l'origine de ce comportement.
+
+Vous pouvez aussi essayer de sélectionner le modèle par défaut souhaité dans le profil Claude Desktop
+d'OpenCodex, de réappliquer ce profil et de démarrer une nouvelle conversation. Il s'agit d'une étape de
+dépannage, sans garantie de résolution. OpenCodex ne peut pas observer l'état du sélecteur ; il achemine
+l'identifiant du modèle porté par chaque requête. Vérifiez ce que le client envoie sous **Logs → requestedModel**.
 
 Les modèles dont la fenêtre de contexte de référence atteint 1M obtiennent une ligne supplémentaire `…[1m]` dans le sélecteur.
 Sa sélection indique à Claude Code la fenêtre complète de 1M pour ce modèle, tout en maintenant le compactage automatique ; le proxy retire

@@ -157,9 +157,15 @@ opencodex 会将已路由模型公开为稳定且可逆的别名：
 user-agent 会获得易读的 CLI 形式，其他客户端会获得 Desktop 哈希形式。两种别名族都会永久
 保持可解码——以任一形式保存在 `settings.json` 中的模型都能继续工作。
 
-如果 Claude Desktop 底部的选择器没有切换已运行 3P 对话的模型，请在该对话中使用
-`/model <id>`。OpenCodex 无法读取选择器状态，只会路由每个请求实际携带的模型 ID；可在
-**Logs → requestedModel** 中确认结果。
+如果 Claude Desktop 底部的选择器没有切换正在进行的 3P 对话的模型，可以尝试
+`/model <id>`，但在受影响的 Desktop 版本中，这种变通方法也可能失败。
+[Issue #3782](https://github.com/lidge-jun/opencodex/issues/3782) 报告称，在 Windows 上使用
+Claude Desktop 1.46388.4 时，无论通过底部选择器还是 `/model` 更改模型，对话都会继续使用
+最初的模型。该报告并未确定是哪个客户端组件或路由组件导致了这一行为。
+
+也可以尝试在 OpenCodex 的 Claude Desktop 配置档案中选择所需的默认模型，重新应用配置档案，
+然后开始新对话。这是一项排查步骤，不保证能解决问题。OpenCodex 无法读取选择器状态，
+而是根据每个请求携带的模型 ID 进行路由。请在 **Logs → requestedModel** 中确认客户端实际发送的内容。
 
 **别名语法规则：**provider 不得包含 `/` 或 `--`，也不得等于 `native`。
 不含 `/` 或 `~` 的普通 model ID 继续使用 v1 前缀 `claude-ocx-…`。包含 `/` 或 `~` 的 model ID

@@ -168,7 +168,10 @@ describe("workspace account integration seam", () => {
     expect(page).toContain("accountId: reauthTargetId, reauth: true");
     expect(page).toContain("prov.reauthIdentityMismatch");
     expect(page).toContain("oauthLoginGenerationRef");
-    expect(page).toContain("/api/oauth/login/cancel");
+    expect(page).toContain('from "../oauth-cancellation-barrier"');
+    expect(page).toContain("cancelOAuthLogin(apiBase, provider)");
+    const cancellation = await Bun.file("gui/src/oauth-cancellation-barrier.ts").text();
+    expect(cancellation).toContain("/api/oauth/login/cancel");
     expect(page).toContain("deviceCode");
     // The device-code widget is now owned by the shared login-hint component so
     // every login surface renders the same one. The panel's obligation is to

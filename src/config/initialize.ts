@@ -33,6 +33,20 @@ export interface InitialConfigPublicationIO {
   close(fd: number): void;
 }
 
+let initialConfigBeforePublishForTests: (() => void) | null = null;
+
+/** Test-only one-shot seam: create a competing config after staging, before no-replace publication. */
+export function setInitialConfigBeforePublishForTests(hook: (() => void) | null): void {
+  initialConfigBeforePublishForTests = hook;
+}
+
+/** Test-only: consume the pending before-publish hook, clearing it even when never invoked. */
+export function takeInitialConfigBeforePublishForTests(): (() => void) | null {
+  const hook = initialConfigBeforePublishForTests;
+  initialConfigBeforePublishForTests = null;
+  return hook;
+}
+
 function hardenInitialConfig(fd: number, temp: string, target: string): void {
   if (process.platform === "win32") {
     hardenSecretPath(temp, { required: true, timeoutMemoKey: target });
@@ -97,6 +111,9 @@ export function publishInitialConfigNoReplace(
     verifyPrivateTemp(fd, temp);
     (io.write ?? ((descriptor: number, value: string) => writeFileSync(descriptor, value, { encoding: "utf8" })))(fd, bytes);
     verifyPrivateTemp(fd, temp);
+    // A competing writer may create the target between staging and publication;
+    // the hook observes exactly that window (test seam shared with src/config.ts).
+    takeInitialConfigBeforePublishForTests()?.();
     try {
       publication = "uncertain";
       (io.link ?? linkSync)(temp, target);

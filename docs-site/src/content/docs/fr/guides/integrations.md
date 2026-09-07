@@ -128,7 +128,7 @@ niveaux. Dans ces cas, le commutateur est verrouillé afin que rien ne soit modi
 **OMP** n'est pas affecté non plus par les modifications voisines, mais pour une autre raison : son outil
 d'écriture ne modifie, octet par octet, que sa propre plage `providers.opencodex` ; le reste du fichier
 n'est jamais réécrit. Pour les autres formats susceptibles de contenir des commentaires (Hermes, OpenClaw,
-Kimi Code, Gajae Code, MiniMax Code, ZCode, Prime Agent, Aside et Raycast — documents YAML, JSON5 et TOML réécrits en entier), ou lorsque les propres entrées
+Kimi Code, Gajae Code, MiniMax Code et Raycast — documents YAML, JSON5 et TOML réécrits en entier), ou lorsque les propres entrées
 d'opencodex ont été modifiées, le commutateur se verrouille et la désactivation est refusée plutôt que de
 deviner quelles modifications vous appartiennent.
 

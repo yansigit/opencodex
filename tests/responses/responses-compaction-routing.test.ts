@@ -9,6 +9,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleResponses, handleResponsesCompact } from "../../src/server/responses";
+import { OPAQUE_COMPACTION_NOTE, SUMMARY_PREFIX } from "../../src/responses/compaction";
 import { looksLikeBackendCiphertext } from "../../src/server/responses/encrypted-payload";
 import * as adapterResolveModule from "../../src/server/adapter-resolve";
 import * as visionModule from "../../src/vision";
@@ -947,6 +948,146 @@ describe("compact alternate-account attempt (#913)", () => {
       else process.env.CODEX_HOME = previousCodexHome;
     });
   }
+
+  for (const [model, account] of [["gpt-5.5", "pool-a"], ["side/gpt-5.5", "pool-b"]] as const) {
+    test(`native 404 falls back to canonical SSE with ${model} account and session identity`, async () => {
+      await withPoolEnv("ocx-compact-404-canonical-", async config => {
+        config.codexAccountNamespaces = { side: "pool-b" };
+        const item = { type: "compaction", id: "cmp_native_3769", encrypted_content: "native-opaque-3769" };
+        const calls: Array<{ url: string; headers: Headers; body: Record<string, unknown> }> = [];
+        globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+          const request = new Request(input, init);
+          calls.push({ url: request.url, headers: request.headers, body: await request.json() as Record<string, unknown> });
+          if (request.url.endsWith("/responses/compact")) return Response.json({ detail: "Not Found" }, { status: 404 });
+          return sseResponse([{ type: "response.completed", response: {
+            id: "resp_compact_3769", status: "completed", output: [item],
+          } }]);
+        }) as typeof fetch;
+        const headers = { "session-id": "compact-3769-session", "thread-id": `compact-3769-${account}`, "x-codex-parent-thread-id": "compact-3769-parent" };
+        const response = await handleResponsesCompact(compactionRequest({
+          model, input: [{ role: "user", content: "retain this history" }],
+        }, undefined, headers), config, { model: "", provider: "" });
+        expect(response.status).toBe(200);
+        expect(response.headers.get("content-type")).toContain("application/json");
+        expect(await response.json()).toEqual({ output: [item] });
+        expect(calls.map(call => call.url)).toEqual([
+          "https://chatgpt.com/backend-api/codex/responses/compact",
+          "https://chatgpt.com/backend-api/codex/responses",
+        ]);
+        expect(calls[1]!.body.stream).toBe(true);
+        expect(calls[1]!.body.model).toBe("gpt-5.5");
+        expect((calls[1]!.body.input as Array<{ type?: string }>).filter(value => value.type === "compaction_trigger")).toHaveLength(1);
+        for (const call of calls) {
+          expect(call.headers.get("authorization")).toBe(`Bearer ${account}-access-token`);
+          expect(call.headers.get("chatgpt-account-id")).toBe(account === "pool-a" ? "pool_acc_a" : "pool_acc_b");
+          for (const [name, value] of Object.entries(headers)) expect(call.headers.get(name)).toBe(value);
+        }
+      });
+    });
+  }
+
+  test("official key-auth native 404 decodes synthetic fallback into replacement user history", async () => {
+    const config = { providers: { "openai-apikey": {
+      adapter: "openai-responses", baseUrl: "https://api.openai.com/v1", authMode: "key", apiKey: "test-key",
+    } } } as OcxConfig;
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(input, init);
+      calls.push({ url: request.url, body: await request.json() as Record<string, unknown> });
+      return request.url.endsWith("/responses/compact")
+        ? Response.json({ detail: "Not Found" }, { status: 404 })
+        : jsonResponse(completedPayload("handoff-3769"));
+    }) as typeof fetch;
+    const response = await handleResponsesCompact(compactionRequest({
+      model: "openai-apikey/gpt-5.5", input: [{ role: "user", content: "retain-3769" }],
+      tools: [{ type: "function", name: "shell", parameters: { type: "object" } }],
+    }), config, { model: "", provider: "" });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ output: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "retain-3769" }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: `${SUMMARY_PREFIX}\nhandoff-3769` }] },
+    ] });
+    expect(calls.map(call => call.url)).toEqual(["https://api.openai.com/v1/responses/compact", "https://api.openai.com/v1/responses"]);
+    expect(calls[1]!.body.tools).toBeUndefined();
+    expect(JSON.stringify(calls[1]!.body.input)).not.toContain("compaction_trigger");
+    expect(JSON.stringify(calls[1]!.body.input)).toContain("CONTEXT CHECKPOINT COMPACTION");
+  });
+
+  for (const status of [200, 400]) {
+    test(`native compact ${status} retains its body without the 404 fallback`, async () => {
+      await withPoolEnv("ocx-compact-404-control-", async config => {
+        const payload = status === 200 ? { output: [{ type: "compaction", encrypted_content: "native-control" }] } : { error: { message: "invalid compact" } };
+        const urls: string[] = [];
+        globalThis.fetch = (async (input: string | URL | Request) => {
+          urls.push(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+          return Response.json(payload, { status });
+        }) as typeof fetch;
+        const response = await handleResponsesCompact(compactionRequest({ model: "gpt-5.5", input: [] }), config, { model: "", provider: "" });
+        expect(response.status).toBe(status);
+        expect(await response.json()).toEqual(payload);
+        expect(urls).toEqual(["https://chatgpt.com/backend-api/codex/responses/compact"]);
+      });
+    });
+  }
+
+  for (const status of ["failed", "incomplete"] as const) {
+    test(`native 404 followed by ${status} SSE does not install replacement history`, async () => {
+      await withPoolEnv("ocx-compact-404-terminal-", async config => {
+        let calls = 0;
+        globalThis.fetch = (async () => {
+          calls++;
+          if (calls === 1) return Response.json({ detail: "Not Found" }, { status: 404 });
+          return sseResponse([{ type: `response.${status}`, response: {
+            id: "resp_compact_rejected_3769", status, output: [],
+          } }]);
+        }) as typeof fetch;
+        const response = await handleResponsesCompact(compactionRequest({ model: "gpt-5.5", input: [] }), config, { model: "", provider: "" });
+        expect(response.status).toBe(502);
+        const payload = await response.json() as { output?: unknown; error?: unknown };
+        expect(payload.output).toBeUndefined();
+        expect(payload.error).toBeDefined();
+        expect(calls).toBe(2);
+      });
+    });
+  }
+
+  test("404 fallback records the compaction serving account for subsequent opaque replay", async () => {
+    await withPoolEnv("ocx-compact-404-replay-", async config => {
+      config.codexAccountNamespaces = { side: "pool-b", first: "pool-a" };
+      const headers = { "thread-id": `compact-replay-${crypto.randomUUID()}` };
+      const item = { type: "compaction", encrypted_content: "native-account-b-3769" };
+      const calls: Array<{ body: Record<string, unknown>; headers: Headers }> = [];
+      let compacting = false;
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const request = new Request(input, init);
+        if (request.url.endsWith("/responses/compact")) return Response.json({ detail: "Not Found" }, { status: 404 });
+        calls.push({ body: await request.json() as Record<string, unknown>, headers: request.headers });
+        return sseResponse([{ type: "response.completed", response: compacting
+          ? { id: "resp_identity_compact_3769", status: "completed", output: [item] }
+          : completedPayload("ordinary turn") }]);
+      }) as typeof fetch;
+      const turn = async (model: string, input: unknown[]) => {
+        const response = await handleResponses(compactionRequest({ model, input, stream: true, store: false }, undefined, headers), config, { model: "", provider: "" });
+        expect(response.status).toBe(200);
+        await response.text();
+      };
+      await turn("first/gpt-5.5", [{ role: "user", content: "seed account A" }]);
+      compacting = true;
+      const compact = await handleResponsesCompact(compactionRequest({ model: "side/gpt-5.5", input: [{ role: "user", content: "compact on B" }] }, undefined, headers), config, { model: "", provider: "" });
+      expect(compact.status).toBe(200);
+      const output = (await compact.json() as { output: unknown[] }).output;
+      expect(output).toEqual([item]);
+      compacting = false;
+      await turn("side/gpt-5.5", [...output, { role: "user", content: "continue on B" }]);
+      expect(calls.at(-1)!.headers.get("authorization")).toBe("Bearer pool-b-access-token");
+      expect(JSON.stringify(calls.at(-1)!.body.input)).toContain("native-account-b-3769");
+      await turn("first/gpt-5.5", [...output, { role: "user", content: "switch back to A" }]);
+      expect(calls.at(-1)!.headers.get("authorization")).toBe("Bearer pool-a-access-token");
+      expect(JSON.stringify(calls.at(-1)!.body.input)).not.toContain("native-account-b-3769");
+      expect(JSON.stringify(calls.at(-1)!.body.input)).toContain(OPAQUE_COMPACTION_NOTE);
+      expect(calls).toHaveLength(4);
+    });
+  });
 
   test("native compact headers followed by a stalled body return 504 without retry and release account cleanup", async () => {
     await withPoolEnv("ocx-compact-body-deadline-", async config => {

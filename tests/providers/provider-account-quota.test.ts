@@ -796,8 +796,8 @@ describe("google-antigravity per-account quota (#1082)", () => {
       expect(posted).toHaveLength(urls.length * 2);
       for (const url of urls) {
         expect(resolved.filter(row => row.url === url)).toEqual([
-          { url, benchmark: true, private: false, mihomo: false },
-          { url, benchmark: true, private: false, mihomo: false },
+          { url, benchmark: true, private: false, mihomo: true },
+          { url, benchmark: true, private: false, mihomo: true },
         ]);
       }
       for (const [auth, project] of [["Bearer agy-first", "proj-first"], ["Bearer agy-second", "proj-second"]]) {

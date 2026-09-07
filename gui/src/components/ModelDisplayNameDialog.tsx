@@ -10,6 +10,7 @@ interface ModelDisplayNameDialogProps {
   saving: boolean;
   requestError: string | null;
   currentNamePending?: boolean;
+  mutationOutcomeUnknown?: boolean;
   onRetry?: () => void;
   onEdit?: () => void;
   onSave: (displayName: string) => void;
@@ -28,6 +29,7 @@ export default function ModelDisplayNameDialog({
   saving,
   requestError,
   currentNamePending = false,
+  mutationOutcomeUnknown = false,
   onRetry,
   onEdit,
   onSave,
@@ -37,6 +39,7 @@ export default function ModelDisplayNameDialog({
   const t = useT();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const submitRef = useRef<HTMLButtonElement>(null);
   const wasSavingRef = useRef(saving);
   const titleId = useId();
   const helpId = useId();
@@ -55,8 +58,11 @@ export default function ModelDisplayNameDialog({
   useEffect(() => {
     const saveFailed = wasSavingRef.current && !saving && Boolean(requestError);
     wasSavingRef.current = saving;
-    if (saveFailed) inputRef.current?.focus();
-  }, [requestError, saving]);
+    if (saveFailed) {
+      if (mutationOutcomeUnknown) submitRef.current?.focus();
+      else inputRef.current?.focus();
+    }
+  }, [requestError, saving, mutationOutcomeUnknown]);
 
   // Parent replaces this snapshot only after a confirmed mutation, not typing or polling.
   // Adjust before committing children, preserving the mounted dialog and its focus refs.
@@ -102,6 +108,7 @@ export default function ModelDisplayNameDialog({
           event.preventDefault();
           if (saving) return;
           if (onRetry) { onRetry(); return; }
+          if (mutationOutcomeUnknown) return;
           const nextValidationKey = modelDisplayNameValidationKey(draft);
           setValidationKey(nextValidationKey);
           if (!nextValidationKey) onSave(draft.trim());
@@ -137,8 +144,9 @@ export default function ModelDisplayNameDialog({
           placeholder={t("models.displayNamePlaceholder")}
           aria-describedby={`${helpId}${visibleError ? ` ${errorId}` : ""}`}
           aria-invalid={validationError ? true : undefined}
-          disabled={saving}
+          disabled={saving || mutationOutcomeUnknown}
           onChange={event => {
+            if (saving || mutationOutcomeUnknown) return;
             onEdit?.();
             setDraft(event.target.value);
             setValidationKey(null);
@@ -157,15 +165,15 @@ export default function ModelDisplayNameDialog({
           <button
             type="button"
             className="btn btn-ghost btn-sm"
-            disabled={saving || !model.displayNameOverride}
-            onClick={onReset}
+            disabled={saving || mutationOutcomeUnknown || !model.displayNameOverride}
+            onClick={() => { if (!saving && !mutationOutcomeUnknown) onReset(); }}
           >
             {t("models.displayNameReset")}
           </button>
           <button type="button" className="btn btn-sm" disabled={saving} onClick={requestClose}>
             {t("common.cancel")}
           </button>
-          <button type="submit" className="btn btn-primary btn-sm" disabled={saving}>
+          <button ref={submitRef} type="submit" className="btn btn-primary btn-sm" disabled={saving || (mutationOutcomeUnknown && !onRetry)}>
             {saving ? t("common.saving") : onRetry ? t("common.retry") : t("common.save")}
           </button>
         </div>

@@ -332,9 +332,19 @@ takma adlar ve eski yapılandırmalardan gelen `claude-ocx-<provider>--<model>`
 kimlikleri hala çözümlenir.
 
 Claude Desktop'ın altbilgi seçicisi zaten çalışan bir 3P görüşmesi için modeli
-değiştirmezse, o görüşmede `/model <id>` komutunu kullanın. OpenCodex seçici
-durumunu gözlemleyemez; her isteğin taşıdığı model kimliğini yönlendirir. Sonucu
-**Logs → requestedModel** altında onaylayın.
+değiştirmezse, `/model <id>` komutunu deneyebilirsiniz; ancak bu geçici çözüm de
+etkilenen Desktop derlemelerinde başarısız olabilir.
+[Sorun #3782](https://github.com/lidge-jun/opencodex/issues/3782), Windows üzerinde
+Claude Desktop 1.46388.4 ile hem altbilgi seçicisi hem de `/model` üzerinden yapılan
+değişikliklerden sonra görüşmenin ilk modelini kullanmaya devam ettiğini bildiriyor.
+Bu bildirim, davranışa hangi istemci veya yönlendirme bileşeninin neden olduğunu
+ortaya koymuyor.
+
+OpenCodex Claude Desktop profilinde istediğiniz varsayılan modeli seçmeyi, profili
+yeniden uygulamayı ve yeni bir görüşme başlatmayı da deneyebilirsiniz. Bu bir sorun
+giderme adımıdır; kesin çözüm değildir. OpenCodex seçici durumunu gözlemleyemez;
+her isteğin taşıdığı model kimliğini yönlendirir. İstemcinin ne gönderdiğini
+**Logs → requestedModel** altında kontrol edin.
 
 Yetkili 1M bağlam penceresine sahip modeller fazladan bir `…[1m]` seçici satırı
 alır: bunu seçmek Claude Code'un bu model için tam 1M bağlam hesabı yapmasını

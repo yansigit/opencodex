@@ -233,6 +233,14 @@ opencodex encode cette déclaration et son historique sous forme d'outil de fonc
 cycle de vie diffusé de l'appel de fonction en `custom_tool_call` avant que Codex ne le reçoive. Le routage natif
 par transfert OpenAI et l'outil personnalisé `apply_patch`, qui est pris en charge, restent inchangés.
 
+Avant le premier appel, les tours routés en mode code reçoivent aussi les règles de l'hôte pour les
+outils auxiliaires imbriqués : `tools.apply_patch` prend une seule chaîne qui commence et se termine
+par les lignes de marqueur de patch seules, sans habillage ; l'isolate ne dispose pas de `import`,
+et les commandes longues sont interrogées via `write_stdin`. Lorsqu'un résultat exec en mode code
+sur le chemin natif Responses routé, Kiro ou Cursor contient encore l'un des messages d'échec de
+l'hôte, opencodex ajoute une indication d'une ligne qui nomme la règle. Cette modification ne
+réécrit ni le code du modèle ni le texte de son patch.
+
 Le fournisseur sélectionné doit prendre en charge les appels de fonctions ou d'outils. Un fournisseur purement
 textuel dépourvu de cette prise en charge ne peut pas utiliser `exec`, Browser ni Computer Use. Les lignes
 OpenAI natives conservent leur mode d'outil en amont.

@@ -346,6 +346,15 @@ wire-clamps ultra/max to each model's real top rung (e.g. gpt-5.5 ultra → xhig
 (`src/server/effort-policy.ts`): they lower or preserve the requested effort rather than rejecting
 the request, and they never raise it.
 
+Operator-owned `pinnedReasoningEffort`, `modelPinnedReasoningEfforts`, and root
+`modelPinnedEfforts` resolve before applicable effort caps at the final destination.
+Provider model pins precede provider-wide pins, then global selector/destination pins.
+A pin can raise the effective caller effort; the later cap can still lower or omit it.
+`none` means explicit-effort omission (provider default), not guaranteed reasoning disablement.
+Compaction maintenance is exempt. Pins are user overlays and do not alter registry seeds,
+model discovery or advertised ladders. Native Chat normalizes newly pinned values through
+provider wire mapping; unpinned native requests retain their existing pass-through contract.
+
 [Decision Log]
 - 목적과 의도: Xiaomi MiMo의 공식 OpenAI Chat endpoint가 실제로 받지 않는 `max`/
   `ultra` reasoning tier를 catalog에 노출하지 않도록 한다.

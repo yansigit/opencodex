@@ -31,6 +31,7 @@ import {
   submitManualLoginCode,
   upsertOAuthProvider,
 } from "../../oauth";
+import { mergeModelPinnedEfforts, modelPinnedEffortsConfigError, pinnedReasoningEffortConfigError } from "../../config/provider-validation";
 import { replaceProviderAccountSet } from "../../oauth/store";
 import { providerDestinationResolvedError } from "../../lib/destination-policy";
 import {
@@ -391,6 +392,11 @@ function providerEditorCandidate(
   if (!validated.ok) {
     return { ok: false, status: 400, error: validated.error, code: "invalid_provider_editor_config" };
   }
+  for (const [name, provider] of Object.entries(candidate.providers)) {
+    if (provider.modelPinnedReasoningEfforts !== undefined) {
+      provider.modelPinnedReasoningEfforts = validated.config.providers[name]!.modelPinnedReasoningEfforts;
+    }
+  }
   return { ok: true, config: candidate, removedProviders };
 }
 
@@ -410,6 +416,27 @@ function adoptProviderEditorCandidate(live: OcxConfig, persisted: OcxConfig): vo
   else live.disabledModels = [...persisted.disabledModels];
   if (persisted.modelDiscovery === undefined) delete live.modelDiscovery;
   else live.modelDiscovery = structuredClone(persisted.modelDiscovery);
+}
+
+/** Share pin merge/clear semantics between POST and the PATCH mask. */
+function applyProviderPinFields(
+  next: OcxProviderConfig,
+  patch: Record<string, unknown>,
+  current: OcxProviderConfig | undefined,
+): string | null {
+  const scalarError = pinnedReasoningEffortConfigError(patch.pinnedReasoningEffort, true);
+  const mapError = modelPinnedEffortsConfigError(patch.modelPinnedReasoningEfforts, "modelPinnedReasoningEfforts", true);
+  if (scalarError || mapError) return scalarError ?? mapError;
+  const scalar = Object.hasOwn(patch, "pinnedReasoningEffort")
+    ? patch.pinnedReasoningEffort : current?.pinnedReasoningEffort;
+  const map = Object.hasOwn(patch, "modelPinnedReasoningEfforts")
+    ? mergeModelPinnedEfforts(current?.modelPinnedReasoningEfforts, patch.modelPinnedReasoningEfforts)
+    : current?.modelPinnedReasoningEfforts;
+  if (scalar === undefined || scalar === null || scalar === "") delete next.pinnedReasoningEffort;
+  else next.pinnedReasoningEffort = scalar as string;
+  if (map === undefined) delete next.modelPinnedReasoningEfforts;
+  else next.modelPinnedReasoningEfforts = { ...map };
+  return null;
 }
 
 /**
@@ -666,6 +693,11 @@ function applyProviderPatchFields(
     }
     touched = true;
   }
+  if (Object.hasOwn(rawBody, "pinnedReasoningEffort") || Object.hasOwn(rawBody, "modelPinnedReasoningEfforts")) {
+    const error = applyProviderPinFields(next, rawBody, provider);
+    if (error) return { error };
+    touched = true;
+  }
   if (Object.hasOwn(rawBody, "modelAutoCompactTokenLimits")) {
     const value = rawBody.modelAutoCompactTokenLimits;
     const error = modelAutoCompactTokenLimitsConfigError(value, {
@@ -878,6 +910,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       models: p.models ?? [],
       contextWindow: p.contextWindow,
       modelContextWindows: p.modelContextWindows,
+      pinnedReasoningEffort: p.pinnedReasoningEffort,
+      modelPinnedReasoningEfforts: p.modelPinnedReasoningEfforts,
       modelAutoCompactTokenLimits: p.modelAutoCompactTokenLimits,
       wsUpstream: p.wsUpstream,
       maxWsFrameBytes: p.maxWsFrameBytes,
@@ -1095,6 +1129,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const aliasOwnershipError = providerAliasOverlayOwnershipError(body.provider, existing);
     if (aliasOwnershipError) return jsonResponse({ error: aliasOwnershipError }, 400);
     const transportCandidate = providerTransportValidationCandidate(body.provider);
+    const pinError = applyProviderPinFields(transportCandidate as unknown as OcxProviderConfig, body.provider, existing);
+    if (pinError) return jsonResponse({ error: pinError }, 400);
     const providerError = providerManagementConfigError(name, transportCandidate)
       ?? providerEmptyToolOutputConfigError(name, transportCandidate);
     if (providerError) return jsonResponse({ error: providerError }, 400);
@@ -1234,6 +1270,11 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       // The editor omits dedicated alias and xAI wire-choice state. Re-read it under
       // the persistence mutation so a concurrent switch remains authoritative.
       restorePersistedAliasOverlays(nextSubmitted, persisted);
+      // Pins were applied to the pre-await snapshot for admission; re-apply them to
+      // the latest live row under the persistence mutation so a concurrent pin edit
+      // remains authoritative instead of being overwritten by the older snapshot.
+      const latestPinError = applyProviderPinFields(nextSubmitted, rawProvider, persisted);
+      if (latestPinError) return { changed: false, value: { error: latestPinError, status: 400 } };
       if (name === "xai") {
         if (!Object.hasOwn(body.provider as object, "modelAdapters") && persisted?.modelAdapters) {
           nextSubmitted.modelAdapters = { ...persisted.modelAdapters };
@@ -1247,6 +1288,9 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         ...(persisted ? structuredClone(persisted) : {}),
         ...nextSubmitted,
       } as OcxProviderConfig;
+      // The credential-preserving spread must not resurrect explicit pin clears.
+      const committedPinError = applyProviderPinFields(committed, rawProvider, persisted);
+      if (committedPinError) return { changed: false, value: { error: committedPinError, status: 400 } };
       if (nextSubmitted.azureCredential) {
         // Switching identity modes is an explicit credential replacement. The atomic merge
         // preserves omitted secrets generally, but Azure identity cannot coexist with a stale
@@ -1258,6 +1302,14 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       if (keyCollision) return { changed: false, value: { error: keyCollision, status: 409 } };
       fresh.providers[name] = committed;
       if (body.setDefault === true) fresh.defaultProvider = name;
+      const pinsOwned = Object.hasOwn(rawProvider, "pinnedReasoningEffort")
+        || Object.hasOwn(rawProvider, "modelPinnedReasoningEfforts")
+        || committed.pinnedReasoningEffort !== undefined
+        || committed.modelPinnedReasoningEfforts !== undefined;
+      if (pinsOwned) {
+        const validation = validateConfigCandidate(structuredClone(fresh));
+        if (!validation.ok) return { changed: false, value: { error: validation.error, status: 400 } };
+      }
       return { changed: true, value: { config: structuredClone(fresh) } };
     });
     if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
@@ -1438,7 +1490,15 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       }
       // A PATCH that managed headers owns the resulting block: the clear path restores
       // registry static headers, so exact-match stripping must not erase them again.
-      fresh.providers[name] = replay.headersTouched ? replay.next : stripRegistryOnlyStaticHeaders(name, replay.next);
+      const candidate = replay.headersTouched ? replay.next : stripRegistryOnlyStaticHeaders(name, replay.next);
+      const pinsTouched = Object.hasOwn(rawBody, "pinnedReasoningEffort") || Object.hasOwn(rawBody, "modelPinnedReasoningEfforts");
+      if (pinsTouched) {
+        const draft = structuredClone(fresh);
+        draft.providers[name] = candidate;
+        const validation = validateConfigCandidate(draft);
+        if (!validation.ok) return { changed: false, value: { error: validation.error, status: 400 } };
+      }
+      fresh.providers[name] = candidate;
       return { changed: replay.touched, value: { config: structuredClone(fresh) } };
     });
     if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);

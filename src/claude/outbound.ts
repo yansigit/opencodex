@@ -217,6 +217,8 @@ interface OpenBlock {
   callId?: string;
   /** Last fixed-size reasoning identity (item + summary/content index) seen by this block. */
   reasoningPartKey?: string;
+  /** Fixed-size item identity; missing IDs only match other missing IDs. */
+  reasoningItemKey?: string;
   /** Buffered thinking text for owned-ocxr1 fallback when no genuine sig is available. */
   thinkingBuf?: string;
   thinkingBufBytes?: number;
@@ -311,20 +313,24 @@ export function responsesSseToAnthropicSse(
           open.webSearchArgsEmitted = true;
         }
         if (open.kind === "thinking") {
-          // Derive signature from decoded encrypted_content (genuine sig) or owned ocxr1 continuity.
-          // Never emit krc as a genuine signature; it stays internal.
-          let sig = open.reasoningSig;
-          if (!sig) {
-            const txt = open.thinkingBuf ?? "";
-            if (txt.length > 0) {
-              sig = encodeReasoningEnvelope({ txt });
-            } else {
-              sig = encodeReasoningEnvelope({ txt: "" });
-            }
+          // Delay the index and all thinking frames until closure so a matching
+          // done envelope can put its redacted blocks first. The existing buffer
+          // remains charged through signature emission, including queued frames.
+          open.index = blockIndex++;
+          emit("content_block_start", {
+            type: "content_block_start", index: open.index,
+            content_block: { type: "thinking", thinking: "", signature: "" },
+          });
+          if (open.thinkingBuf) {
+            emit("content_block_delta", {
+              type: "content_block_delta", index: open.index,
+              delta: { type: "thinking_delta", thinking: open.thinkingBuf },
+            });
           }
+          const signature = open.reasoningSig ?? encodeReasoningEnvelope({ txt: open.thinkingBuf ?? "" }, translatorBudget);
           emit("content_block_delta", {
             type: "content_block_delta", index: open.index,
-            delta: { type: "signature_delta", signature: sig },
+            delta: { type: "signature_delta", signature },
           });
         }
         emit("content_block_stop", { type: "content_block_stop", index: open.index });
@@ -336,12 +342,13 @@ export function responsesSseToAnthropicSse(
         ensureStarted();
         if (open && open.kind === kind) return;
         closeOpenBlock();
+        if (kind === "thinking") {
+          open = { kind, index: -1, thinkingBuf: "", thinkingBufBytes: 0 };
+          return;
+        }
         const index = blockIndex++;
-        const contentBlock: Rec = kind === "text"
-          ? { type: "text", text: "" }
-          : { type: "thinking", thinking: "", signature: "" };
-        emit("content_block_start", { type: "content_block_start", index, content_block: contentBlock });
-        open = { kind, index, thinkingBuf: "", thinkingBufBytes: 0, reasoningSig: undefined, reasoningPartKey: undefined };
+        emit("content_block_start", { type: "content_block_start", index, content_block: { type: "text", text: "" } });
+        open = { kind, index };
       };
       const finish = (stopReason: string, usage: unknown) => {
         if (terminated) return;
@@ -414,9 +421,11 @@ export function responsesSseToAnthropicSse(
           case "response.reasoning_summary_text.delta":
           case "response.reasoning_text.delta": {
             if (typeof data.delta !== "string" || data.delta.length === 0) break;
+            const itemKey = boundedReasoningIdentity(data.item_id);
+            if (open?.kind === "thinking" && open.reasoningItemKey !== itemKey) closeOpenBlock();
             ensureBlock("thinking");
             // The JSON path joins reasoning summary/content parts with "\n\n"
-            // (responsesJsonToAnthropicMessage); mirror that at part and item boundaries
+            // (responsesJsonToAnthropicMessage); mirror that at part boundaries
             // so multi-part summaries do not glue into one run-on paragraph. Frames
             // without part indices produce a constant key and never get a separator.
             const slot = eventName === "response.reasoning_summary_text.delta"
@@ -425,10 +434,11 @@ export function responsesSseToAnthropicSse(
             // Upstream string metadata can be arbitrarily large. Hash strings into fixed-size
             // components while retaining item and part equality, rather than dropping item_id and
             // accidentally joining distinct malformed reasoning items.
-            const partKey = `${boundedReasoningIdentity(data.item_id)}:${slot}`;
             const active = open;
             if (!active || active.kind !== "thinking") break;
-            const needsPartSeparator = active.reasoningPartKey !== undefined && active.reasoningPartKey !== partKey;
+            const partKey = `${itemKey}:${slot}`;
+            const needsPartSeparator = active.reasoningPartKey !== undefined
+              && active.reasoningPartKey !== partKey;
             const appended = `${needsPartSeparator ? "\n\n" : ""}${data.delta}`;
             const previous = active.thinkingBuf ?? "";
             const previousBytes = active.thinkingBufBytes ?? 0;
@@ -444,17 +454,8 @@ export function responsesSseToAnthropicSse(
               reservation.release();
               throw error;
             }
-            if (needsPartSeparator) {
-              emit("content_block_delta", {
-                type: "content_block_delta", index: active.index,
-                delta: { type: "thinking_delta", thinking: "\n\n" },
-              });
-            }
+            active.reasoningItemKey = itemKey;
             active.reasoningPartKey = partKey;
-            emit("content_block_delta", {
-              type: "content_block_delta", index: active.index,
-              delta: { type: "thinking_delta", thinking: data.delta },
-            });
             break;
           }
           case "response.output_item.added": {
@@ -596,27 +597,10 @@ export function responsesSseToAnthropicSse(
               closeOpenBlock();
               break;
             }
-            if (item.type === "reasoning") {
-              const encrypted = typeof item.encrypted_content === "string" ? item.encrypted_content : undefined;
-              const envelope = encrypted ? decodeReasoningEnvelope(encrypted) : null;
-              if (envelope?.sig && open?.kind !== "thinking") ensureBlock("thinking");
-              if (open?.kind !== "thinking") {
-                if (envelope?.red?.length) {
-                  ensureStarted();
-                  closeOpenBlock();
-                  for (const data of envelope.red) {
-                    const index = blockIndex++;
-                    emit("content_block_start", { type: "content_block_start", index, content_block: { type: "redacted_thinking", data } });
-                    emit("content_block_stop", { type: "content_block_stop", index });
-                  }
-                }
-                break;
-              }
-            }
-            if (!open) break;
+            if (!open && item.type !== "reasoning") break;
             // Close the matching open block (message/reasoning items close implicitly on
             // the next block; function_call items must close here so tool input parses).
-            if (open.kind === "tool_use" && item.type === "function_call") {
+            if (open?.kind === "tool_use" && item.type === "function_call") {
               if (open.bufferWebSearchArgs && !open.webSearchArgsEmitted) {
                 const rawArgs = typeof item.arguments === "string" && item.arguments.length > 0
                   ? item.arguments
@@ -632,48 +616,45 @@ export function responsesSseToAnthropicSse(
               }
               closeOpenBlock();
             }
-            else if (open.kind === "text" && item.type === "message") closeOpenBlock();
-            else if (open.kind === "thinking" && item.type === "reasoning") {
-              // Derive genuine signature from encrypted_content; malformed ocxr1 is treated as missing.
-              const enc = typeof (item as any).encrypted_content === "string" ? (item as any).encrypted_content as string : undefined;
-              if (enc) {
-                const env = decodeReasoningEnvelope(enc);
-                if (env?.sig) {
-                  open.reasoningSig = env.sig;
-                } else if (env?.krc) {
-                  // Never emit krc as genuine signature.
-                }
-                // malformed (env===null) or txt-only envelope leaves reasoningSig undefined -> owned fallback.
-                // Native blobs (no ocxr1 prefix) also decode to null -> fallback.
+            else if (open && open.kind === "text" && item.type === "message") closeOpenBlock();
+            else if (item.type === "reasoning") {
+              const encrypted = typeof item.encrypted_content === "string" ? item.encrypted_content : "";
+              const env = encrypted ? decodeReasoningEnvelope(encrypted, translatorBudget) : null;
+              const red = env?.red ?? [];
+              const itemKey = boundedReasoningIdentity(item.id);
+              // A late/unrelated done cannot reorder or sign another item's text.
+              if (open?.kind === "thinking" && open.reasoningItemKey !== itemKey) {
+                closeOpenBlock();
               }
-              // Capture additional thinking text that may be present in the done payload (non-streaming provider).
-              const parts: string[] = [];
-              if (Array.isArray((item as any).summary)) {
-                for (const s of (item as any).summary as any[]) if (s && typeof s.text === "string" && s.text.length>0) parts.push(s.text);
+              if (red.length > 0) {
+                ensureStarted();
+                if (open?.kind !== "thinking") closeOpenBlock();
               }
-              if (Array.isArray((item as any).content)) {
-                for (const s of (item as any).content as any[]) if (s && typeof s.text === "string" && s.text.length>0) parts.push(s.text);
-              }
-              if (parts.length>0) {
-                const doneText = parts.join("\n\n");
-                // Only append if not already buffered via deltas (deltas would have set thinkingBuf).
-                if (!open.thinkingBuf || open.thinkingBuf.length===0) open.thinkingBuf = doneText;
-                else if (!open.thinkingBuf.includes(doneText)) open.thinkingBuf += (open.thinkingBuf.endsWith("\n\n")?"":"\n\n")+doneText;
-              }
-              // Handle redacted thinking: emit separate redacted_thinking blocks after the thinking block
-              // closes. For streaming this happens as a new block; for simplicity emit after close.
-              const red = (() => {
-                if (!enc) return undefined;
-                const e = decodeReasoningEnvelope(enc);
-                return e?.red;
-              })();
-              closeOpenBlock();
-              if (red && red.length>0) {
-                for (const data of red) {
+              for (const data of red) {
                   const idx = blockIndex++;
                   emit("content_block_start", { type: "content_block_start", index: idx, content_block: { type: "redacted_thinking", data } });
                   emit("content_block_stop", { type: "content_block_stop", index: idx });
                 }
+              // Capture additional thinking text present in the done payload (non-streaming provider);
+              // streaming deltas would already have buffered the text.
+              const parts: string[] = [];
+              if (Array.isArray((item as any).summary)) {
+                for (const s of (item as any).summary as any[]) if (s && typeof s.text === "string" && s.text.length > 0) parts.push(s.text);
+              }
+              if (Array.isArray((item as any).content)) {
+                for (const s of (item as any).content as any[]) if (s && typeof s.text === "string" && s.text.length > 0) parts.push(s.text);
+              }
+              if (parts.length > 0 && open?.kind === "thinking") {
+                const doneText = parts.join("\n\n");
+                if (!open.thinkingBuf || open.thinkingBuf.length === 0) open.thinkingBuf = doneText;
+                else if (!open.thinkingBuf.includes(doneText)) open.thinkingBuf += (open.thinkingBuf.endsWith("\n\n") ? "" : "\n\n") + doneText;
+              }
+              if (env?.sig && open?.kind !== "thinking") {
+                ensureBlock("thinking");
+              }
+              if (open?.kind === "thinking") {
+                if (env?.sig) open.reasoningSig = env.sig;
+                closeOpenBlock();
               }
             }
             break;
@@ -891,7 +872,7 @@ export function responsesSseToAnthropicSse(
 }
 
 /** Non-streaming: /v1/responses JSON -> Anthropic message JSON. */
-export function responsesJsonToAnthropicMessage(json: unknown, model: string): Rec {
+export function responsesJsonToAnthropicMessage(json: unknown, model: string, translatorBudget?: TranslatorBudget): Rec {
   const body = isRec(json) ? json : {};
   const output = Array.isArray(body.output) ? body.output : [];
   const content: Rec[] = [];
@@ -922,20 +903,15 @@ export function responsesJsonToAnthropicMessage(json: unknown, model: string): R
             if (isRec(s) && typeof s.text === "string" && s.text.length > 0) parts.push(s.text);
           }
         }
-        const enc = typeof (raw as any).encrypted_content === "string" ? (raw as any).encrypted_content as string : undefined;
-        let sig: string | undefined;
-        let red: string[] | undefined;
-        if (enc) {
-          const env = decodeReasoningEnvelope(enc);
-          if (env?.sig) sig = env.sig;
-          if (env?.red && env.red.length > 0) red = env.red;
-        }
-        if (red && red.length > 0) {
-          for (const data of red) content.push({ type: "redacted_thinking", data });
-        }
-        if (parts.length > 0 || sig) {
-          const derivedSig = sig ?? encodeReasoningEnvelope({ txt: parts.join("\n\n") });
-          content.push({ type: "thinking", thinking: parts.join("\n\n"), signature: derivedSig });
+        const encrypted = typeof raw.encrypted_content === "string" ? raw.encrypted_content : "";
+        const env = encrypted ? decodeReasoningEnvelope(encrypted, translatorBudget) : null;
+        // Legacy combined envelopes place redacted blocks before the signed block,
+        // matching the Anthropic adapter. New bridge output uses separate items.
+        for (const data of env?.red ?? []) content.push({ type: "redacted_thinking", data });
+        // env.txt may be locally hidden text. Do not expose it here or manufacture
+        // a new signed continuity carrier; hidden-summary replay remains limited.
+        if (parts.length > 0 || env?.sig) {
+          content.push({ type: "thinking", thinking: parts.join("\n\n"), signature: env?.sig ?? encodeReasoningEnvelope({ txt: parts.join("\n\n") }, translatorBudget) });
         }
         break;
       }
@@ -1124,9 +1100,8 @@ export async function collectAnthropicMessage(
   } finally {
     reader.releaseLock();
   }
-  closeBlock();
-
   if (error) return error;
+  closeBlock();
   return {
     id: `msg_${uuid()}`,
     type: "message",

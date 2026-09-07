@@ -199,9 +199,17 @@ Claude Code 2.1.129 이상은 `GET /v1/models?limit=1000`에서 게이트웨이 
 제공해요. 두 계열은 계속 디코딩할 수 있으므로 어느 형식이든 `settings.json`에 저장한 모델이
 계속 작동해요.
 
-Claude Desktop의 하단 선택기로 이미 실행 중인 3P 대화의 모델이 바뀌지 않는다면, 그 대화에서
-`/model <id>`를 사용하세요. OpenCodex는 선택기 상태를 따로 볼 수 없고 각 요청에 실린 모델 ID를
-라우팅해요. 적용 결과는 **Logs → requestedModel**에서 확인할 수 있어요.
+Claude Desktop의 하단 선택기로 이미 실행 중인 3P 대화의 모델이 바뀌지 않는다면,
+`/model <id>`를 시도할 수 있지만, 문제가 있는 Desktop 빌드에서는 이 우회 방법도 실패할 수 있어요.
+[이슈 #3782](https://github.com/lidge-jun/opencodex/issues/3782)에는 Windows의
+Claude Desktop 1.46388.4에서 하단 선택기와 `/model`로 각각 변경해도 대화가 처음 모델을 계속
+사용한다는 보고가 있어요. 이 보고만으로는 클라이언트나 라우팅의 어느 구성 요소가 이 동작을
+일으키는지 확정할 수 없어요.
+
+OpenCodex의 Claude Desktop 프로필에서 원하는 기본 모델을 선택하고, 프로필을 다시 적용한 뒤
+새 대화를 시작하는 방법도 시도할 수 있어요. 이는 문제 해결을 위한 시도이며 해결을 보장하지는
+않아요. OpenCodex는 선택기 상태를 볼 수 없고 각 요청에 실린 모델 ID를 라우팅해요.
+클라이언트가 실제로 무엇을 보내는지는 **Logs → requestedModel**에서 확인하세요.
 
 **별칭 문법 규칙:** provider에는 `/`나 `--`를 넣을 수 없고 `native`와 같아도 안 돼요. `/`와 `~`가
 없는 plain model ID는 v1 접두사 `claude-ocx-…`를 유지해요. `/` 또는 `~`가 있는 model ID는 v2

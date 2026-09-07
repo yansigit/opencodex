@@ -262,6 +262,14 @@ fonksiyon aracı olarak kodlar, ardından akışlı fonksiyon çağrısı yaşam
 Codex görmeden önce `custom_tool_call`'a geri yükler. Yerel OpenAI iletme
 yönlendirmesi ve desteklenen `apply_patch` özel aracı değişmeden kalır.
 
+Yönlendirilen code-mode turlarına, ilk çağrıdan önce iç içe geçmiş yardımcılar için geçerli olan
+ana makine kuralları da bildirilir: `tools.apply_patch`, yalnızca yama işaretçilerinden oluşan
+satırlarla başlayan ve biten tek bir dize alır; isolate içinde `import` yoktur ve uzun süren
+komutlar `write_stdin` üzerinden yoklanır. Yerel yönlendirilmiş Responses, Kiro veya Cursor yolundaki
+bir code-mode exec sonucu hâlâ ana makinenin hata mesajlarından birini içeriyorsa opencodex,
+ilgili kuralı belirten tek satırlık bir ipucu ekler. Bu değişiklik modelin kodunu veya yama metnini
+yeniden yazmaz.
+
 Seçilen sağlayıcı fonksiyon/araç çağrısını desteklemelidir. Araç çağrısı desteği
 olmayan salt metin bir sağlayıcı `exec`, Tarayıcı veya Bilgisayar Kullanımını
 kullanamaz. Yerel OpenAI satırları yukarı akış araç modunu değiştirmeden tutar.

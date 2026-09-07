@@ -243,6 +243,28 @@ describe("bun test argv", () => {
     expect(plan.find(lane => lane.label === "codex-shim.test.ts")?.timeoutMs).toBe(3 * 60 * 1000);
   });
 
+  test("account pool management keeps every assertion in one fresh-process lane", () => {
+    const plan = resolveBunTestPlan([]);
+    const name = "account-pool-management-api.test.ts";
+    expect(SERIAL_TEST_FILES).toContain(`tests/server/${name}`);
+    expect(plan[0]?.args).toContain(`**/${name}`);
+    expect(plan.filter(lane => lane.label === name)).toHaveLength(1);
+    expect(plan.find(lane => lane.label === name)?.args).toEqual([
+      "--isolate", "--parallel=1", `./tests/server/${name}`,
+    ]);
+  });
+
+  test("certification process-tree deadlines run outside the loaded worker pool", () => {
+    const plan = resolveBunTestPlan([]);
+    const name = "claude-certification.test.ts";
+    expect(SERIAL_TEST_FILES).toContain(`tests/claude-integration/${name}`);
+    expect(plan[0]?.args).toContain(`**/${name}`);
+    expect(plan.filter(lane => lane.label === name)).toHaveLength(1);
+    expect(plan.find(lane => lane.label === name)?.args).toEqual([
+      "--isolate", "--parallel=1", `./tests/claude-integration/${name}`,
+    ]);
+  });
+
   test("a timed full suite keeps load-sensitive and dedicated files in isolated lanes", () => {
     const plan = resolveBunTestPlan(["--timings", ".bun-timings.json"]);
     expect(plan).toHaveLength(SERIAL_TEST_FILES.length + DEDICATED_TEST_FILES.length + 1);

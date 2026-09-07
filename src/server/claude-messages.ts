@@ -7,6 +7,7 @@
  * unchanged. The Responses output (SSE or JSON) is converted back to Anthropic shape.
  */
 import { FORWARD_HEADERS } from "../adapters/openai-responses";
+import { jsonUtf8Bytes } from "../lib/json-byte-size";
 import { sseFieldValue } from "../lib/sse-decoder";
 import { enforceAnthropicImageLimits, sniffImageDimensions } from "../adapters/anthropic-image-guard";
 import { normalizeAnthropicImages } from "../adapters/anthropic-image-normalize";
@@ -24,6 +25,7 @@ import { createHash } from "node:crypto";
 import {
   analyzeClaudeCompatibility,
   collectClaudeFeatureCodes,
+  isToleratedClaudeFeatureCode,
   resolveClaudeCompatibilityMode,
 } from "../claude/compatibility";
 import {
@@ -40,6 +42,7 @@ import type { ClaudeSourceEnvelope, OcxConfig, OcxUsage } from "../types";
 import { readJsonRequestBody } from "./request-decompress";
 import { addFinalRequestLog, httpStatusForRequestLogTerminal, recordFirstOutput, type RequestLogContext, type RequestLogEntry } from "./request-log";
 import { conversationIdFromClaudeMetadata } from "./request-log-conversation";
+import { normalizeClaudeCompatibilityUsageLog } from "../usage/log";
 import { responseWithDeferredRequestLog } from "./relay";
 import { handleResponses } from "./responses";
 import {
@@ -204,12 +207,12 @@ export function captureClaudeSourceEnvelope(
   const rawVersion = req.headers.get("anthropic-version");
   const version = rawVersion === null ? undefined : rawVersion.trim();
   if (!isRec(rawBody)) throw new AnthropicRequestError("Anthropic request body must be an object");
-  const bodyClone = structuredClone(rawBody);
-  const bodyBytes = new TextEncoder().encode(JSON.stringify(bodyClone)).byteLength;
+  const bodyBytes = jsonUtf8Bytes(rawBody);
   let headerBytes = 0;
   if (beta) headerBytes += new TextEncoder().encode(beta).byteLength;
   if (version) headerBytes += new TextEncoder().encode(version).byteLength;
   budget.chargeRetained(bodyBytes + headerBytes, { kind: "request_copies" });
+  const bodyClone = structuredClone(rawBody);
   return {
     body: bodyClone,
     headers: {
@@ -326,9 +329,10 @@ export function claudeFinalRouteHandler(
   const anthropicBeta = ctx.sourceEnvelope.headers["anthropic-beta"];
   const result = analyzeClaudeCompatibility(ctx.sourceEnvelope.body, { mode, adapter, anthropicBeta });
   if (result.decision === "reject") {
+    ctx.logCtx.errorCode = "claude_compatibility_unsupported";
     throw new AnthropicRequestError(result.reason ?? "incompatible features for routed adapter");
   }
-  return { adapter, decision: result.decision, featureCodes: result.featureCodes };
+  return { adapter, decision: result.decision, featureCodes: result.shadowFeatureCodes ?? result.featureCodes };
 }
 
 
@@ -968,13 +972,13 @@ async function handleClaudeMessagesWithBudget(
     // Routed requests retain the post-directive source body. Native passthrough never
     // pays for or observes this clone, preserving its existing byte-for-byte path.
     sourceEnvelope = captureClaudeSourceEnvelope(req, anthropicBody, translatorBudget);
-    const translation = anthropicToResponsesTranslation(anthropicBody, config.claudeCode);
+    const translation = anthropicToResponsesTranslation(anthropicBody, config.claudeCode, translatorBudget);
     internalBody = translation.body;
     // The Anthropic translator builds its body from model/input/store/stream plus sampling
     // fields only, so the caller intent is applied to the TRANSLATED body rather than the
     // inbound one.
     if (fastRow) internalBody.service_tier = "priority";
-    translatorBudget.chargeRetained(new TextEncoder().encode(JSON.stringify(internalBody)).byteLength, { kind: "request_copies" });
+    translatorBudget.chargeRetained(jsonUtf8Bytes(internalBody), { kind: "request_copies" });
     // Session header precedence feeds prompt_cache_key (header > metadata > system cohort).
     // When the x-claude-code-session-id header is present, it replaces the
     // translation's per-session/system key with a stable per-header sha256 key
@@ -1015,6 +1019,9 @@ async function handleClaudeMessagesWithBudget(
   // Adapter-specific work runs only after Responses core owns the final route.
   const claudeOnResolvedRoute = (info: import("./responses/core").ResolvedRouteInfo): void => {
     if (!sourceEnvelope) return;
+    // Each attempt owns its admission evidence; a later native route must not
+    // inherit a translated shadow decision from an earlier fallback target.
+    delete logCtx.claudeCompatibility;
     const result = claudeFinalRouteHandler(
       info.parsed as unknown as Parameters<typeof claudeFinalRouteHandler>[0],
       { provider: { ...info.provider, adapter: info.adapterName }, providerName: info.route.providerName, modelId: info.modelId } as Parameters<typeof claudeFinalRouteHandler>[1],
@@ -1025,6 +1032,21 @@ async function handleClaudeMessagesWithBudget(
         logCtx,
       },
     );
+    if (result.decision === "shadow") {
+      // Persisted shadow evidence must be backed by the final per-attempt
+      // evaluation: every non-tolerated code comes from result.featureCodes,
+      // so an adapter-tolerated feature (e.g. deferred_tools on
+      // openai-responses) can never be relabeled unsupported. Early pre-route
+      // codes only contribute tolerated diagnostics that the effort override
+      // legitimately removed before the final evaluation.
+      logCtx.claudeCompatibility = normalizeClaudeCompatibilityUsageLog({
+        decision: "shadow",
+        featureCodes: [...new Set([
+          ...result.featureCodes,
+          ...featureCodesEarly.filter(isToleratedClaudeFeatureCode),
+        ])],
+      });
+    }
     // Session_id header synthesis: only for openai-responses and only for a
     // real per-session prompt_cache_key (metadata), never the system-hash
     // cohort. Idempotent: check headers.has before set.
@@ -1059,13 +1081,26 @@ async function handleClaudeMessagesWithBudget(
       headers.set("chatgpt-account-id", token.chatgptAccountId);
     }
   }
-  const internalBodyJson = JSON.stringify(internalBody);
-  translatorBudget.chargeRetained(new TextEncoder().encode(internalBodyJson).byteLength, { kind: "request_copies" });
-  const internalReq = new Request("http://localhost/v1/responses", {
-    method: "POST",
-    headers,
-    body: internalBodyJson,
-  });
+  let internalReq: Request;
+  try {
+    // The UTF-16 JSON string and the Request's UTF-8 body coexist until dispatch.
+    const bodyBytes = jsonUtf8Bytes(internalBody);
+    const reservation = translatorBudget.reserveTransient(3 * bodyBytes, { kind: "request_copies" });
+    try {
+      internalReq = new Request("http://localhost/v1/responses", {
+        method: "POST",
+        headers,
+        body: JSON.stringify(internalBody),
+      });
+    } finally {
+      reservation.release();
+    }
+    translatorBudget.chargeRetained(bodyBytes, { kind: "request_copies" });
+  } catch (err) {
+    if (!isTranslatorBudgetExceededError(err)) throw err;
+    if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 413, { closeReason: "non_stream" });
+    return anthropicErrorResponse(413, "request translation buffer exceeded the safe limit", "request_too_large", "translation_buffer_limit");
+  }
 
   // Request-log wiring mirrors the /v1/responses route: native passthrough finalizes
   // via the terminal callbacks; routed streams get the Responses-vocabulary log tap
@@ -1215,7 +1250,13 @@ async function handleClaudeMessagesWithBudget(
     }
     return anthropicErrorResponse(502, error?.message ?? "upstream request failed", "api_error");
   }
-  const message = responsesJsonToAnthropicMessage(json, requestedModel);
+  let message: Rec;
+  try {
+    message = responsesJsonToAnthropicMessage(json, requestedModel, translatorBudget);
+  } catch (err) {
+    if (!isTranslatorBudgetExceededError(err)) throw err;
+    return anthropicErrorResponse(413, "upstream translation buffer exceeded the safe limit", "request_too_large", "translation_buffer_limit");
+  }
   if ((message as Rec).type === "error") {
     return new Response(JSON.stringify(message), {
       status: 529,

@@ -46,6 +46,7 @@ export type ManagementModelRow = Partial<CatalogModel> & {
   native?: boolean;
   custom?: boolean;
   customId?: string;
+  manualPricing?: boolean;
   fastRowAvailable?: boolean;
   displayNameOverride?: string;
   displayNameSource?: "operator" | "provider" | "fallback";
@@ -181,8 +182,12 @@ export async function listManagementModelRows(
   for (const row of rows) knownIds.add(row.namespaced);
   return rows.map(row => {
     const pending = initialModelSelectionPending(config.providers[row.provider]);
+    const modelCosts = Object.hasOwn(config.providers, row.provider)
+      ? config.providers[row.provider]?.modelCosts : undefined;
     return {
       ...row,
+      ...(!row.native && modelCosts !== undefined && Object.hasOwn(modelCosts, row.id)
+        ? { manualPricing: true } : {}),
       ...(pending ? { disabled: true, initialSelectionPending: true } : {}),
       fastRowAvailable: !row.disabled && !pending
         && !knownIds.has(fastRowId(row.namespaced)) && catalogFastRowEligible(config, row),

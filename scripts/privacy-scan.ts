@@ -50,6 +50,10 @@ const DEVLOG_PUBLICATION_PROOF_TOKEN = ["sk-", "liveKeyShaped9", "x8w7v6u5", "t4
 const DEVLOG_PUBLICATION_PROOF_HOME_USERNAME = ["someone", "else"].join("");
 const DEVLOG_PUBLICATION_PROOF_EMAIL = ["stranger", "third-party.example.org"].join("@");
 
+// The upstream sponsorship address is intentionally public only in these files.
+const SPONSORSHIP_CONTACT_EMAIL = ["jun", "lidgeai.com"].join("@");
+const SPONSORSHIP_CONTACT_FILES = new Set(["SPONSORS.md", "README.md"]);
+
 function gitScanFiles(): string[] {
   // Scan the working tree that will become the next commit, not only the current
   // index. Otherwise a clean local pre-push can turn red as soon as a new file is
@@ -94,6 +98,7 @@ function lineAt(text: string, index: number): string {
 function isAllowedEmail(file: string, email: string): boolean {
   if (file === "scripts/privacy-scan.ts" && email === "a@b.com") return true;
   if (file === DEVLOG_PUBLICATION_PROOF_FILE && email === DEVLOG_PUBLICATION_PROOF_EMAIL) return true;
+  if (SPONSORSHIP_CONTACT_FILES.has(file) && email.toLowerCase() === SPONSORSHIP_CONTACT_EMAIL) return true;
   const domain = email.split("@").at(1)?.toLowerCase() ?? "";
   if (domain === "example.test" || domain === "example.com" || domain === "test.com" || domain.endsWith(".test")) {
     return true;

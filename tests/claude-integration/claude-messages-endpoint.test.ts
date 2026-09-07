@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { replacePersistedConfig, saveConfig } from "../../src/config";
+import { readRecentUsageEntries } from "../../src/usage/log";
 import { buildDesktop3pRegistry } from "../../src/claude/desktop-3p";
 import type { DesktopProfile } from "../../src/claude/desktop-profile";
 import { createAnthropicAdapter } from "../../src/adapters/anthropic";
@@ -13,6 +14,8 @@ import { signDirective } from "../../src/claude/directive-sign";
 import { clearableDeadline } from "../../src/lib/abort";
 import {
   clearRequestLogsForTests,
+  addRequestLog,
+  hydrateRequestLogsFromDisk,
   getRequestLogEntries,
   type RequestLogContext,
 } from "../../src/server/request-log";
@@ -71,6 +74,88 @@ afterEach(() => {
   isolatedCodexHome = null;
   globalThis.fetch = originalFetch;
   if (testDir) removeTreeWithRetry(testDir);
+});
+
+test("compatibility shadow evidence survives request, usage, API and disk boundaries", async () => {
+  const { server: upstream, captured } = mockChatUpstreamCapturing();
+  saveConfig(mockConfig(new URL("/v1", upstream.url).href, { compatibility: "shadow" }));
+  const server = startServer(0);
+  try {
+    clearRequestLogsForTests();
+    const route = "mock/test-model";
+    const effort = "high";
+    const signature = signDirective(route, effort, getOrCreateDirectiveSigningKey());
+    const response = await postMessages(server.url.toString(), {
+      model: route, max_tokens: 64, stream: true, thinking: { type: "disabled" },
+      service_tier: "standard_only", context_management: { edits: [] },
+      system: [{ type: "text", text: `<!-- ocx-route: ${route} -->\n<!-- ocx-effort: ${effort} -->\n<!-- ocx-sig: v1:${signature} -->` }],
+      messages: [{ role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "private-fixture" } }] }],
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(captured).toHaveLength(1);
+    const expected = {
+      decision: "shadow", featureCodes: ["documents", "thinking_block"], reason: "shadow: would reject: documents",
+    };
+    expect(getRequestLogEntries()).toHaveLength(1);
+    const requestId = getRequestLogEntries()[0]!.requestId;
+    expect(getRequestLogEntries()[0]!.claudeCompatibility).toEqual(expected);
+    expect(readRecentUsageEntries(1)[0]?.claudeCompatibility).toEqual(expected);
+    const rows = logsFromApiBody<{ requestId: string; claudeCompatibility?: unknown }>(
+      await (await fetch(new URL("/api/logs", server.url))).json());
+    expect(rows.find(row => row.requestId === requestId)?.claudeCompatibility).toEqual(expected);
+    clearRequestLogsForTests();
+    hydrateRequestLogsFromDisk();
+    expect(getRequestLogEntries().find(row => row.requestId === requestId)?.claudeCompatibility).toEqual(expected);
+    addRequestLog({ requestId: "compatibility-boundary", timestamp: Date.now(), model: "test-model", provider: "mock",
+      status: 200, durationMs: 1, usageStatus: "unreported",
+      claudeCompatibility: JSON.parse('{"decision":"shadow","featureCodes":["documents","thinking_block","private-header"],"reason":"private-reason"}') });
+    expect(getRequestLogEntries().find(row => row.requestId === "compatibility-boundary")?.claudeCompatibility).toEqual(expected);
+  } finally {
+    await server.stop(true);
+    await upstream.stop(true);
+    // In-memory request-log rows must not leak into later tests in this file:
+    // a later test matching its first "test-model" row would otherwise read
+    // this row (and the enforce test 400 rows) instead of its own.
+    clearRequestLogsForTests();
+  }
+});
+
+test("fork default enforce rejects unsupported translated features before inference", async () => {
+  let sends = 0;
+  const upstream = Bun.serve({ port: 0, fetch() { sends++; return new Response("unexpected inference", { status: 500 }); } });
+  try {
+    for (const adapter of ["openai-responses", "openai-chat"] as const) {
+      for (const compatibility of [undefined, "enforce"] as const) {
+        const config = mockConfig(new URL("/v1", upstream.url).href, { compatibility });
+        config.providers.mock!.adapter = adapter;
+        saveConfig(config);
+        const server = startServer(0);
+        try {
+          clearRequestLogsForTests();
+          for (const feature of [
+            { messages: [{ role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "private-fixture" } }] }] },
+            { tools: [{ type: "mcp_toolset", mcp_server_name: "private-fixture" }] },
+            { container: "private-fixture" },
+          ]) {
+            const response = await postMessages(server.url.toString(), {
+              model: "mock/test-model", max_tokens: 64, stream: false,
+              messages: [{ role: "user", content: "hi" }], ...feature,
+            });
+            expect(response.status).toBe(400);
+            const error = await response.json() as { error: { type: string; message: string } };
+            expect(error.error.type).toBe("invalid_request_error");
+            expect(error.error.message).not.toContain("private-");
+            expect(getRequestLogEntries().at(-1)?.errorCode).toBe("claude_compatibility_unsupported");
+          }
+        } finally { await server.stop(true); }
+      }
+    }
+    expect(sends).toBe(0);
+  } finally {
+    await upstream.stop(true);
+    clearRequestLogsForTests();
+  }
 });
 
 function mockChatUpstream() {

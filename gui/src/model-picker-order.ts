@@ -11,7 +11,7 @@ export interface PickerOrderSaved {
   pickerOrder: string[];
   pickerOrderMode: SavedModelPickerOrderMode | null;
 }
-export interface PickerOrderSettings extends PickerOrderSaved { pickerAvailable: string[] }
+export interface PickerOrderSettings extends PickerOrderSaved { pickerAvailable: string[]; chosen?: string[] }
 
 function stringList(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(id => typeof id === "string" && id.trim().length > 0);
@@ -25,7 +25,11 @@ export function isPickerOrderSaved(value: unknown): value is PickerOrderSaved {
   return stringList(row.pickerOrder) && savedMode(row.pickerOrderMode);
 }
 export function isPickerOrderSettings(value: unknown): value is PickerOrderSettings {
-  return isPickerOrderSaved(value) && stringList((value as PickerOrderSettings).pickerAvailable);
+  if (!isPickerOrderSaved(value)) return false;
+  const row = value as PickerOrderSettings;
+  // Roster writes accept every string, including blanks; picker fields remain nonempty-string lists.
+  return stringList(row.pickerAvailable) && (!("chosen" in row)
+    || (Array.isArray(row.chosen) && row.chosen.every(id => typeof id === "string")));
 }
 export function isModelPickerUsage(value: unknown): value is ModelPickerUsage[] {
   return Array.isArray(value) && value.every(row => row !== null && typeof row === "object"
@@ -103,4 +107,72 @@ export function modelPickerOrderMode(
       && expected.every((id, index) => id === saved[index])) return preset;
   }
   return "custom";
+}
+
+
+/** Resolve exact canonical ids before legacy provider/raw spellings; never guess a bare native id. */
+export function normalizePickerIds(ids: readonly string[], available: readonly string[], identities: readonly PickerModelIdentity[]): string[] {
+  const candidates = new Set(available.filter(id => id.includes("/")));
+  const resolve = (id: string): string | undefined => {
+    if (candidates.has(id)) return id;
+    const matches = new Set(identities.filter(row => candidates.has(row.namespaced)
+      && id === `${row.provider}/${row.id}`).map(row => row.namespaced));
+    return matches.size === 1 ? [...matches][0] : undefined;
+  };
+  return [...new Set(ids.map(id => resolve(id.trim())).filter((id): id is string => id !== undefined))];
+}
+
+export function pickerSnapshotSignature(apiBase: string, generation: number, settings: PickerOrderSettings): string {
+  return JSON.stringify([apiBase, generation, settings.pickerAvailable, settings.chosen ?? null,
+    settings.pickerOrder, settings.pickerOrderMode]);
+}
+
+/** Every candidate needs one observed provider/raw identity, with no encoded/raw collisions. */
+export function pickerIdentityCoverage(available: readonly string[], identities: readonly PickerModelIdentity[]): boolean {
+  const candidates = new Set(available.filter(id => id.includes("/")));
+  const rawBySlug = new Map<string, Set<string>>(), slugsByRaw = new Map<string, Set<string>>();
+  for (const row of identities) {
+    if (!candidates.has(row.namespaced)) continue;
+    const raw = `${row.provider}/${row.id}`;
+    const raws = rawBySlug.get(row.namespaced) ?? new Set<string>();
+    const slugs = slugsByRaw.get(raw) ?? new Set<string>();
+    raws.add(raw); slugs.add(row.namespaced);
+    rawBySlug.set(row.namespaced, raws); slugsByRaw.set(raw, slugs);
+  }
+  return [...candidates].every(slug => {
+    const raws = rawBySlug.get(slug);
+    return raws?.size === 1 && slugsByRaw.get([...raws][0]!)?.size === 1;
+  });
+}
+
+export function customPickerRows(settings: PickerOrderSettings, identities: readonly PickerModelIdentity[]): { order: string[]; fixed: string[] } | null {
+  // Unknown featured state and complete/native orders cannot safely become routed-only drafts.
+  if (settings.chosen === undefined || settings.pickerOrder.some(id => !id.includes("/"))) return null;
+  const available = [...new Set(settings.pickerAvailable.filter(id => id.includes("/")))];
+  if (!pickerIdentityCoverage(available, identities)) return null;
+  // Roster strings stay verbatim. Map uses the LAST occurrence; each row prefers its exact canonical rank.
+  const chosenRank = new Map(settings.chosen.map((id, index) => [id, index]));
+  const rawBySlug = new Map(identities.map(row => [row.namespaced, `${row.provider}/${row.id}`]));
+  const rankOf = (slug: string) => chosenRank.get(slug) ?? chosenRank.get(rawBySlug.get(slug)!);
+  const fixed = available.filter(slug => rankOf(slug) !== undefined).sort((a, b) => rankOf(a)! - rankOf(b)!);
+  const saved = normalizePickerIds(settings.pickerOrder, available, identities);
+  return { fixed, order: [...new Set([...fixed, ...saved, ...available])] };
+}
+
+/** Drop semantics: remove first, re-find the target, then insert before it. */
+export function movePickerBefore(order: readonly string[], source: string, target: string, fixed: readonly string[]): string[] {
+  const next = [...order];
+  if (source === target || fixed.includes(source) || fixed.includes(target)
+    || !next.includes(source) || !next.includes(target)) return next;
+  next.splice(next.indexOf(source), 1);
+  next.splice(next.indexOf(target), 0, source);
+  return next;
+}
+
+/** Keyboard semantics deliberately differ from dropping before the next row. */
+export function stepPickerOrder(order: readonly string[], source: string, direction: -1 | 1, fixed: readonly string[]): string[] {
+  const next = [...order], index = next.indexOf(source), target = index + direction;
+  if (index < 0 || target < 0 || target >= next.length || fixed.includes(source) || fixed.includes(next[target]!)) return next;
+  [next[index], next[target]] = [next[target]!, next[index]!];
+  return next;
 }

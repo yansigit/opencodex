@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { INTERNAL_DEADLINE_MS, STORE_BUDGET_MS } from "../helpers/test-budget";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as atomicWrite from "../../src/config/atomic-write";
 import * as oauthStore from "../../src/oauth/store";
@@ -42,7 +43,7 @@ import {
 } from "../../src/oauth/antigravity-routing";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-const TEST_DIR = join(import.meta.dir, ".tmp-oauth-store-multi-test");
+let TEST_DIR: string;
 let previousOpencodexHome: string | undefined;
 const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
@@ -77,8 +78,7 @@ async function selectionAccounts() {
 describe("multi-account auth store", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
-    mkdirSync(TEST_DIR, { recursive: true });
+    TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-oauth-store-multi-"));
     process.env.OPENCODEX_HOME = TEST_DIR;
     resetHardenedStateForTests();
     setIcaclsRunnerForTests(() => ({
@@ -88,9 +88,6 @@ describe("multi-account auth store", () => {
       stdout: "",
     }));
     setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-  });
-
-  afterEach(cleanupOAuthStoreFixture);
   });
 
   afterEach(cleanupOAuthStoreFixture);
