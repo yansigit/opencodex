@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initializePersistedConfigIfMissing } from "../../src/config";
+import { saveConfig } from "../../src/config";
 import { buildOpenAIChatPassthroughRequest, createOpenAIChatAdapter } from "../../src/adapters/openai-chat";
 import {
   openRouterRoutingConfigError,
@@ -187,8 +187,8 @@ describe("OpenRouter configurable provider routing", () => {
       defaultProvider: "openrouter",
       providers: { openrouter },
     };
-    initializePersistedConfigIfMissing(config);
     try {
+      saveConfig(config);
       const rotated = rotateProviderTransportOn429(config, "openrouter", openrouter, {
         attemptedKey: "key-one",
         now: 1_000_000,

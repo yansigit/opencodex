@@ -1,11 +1,11 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import * as abortModule from "../../src/lib/abort";
 import type { AdapterFetchContext, ProviderAdapter } from "../../src/adapters/base";
 import { parseRequest } from "../../src/responses/parser";
 import { responseWithDeferredRequestLog, type RequestLogEntry } from "../../src/server";
 import type { AdapterEvent, OcxProviderConfig } from "../../src/types";
 import { runWithWebSearch as runWithWebSearchProduction, type WebSearchLoopDeps } from "../../src/web-search/loop";
 import { createTestTranslatorBudget } from "../helpers/translator-budget";
-import { OcxRequestValidationError } from "../../src/lib/errors";
 
 function runWithWebSearch(
   deps: Omit<WebSearchLoopDeps, "incomingMeta"> & { incomingMeta?: WebSearchLoopDeps["incomingMeta"] },
@@ -20,8 +20,11 @@ function runWithWebSearch(
 }
 
 const originalFetch = globalThis.fetch;
+let cleanupDeadlineFixture: (() => void) | undefined;
 
 afterEach(() => {
+  cleanupDeadlineFixture?.();
+  cleanupDeadlineFixture = undefined;
   globalThis.fetch = originalFetch;
 });
 
@@ -363,6 +366,47 @@ describe("web-search timeout runtime contracts", () => {
     let firstSignal: AbortSignal | undefined;
     let cancelCalls = 0;
     let rotations = 0;
+    let rotatedFetches = 0;
+    let deadlineCreations = 0;
+    let deadlineClears = 0;
+    let cancelSettled = false;
+    let releaseCancel!: () => void;
+    const cancelGate = new Promise<void>(resolve => { releaseCancel = resolve; })
+      .then(() => { cancelSettled = true; });
+    const events: string[] = [];
+    const deadlineController = new AbortController();
+    const timeoutReason = new DOMException("Timeout elapsed", "TimeoutError");
+    let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+    let deadlineCleared = false;
+    const originalDeadline = abortModule.clearableDeadline;
+    const deadlineSpy = spyOn(abortModule, "clearableDeadline").mockImplementation((timeoutMs, parent) => {
+      if (timeoutMs !== connectTimeoutMs) return originalDeadline(timeoutMs, parent);
+      deadlineCreations++;
+      const signal = parent ? AbortSignal.any([parent, deadlineController.signal]) : deadlineController.signal;
+      return {
+        signal,
+        timeoutReason,
+        didExpire: () => signal.aborted && signal.reason === timeoutReason,
+        clear: () => {
+          deadlineClears++;
+          deadlineCleared = true;
+          events.push("deadline-cleared");
+          if (expiryTimer !== undefined) clearTimeout(expiryTimer);
+          expiryTimer = undefined;
+        },
+      };
+    });
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      if (expiryTimer !== undefined) clearTimeout(expiryTimer);
+      expiryTimer = undefined;
+      releaseCancel();
+      deadlineController.abort(timeoutReason);
+      deadlineSpy.mockRestore();
+    };
+    cleanupDeadlineFixture = cleanup;
     const firstAdapter: ProviderAdapter = {
       name: "rate-limited-never-cancelled",
       buildRequest: () => ({ url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" }),
@@ -371,7 +415,15 @@ describe("web-search timeout runtime contracts", () => {
         return new Response(new ReadableStream<Uint8Array>({
           cancel() {
             cancelCalls++;
-            return new Promise<void>(() => {});
+            events.push("cancel-requested");
+            // Expire on the next timer task, after immediate rotation microtasks.
+            // An added timer wait or an awaited cancel cannot get a fresh budget.
+            if (!deadlineCleared) expiryTimer = setTimeout(() => {
+              expiryTimer = undefined;
+              events.push("deadline-expired");
+              deadlineController.abort(timeoutReason);
+            }, 0);
+            return cancelGate;
           },
         }), { status: 429 });
       },
@@ -382,181 +434,47 @@ describe("web-search timeout runtime contracts", () => {
       name: "rotated-header-hang",
       buildRequest: () => ({ url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" }),
       fetchResponse: (_request, ctx) => {
+        rotatedFetches++;
+        expect(firstSignal).toBeDefined();
         expect(ctx?.abortSignal).toBe(firstSignal);
+        expect(ctx?.abortSignal?.aborted).toBe(false);
+        expect(cancelCalls).toBe(1);
+        expect(cancelSettled).toBe(false);
+        events.push("rotated-fetch");
         return hangingFetch(ctx);
       },
       async *parseStream() { yield { type: "done" }; },
       async parseResponse() { return [{ type: "done" }]; },
     };
 
-    const started = performance.now();
-    const response = await runWithWebSearch(deps(firstAdapter, {
-      connectTimeoutMs,
-      on429: () => {
-        rotations++;
-        return rotatedAdapter;
-      },
-    }));
+    try {
+      const response = await runWithWebSearch(deps(firstAdapter, {
+        connectTimeoutMs,
+        on429: () => {
+          rotations++;
+          return rotatedAdapter;
+        },
+      }));
 
-    expect(performance.now() - started).toBeLessThan(500);
-    expect(cancelCalls).toBe(1);
-    expect(rotations).toBe(1);
-    expect(response.status).toBe(504);
-    expect(await response.json()).toEqual({
-      error: {
-        message: `Provider response-header timeout after ${connectTimeoutMs}ms during web-search`,
-        type: "upstream_error",
-        code: null,
-      },
-    });
+      expect(cancelCalls).toBe(1);
+      expect(cancelSettled).toBe(false);
+      expect(rotations).toBe(1);
+      expect(rotatedFetches).toBe(1);
+      expect(deadlineCreations).toBe(1);
+      expect(deadlineClears).toBe(1);
+      expect(firstSignal?.reason).toBe(timeoutReason);
+      expect(events).toEqual(["cancel-requested", "rotated-fetch", "deadline-expired", "deadline-cleared"]);
+      expect(response.status).toBe(504);
+      expect(await response.json()).toEqual({
+        error: {
+          message: `Provider response-header timeout after ${connectTimeoutMs}ms during web-search`,
+          type: "upstream_error",
+          code: null,
+        },
+      });
+    } finally {
+      cleanup();
+      if (cleanupDeadlineFixture === cleanup) cleanupDeadlineFixture = undefined;
+    }
   }, 1_000);
-
-  test("validates a rotated adapter before the second web-search build", async () => {
-    let builds = 0;
-    let fetches = 0;
-    const firstAdapter: ProviderAdapter = {
-      name: "first",
-      buildRequest: () => {
-        builds += 1;
-        return { url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" };
-      },
-      fetchResponse: async () => {
-        fetches += 1;
-        return new Response("rate limited", { status: 429 });
-      },
-      async *parseStream() { yield { type: "done" }; },
-      async parseResponse() { return [{ type: "done" }]; },
-    };
-    const rotatedAdapter: ProviderAdapter = {
-      ...firstAdapter,
-      name: "rotated",
-      buildRequest: () => {
-        builds += 1;
-        return { url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" };
-      },
-      fetchResponse: async () => {
-        fetches += 1;
-        return new Response("unexpected rotated fetch", { status: 200 });
-      },
-    };
-    const response = await runWithWebSearch(deps(firstAdapter, {
-      on429: () => rotatedAdapter,
-      validateAdapter: (_parsed, adapter) => {
-        if (adapter === rotatedAdapter) throw new OcxRequestValidationError("provider options route changed");
-      },
-    }));
-    expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({
-      error: { message: "provider options route changed", type: "invalid_request_error", code: "invalid_request_error" },
-    });
-    expect(builds).toBe(1);
-    expect(fetches).toBe(1);
-  });
-
-  test("preserves an upstream HTTP 400 as upstream_error", async () => {
-    const adapter: ProviderAdapter = {
-      name: "upstream-400",
-      buildRequest: () => ({ url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" }),
-      fetchResponse: async () => new Response("provider rejected request", { status: 400 }),
-      async *parseStream() { yield { type: "done" }; },
-      async parseResponse() { return [{ type: "done" }]; },
-    };
-    const response = await runWithWebSearch(deps(adapter, { maxSearches: 0 }));
-    expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({
-      error: {
-        message: "Provider error 400",
-        type: "upstream_error",
-        code: null,
-      },
-    });
-  });
-
-  test("a streamed web-search rotation failure is a typed 400 terminal", async () => {
-    let builds = 0;
-    let rotatedBuilds = 0;
-    let fetches = 0;
-    let parses = 0;
-    const firstAdapter: ProviderAdapter = {
-      name: "first",
-      buildRequest: () => {
-        builds += 1;
-        return { url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" };
-      },
-      fetchResponse: async () => {
-        fetches += 1;
-        return new Response(fetches === 1 ? "ok" : "rate limited", { status: fetches === 1 ? 200 : 429 });
-      },
-      async *parseStream() {
-        parses += 1;
-        const events: AdapterEvent[] = parses === 1
-          ? [
-              { type: "tool_call_start", id: "search_1", name: "web_search" },
-              { type: "tool_call_delta", arguments: JSON.stringify({ query: "docs" }) },
-              { type: "tool_call_end" },
-              { type: "done" },
-            ]
-          : [{ type: "done" }];
-        for (const event of events) yield event;
-      },
-      async parseResponse() { return [{ type: "done" }]; },
-    };
-    const rotatedAdapter: ProviderAdapter = {
-      ...firstAdapter,
-      name: "rotated",
-      buildRequest: () => {
-        rotatedBuilds += 1;
-        return { url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" };
-      },
-      fetchResponse: async () => {
-        fetches += 1;
-        return new Response("unexpected rotated fetch", { status: 200 });
-      },
-    };
-    const response = await runWithWebSearch(deps(firstAdapter, {
-      backend: "xai",
-      on429: () => rotatedAdapter,
-      validateAdapter: (_parsed, adapter) => {
-        if (adapter === rotatedAdapter) throw new OcxRequestValidationError("provider options route changed");
-      },
-    }));
-    const sse = await response.text();
-    expect(response.status).toBe(200);
-    expect(builds).toBe(2);
-    expect(rotatedBuilds).toBe(0);
-    expect(fetches).toBe(2);
-    expect(sse).toContain("event: response.failed");
-    expect(sse).toContain('"type":"invalid_request_error"');
-    expect(sse).not.toContain('"code":"upstream_server_error"');
-    expect(sse).not.toContain("event: response.completed");
-  });
-
-  test("a streamed upstream HTTP 400 remains upstream_error", async () => {
-    let fetches = 0;
-    let parses = 0;
-    const adapter: ProviderAdapter = {
-      name: "upstream-400-stream",
-      buildRequest: () => ({ url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" }),
-      fetchResponse: async () => {
-        fetches += 1;
-        return new Response(fetches === 1 ? "ok" : "provider rejected request", { status: fetches === 1 ? 200 : 400 });
-      },
-      async *parseStream() {
-        parses += 1;
-        if (parses === 1) {
-          yield { type: "tool_call_start", id: "search_1", name: "web_search" };
-          yield { type: "tool_call_delta", arguments: JSON.stringify({ query: "docs" }) };
-          yield { type: "tool_call_end" };
-        }
-        yield { type: "done" };
-      },
-      async parseResponse() { return [{ type: "done" }]; },
-    };
-    const response = await runWithWebSearch(deps(adapter, { backend: "xai" }));
-    const sse = await response.text();
-    expect(response.status).toBe(200);
-    expect(sse).toContain("event: response.failed");
-    expect(sse).toContain('"type":"upstream_error"');
-    expect(sse).not.toContain('"type":"invalid_request_error"');
-  });
 });

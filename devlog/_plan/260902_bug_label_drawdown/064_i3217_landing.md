@@ -7,3 +7,4 @@
 - Audit: reviewer (xai/grok-4.6) pass; residual "no stream:false case" closed in B before C.
 - Checks: focused set 267 pass / 0 fail (receipt), `bun run test:changed` 5794 pass / 0 fail across 301 files, typecheck and privacy:scan clean. Red-without-fix proven for both new tests.
 - Trailing CI on `dev` for `d23eab43a` tracked in `regaudit2`.
+

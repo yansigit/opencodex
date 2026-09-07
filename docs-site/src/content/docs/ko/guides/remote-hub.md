@@ -95,7 +95,7 @@ opencodex는 공식 컨테이너 이미지를 배포하지 않지만, 저장소 
 빌드는 오래된 매니페스트를 거부하며 모든 SHA-256을 컨텍스트와 복사된 파일에 각각 대조합니다. 매니페스트는 `Dockerfile`, `compose.yaml`, `.dockerignore`, Git이 추적하는 모든 Docker authority 파일, `src/`, `package.json`, `bun.lock`, `scripts/model-metadata.source.json`을 인증합니다. 누락되거나 일치하지 않는 파일, 매니페스트에 없는 추가 소스 또는 Docker authority 파일, 심볼릭 링크는 거부됩니다.
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun scripts/generate-compatibility-version.ts
 docker compose build

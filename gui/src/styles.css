@@ -271,11 +271,15 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
    stays visible in BOTH light and dark (a plain <img> was invisible white-on-white in light). */
 .brand-logo { width: 26px; height: 26px; flex-shrink: 0; background: var(--text);
   -webkit-mask: url(/logo.png) center / contain no-repeat; mask: url(/logo.png) center / contain no-repeat; }
-.brand .name { font-weight: var(--weight-semibold); font-size: var(--text-subtitle); letter-spacing: 0; line-height: 26px; }
+.brand .name { flex-shrink: 0; font-weight: var(--weight-semibold); font-size: var(--text-subtitle); letter-spacing: 0; line-height: 26px; }
 .brand .ver {
   font-family: var(--font-code); font-size: var(--text-micro); color: var(--muted); line-height: var(--leading-tight);
   background: var(--raised); border: 1px solid var(--border); padding: 2px 6px; border-radius: var(--radius-pill);
   align-self: center;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* [Decision Log]
@@ -1124,7 +1128,7 @@ a.btn, a.btn:hover { text-decoration: none; }
   font: inherit; font-size: var(--text-control); line-height: var(--leading-ui); transition: border-color var(--motion-fast);
 }
 .input::placeholder { color: var(--faint); }
-.input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
+.input:focus { border-color: var(--faint); outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
 textarea.input { resize: vertical; font-family: var(--font-code); line-height: var(--leading-relaxed); }
 .field-label { font-size: var(--text-label); color: var(--muted); font-weight: var(--weight-medium); margin-bottom: 5px; display: block; }
 select.input { appearance: none; }
@@ -1368,7 +1372,6 @@ select.input { appearance: none; }
   border: 1px solid color-mix(in srgb, var(--red) 32%, transparent);
 }
 .notice-err svg { color: var(--red); }
-.notice-err[hidden] { display: none !important; }
 
 .h-section { font-size: var(--text-control); font-weight: var(--weight-semibold); line-height: var(--leading-ui); color: var(--text); margin: 30px 0 12px; display: flex; align-items: center; gap: 8px; }
 .h-section .count { color: var(--muted); font-weight: var(--weight-medium); font-family: var(--font-code); font-size: var(--text-label); }
@@ -1427,7 +1430,7 @@ select.input { appearance: none; }
 
 /* ---- modal ---- */
 /* Liquid-glass modal: heavy tint + blur so background content is unreadable */
-.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(8px) saturate(1.1); -webkit-backdrop-filter: blur(8px) saturate(1.1); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: var(--z-modal); }
+.modal-overlay { position: fixed; inset: 0; background: light-dark(rgba(17, 19, 28, 0.78), rgba(0, 0, 0, 0.82)); backdrop-filter: blur(40px) saturate(1.2); -webkit-backdrop-filter: blur(40px) saturate(1.2); display: flex; align-items: flex-start; justify-content: center; padding: 8vh 16px; z-index: var(--z-modal); }
 /* Native <dialog>.showModal() UA styles (solid border + ::backdrop) stack on top of
    .modal-overlay and produce a white frame + double dim. Reset when the dialog IS the overlay. */
 dialog.modal-overlay {
@@ -1445,13 +1448,16 @@ dialog.modal-overlay::backdrop {
 .modal-card {
   position: relative;
   z-index: 1;
-  background: var(--bg);
+  background: color-mix(in oklab, canvas 92%, transparent);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
   border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 24px;
-  width: 90vw;
-  max-width: 480px;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  width: 100%;
+  max-width: 520px;
+  /* Tight elevation with border — avoid hairline + wide soft blur (AI tell). */
+  box-shadow: var(--shadow-sm);
   max-height: 84vh;
   overflow-y: auto;
 }
@@ -2147,6 +2153,13 @@ table.logs-table {
   gap: var(--space-2);
   margin-bottom: var(--space-3);
 }
+.logs-filter-status { display: inline-flex; align-items: center; gap: var(--space-2); margin-left: auto; }
+.logs-toolbar-secondary { margin-top: calc(var(--space-1) * -1); }
+.logs-filter-container { min-width: 0; }
+.logs-filter-container .logs-filter-field { min-width: 0; max-width: 100%; flex-wrap: wrap; }
+.logs-filter-container .logs-filter-field .input { min-width: 0; max-width: 100%; }
+.logs-filter-container .logs-filter-status { flex-wrap: wrap; max-width: 100%; }
+.logs-filter-container .logs-segmented { max-width: 100%; flex-wrap: wrap; }
 
 .logs-segmented {
   display: inline-flex;
@@ -2412,7 +2425,7 @@ button.prov-account-row.active { cursor: default; }
   .mobile-topbar .brand .name {
     min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .mobile-topbar .brand .ver { flex-shrink: 0; }
+  .mobile-topbar .brand .ver { flex-shrink: 1; }
   .mobile-topbar .stop-toggle { width: auto; min-width: 44px; min-height: 44px; justify-content: center; padding: 8px; }
   /* Both orbs keep the 44x44 touch target the single stop button had; a bare 28px
      .sidebar-orb would be a regression on the surface where it matters most. */
@@ -2735,9 +2748,6 @@ button.prov-account-row.active { cursor: default; }
 }
 .claude-dirty { color: var(--muted); font-size: 12.5px; font-weight: 550; }
 .claude-dirty.active { color: var(--amber); }
-.claude-defaults { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
-.claude-default-select { display: grid; gap: 5px; color: var(--muted); font-size: 11.5px; font-weight: 550; }
-.claude-mapping-details > summary { margin-bottom: 10px; color: var(--muted); cursor: pointer; font-size: 12.5px; font-weight: 550; }
 /* Shared collapsible-group chrome, used by the Claude Desktop family stack and (from
    the Grok work-phase) the Grok page's native/routed groups, so the two dense surfaces
    cannot drift apart. This replaced a 4-column kanban: with a real catalog three lanes
@@ -2847,7 +2857,6 @@ button.prov-account-row.active { cursor: default; }
   .claude-profile-tools .btn { flex: 1; min-height: 44px; }
   .claude-profile-bar { top: 8px; align-items: stretch; flex-direction: column; }
   .claude-save-actions .btn { flex: 1; min-height: 44px; }
-  .claude-defaults { grid-template-columns: 1fr; }
   .ocx-group-head { align-items: flex-start; }
   .claude-move-row .input, .claude-move-row .btn { min-height: 44px; }
 }

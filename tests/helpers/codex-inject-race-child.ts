@@ -33,9 +33,6 @@ try {
     lockTimeoutMs: payload.lockTimeoutMs ?? 0,
   });
 
-  // Own every optional hardening flight before publishing the result. A live
-  // icacls process can otherwise keep this helper alive until the parent's
-  // spawn deadline even though the lock assertion already completed.
   await flushConfigDirHardeningForTests();
   console.log(JSON.stringify({
     success: result.success,

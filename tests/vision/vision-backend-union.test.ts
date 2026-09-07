@@ -1,8 +1,30 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
+import * as storeModule from "../../src/oauth/store";
+import * as usabilityModule from "../../src/codex/account-usability";
+import * as modelRowsModule from "../../src/server/management/model-rows";
+
+let accountSets: Record<string, { accounts: Array<{ id: string; needsReauth?: boolean; credential?: { projectId?: string } }>; activeAccountId?: string }> = {};
+let usableCodexAccounts: Set<string> = new Set();
+let managementRows: Array<Record<string, unknown>> = [];
+
+mock.module("../../src/oauth/store", () => ({
+  ...storeModule,
+  getAccountSet: (provider: string) => accountSets[provider] ?? null,
+}));
+mock.module("../../src/codex/account-usability", () => ({
+  ...usabilityModule,
+  isCodexAccountUsable: (_config: unknown, accountId: string) => usableCodexAccounts.has(accountId),
+}));
+mock.module("../../src/server/management/model-rows", () => ({
+  ...modelRowsModule,
+  listManagementModelRows: async () => managementRows,
+}));
+
 import { handleManagementAPI } from "../../src/server/management-api";
 import { ManagementRequest as Request, inMemoryManagementPersistence } from "../helpers/management-auth";
 import {
   enabledVisionBackends,
+  visionCandidateRows,
   visionDescriberIsProvablyBlind,
   visionModelOptionsFrom,
 } from "../../src/server/management/vision-sidecar-options";
@@ -25,6 +47,12 @@ function config(overrides: Partial<OcxConfig> = {}): OcxConfig {
   };
 }
 
+afterEach(() => {
+  accountSets = {};
+  usableCodexAccounts = new Set();
+  managementRows = [];
+});
+
 describe("routed vision backend (#2188 roadmap 170 revised)", () => {
   test("any non-forward, non-OAuth-anthropic picker row maps to routed", () => {
     const cfg = config();
@@ -45,13 +73,14 @@ describe("routed vision backend (#2188 roadmap 170 revised)", () => {
 
   test("options: routed rows are NAMESPACED and image-filtered (rule 2)", async () => {
     const cfg = config();
-    const candidates = [
+    managementRows = [
       { provider: "xai", id: "grok-4.3" },
       { provider: "xai", id: "grok-4" },
       { provider: "google-antigravity", id: "gemini-3.7-flash" },
       { provider: "volcengine", id: "doubao-1.8-vision", inputModalities: ["text", "image"] },
       { provider: "volcengine", id: "doubao-text-only", inputModalities: ["text"] },
     ];
+    const candidates = await visionCandidateRows(cfg);
     const options = visionModelOptionsFrom(cfg, candidates, undefined);
     const values = options.map(option => option.value);
     expect(values).toContain("xai/grok-4.3");

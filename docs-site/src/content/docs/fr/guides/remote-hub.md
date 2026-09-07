@@ -69,7 +69,7 @@ Installez Git et Bun sur l’hôte. Avant chaque construction, générez le mani
 La construction authentifie par manifeste `Dockerfile`, `compose.yaml`, `.dockerignore`, chaque fichier suivi faisant autorité sous `docker/`, les sources sous `src/` et les fichiers de paquet obligatoires, dont `package.json`, `bun.lock` et `scripts/model-metadata.source.json`. Elle compare chaque SHA-256 au contexte puis à l’image ; les fichiers manquants ou divergents, tout fichier source ou fichier Docker faisant autorité supplémentaire et les liens symboliques sont refusés.
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun scripts/generate-compatibility-version.ts
 docker compose build

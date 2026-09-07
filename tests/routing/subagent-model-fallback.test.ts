@@ -22,7 +22,6 @@ import {
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { NATIVE_MAIN_DRAIN_SENTINEL_MODELS } from "../../src/codex/catalog/native-models";
 import { MAIN_CODEX_ACCOUNT_ID } from "../../src/codex/main-account";
-import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import { clearAccountNeedsReauth, markAccountNeedsReauth } from "../../src/codex/account-runtime-state";
 import { clearAccountQuota, setAccountQuotaFromParsed, updateAccountQuota } from "../../src/codex/quota";
 import {
@@ -33,11 +32,13 @@ import {
   recordCodexUpstreamOutcome,
 } from "../../src/codex/routing";
 import type { OcxConfig } from "../../src/types";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-// Keep assertion headroom for the large suite under full-shard isolate load.
-// Windows ACL process isolation is handled explicitly in the fixture hooks below.
+// beforeEach writes three Codex credentials (NTFS ACL harden on Windows). Under
+// `bun test --isolate` on a loaded windows-latest runner that can exceed the
+// default 5s hook budget (seen as beforeEach/afterEach timeout at ~7.6s).
 setDefaultTimeout(30_000);
 
 const savedCodexHome = process.env.CODEX_HOME;
@@ -95,9 +96,6 @@ function codexHomeFixture(): string {
 // Credential writes can hit Windows ACL harden stalls under full-suite isolate
 // load (GHA windows-latest: beforeEach/afterEach hook timed out ~7.6s).
 beforeEach(() => {
-  // This suite exercises fallback selection, not Windows ACL behavior. Stub both
-  // hardening lanes so each credential fixture cannot leave a real icacls child
-  // competing with unrelated subprocess tests on a loaded Windows shard.
   setIcaclsRunnerForTests(() => ICACLS_OK);
   setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   testDir = mkdtempSync(join(tmpdir(), "ocx-subagent-fb-"));
@@ -113,6 +111,13 @@ beforeEach(() => {
 }, { timeout: 30_000 });
 
 afterEach(async () => {
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+  if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = savedCodexHome;
+  if (savedOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = savedOpencodexHome;
   clearAccountQuota();
   resetSubagentModelFallbackStateForTests();
   clearAccountNeedsReauth("pool-a");
@@ -122,14 +127,7 @@ afterEach(async () => {
   clearCodexUpstreamHealthForAccount("pool-a");
   clearCodexUpstreamHealthForAccount("account-a");
   clearCodexUpstreamHealthForAccount("account-b");
-  await flushConfigDirHardeningForTests();
-  setIcaclsRunnerForTests(null);
-  setAsyncIcaclsRunnerForTests(null);
   removeTreeWithRetry(testDir);
-  if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
-  else process.env.CODEX_HOME = savedCodexHome;
-  if (savedOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
-  else process.env.OPENCODEX_HOME = savedOpencodexHome;
 }, { timeout: 30_000 });
 
 describe("subagent model fallback chain", () => {
@@ -799,12 +797,12 @@ test("the native-main drain sentinel covers the flagships without widening to gp
 
     resetSubagentModelFallbackStateForTests();
     clearAccountQuota("pool-a");
-    setAccountQuotaFromParsed("pool-a", { weeklyPercent: 20, shortPercent: 100, shortResetAt: now + 60_000 });
+    setAccountQuotaFromParsed("pool-a", { shortPercent: 100, shortResetAt: now + 60_000 });
     expect(isNativeModelQuotaExhausted("gpt-5.6-sol", config, "pool-a", now)).toBe(true);
 
     resetSubagentModelFallbackStateForTests();
     clearAccountQuota("pool-a");
-    setAccountQuotaFromParsed("pool-a", { weeklyPercent: 20, shortPercent: 100, shortResetAt: now - 60_000 });
+    setAccountQuotaFromParsed("pool-a", { shortPercent: 100, shortResetAt: now - 60_000 });
     expect(isNativeModelQuotaExhausted("gpt-5.6-sol", config, "pool-a", now)).toBe(false);
   });
 

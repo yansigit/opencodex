@@ -8,7 +8,7 @@ import { isGpt56NativeSlug } from "../../src/codex/catalog/effort";
 import { nativeOpenAiContextTier, nativeOpenAiMaxInputTokens } from "../../src/codex/catalog";
 import { shouldUpgradeToUpstreamEntry } from "../../src/codex/catalog/metadata";
 import { applyNativeVisibility, augmentRoutedModelsWithMetadata, augmentRoutedModelsWithRegistryOpenAiApiRows, buildCatalogEntries, buildComboCatalogOmission, catalogModelSlug, clampCatalogModelsToCodexSupport, clampEntryToCodexSupportedEfforts, clampedDefaultEffort, CODEX_ACCOUNT_BOUND_CATALOG_KIND, CODEX_NATIVE_ALIAS_CATALOG_KIND, comboCatalogOmissionReason, deriveComboCatalogModel, exactComboCatalogSlugs, filterCatalogVisibleModels, filterSupportedNativeSlugs, gatherRoutedModels as gatherRoutedModelsDirect, isDatedVariantId, isMediaGenerationModelId, loadBundledCodexCatalog, materializeBundledCodexCatalog, mergeCatalogEntriesForSync, NATIVE_DAYBREAK_BLUE_MODEL, NATIVE_GPT6_ASTRA_MODEL, NATIVE_OPENAI_MODELS, nativeDefaultReasoningEffort, nativeInputModalities, nativeOpenAiCapabilitySourceSlug, nativeOpenAiContextWindow, nativeReasoningEfforts, normalizeRoutedCatalogEntry, resetCatalogRuntimeStateForTests, resetOpenAiApiCatalogWarningStateForTests, resolveComboCatalogMember, shouldExposeRoutedModel, upstreamNativeEntry } from "../../src/codex/catalog";
-import { applyProviderConfigHints, mergeConfiguredModelsIntoLiveCatalog } from "../../src/codex/catalog/provider-fetch";
+import { applyProviderConfigHints, catalogHintsFromModelsApiItem, fetchProviderModels, mergeConfiguredModelsIntoLiveCatalog } from "../../src/codex/catalog/provider-fetch";
 import {
   CODEX_CUSTOM_MODEL_CATALOG_KIND,
   CODEX_PROVIDER_MODEL_CATALOG_KIND,
@@ -36,11 +36,12 @@ import {
   setCached,
   type ProviderModelDiscoveryStatus,
 } from "../../src/codex/model-cache";
-import type { OcxConfig } from "../../src/types";
+import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 import { COMBO_NAMESPACE } from "../../src/combos";
 import type { NormalizedComboConfig } from "../../src/combos/types";
 import { enrichProviderFromRegistry, providerConfigSeed } from "../../src/providers/derive";
 import { PROVIDER_REGISTRY } from "../../src/providers/registry";
+import { providerMatchesRegistryTransportWithStaticGuards } from "../../src/providers/static-model-discovery";
 import { enrichProviderFromCatalog } from "../../src/oauth/key-providers";
 import { handleManagementAPI } from "../../src/server/management-api";
 import { OAUTH_PROVIDERS } from "../../src/oauth";
@@ -664,6 +665,18 @@ describe("combo catalog capability intersection", () => {
       .toEqual([provider]);
     expect(filterCatalogVisibleModels([provider], config(["vendor/deepseek-v4-flash"])))
       .toEqual([]);
+  });
+
+  test("filters dashboard-hidden provider models before catalog sync", () => {
+    const models = [
+      { provider: "vendor", id: "visible-model" },
+      { provider: "vendor", id: "hidden-model" },
+    ];
+
+    expect(filterCatalogVisibleModels(models, {
+      disabledModels: ["vendor/hidden-model"],
+      providers: { vendor: {} },
+    })).toEqual([{ provider: "vendor", id: "visible-model" }]);
   });
 
   test("repairs a provider row after its shadowing combo alias is disabled", () => {
@@ -4096,7 +4109,7 @@ describe("Codex catalog routed normalization", () => {
     expect(routed?.supports_search_tool).toBe(true);
   });
 
-  test("liveModels false uses configured provider models without fetching", async () => {
+  test("liveModels false uses the explicit and retained union instead of another default without fetching", async () => {
     clearModelCache("static-provider");
     const originalFetch = globalThis.fetch;
     let fetchCalls = 0;
@@ -4113,6 +4126,8 @@ describe("Codex catalog routed normalization", () => {
             authMode: "key",
             liveModels: false,
             models: ["alpha", "beta"],
+            defaultModel: "unlisted-default",
+            retainModels: ["beta", "retained", "retained"],
           },
         },
       });
@@ -4121,11 +4136,148 @@ describe("Codex catalog routed normalization", () => {
       expect(models.map(m => `${m.provider}/${m.id}`)).toEqual([
         "static-provider/alpha",
         "static-provider/beta",
+        "static-provider/retained",
       ]);
     } finally {
       globalThis.fetch = originalFetch;
       clearModelCache("static-provider");
     }
+  });
+
+  test("liveModels false uses the default model when no static list is configured", async () => {
+    const originalFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (() => {
+      fetchCalls += 1;
+      throw new Error("fetch should not be called");
+    }) as typeof fetch;
+    try {
+      const models = await gatherRoutedModels({
+        providers: {
+          "static-default": {
+            baseUrl: "https://example.invalid/v1",
+            adapter: "openai-chat",
+            authMode: "key",
+            liveModels: false,
+            defaultModel: "only-model",
+          },
+        },
+      });
+
+      expect(fetchCalls).toBe(0);
+      expect(models.map(m => `${m.provider}/${m.id}`)).toEqual([
+        "static-default/only-model",
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      clearModelCache("static-default");
+    }
+  });
+
+  test.each([
+    { label: "omitted", models: undefined },
+    { label: "empty", models: [] as string[] },
+  ])("static $label models deduplicate default and retain ids before either OAuth resolver", async ({ models: configuredModels }) => {
+    const oauth = await import("../../src/oauth");
+    const resolveToken = spyOn(oauth, "resolveModelsAuthToken")
+      .mockRejectedValue(new Error("static catalogs must not resolve or refresh OAuth"));
+    const resolveSnapshot = spyOn(oauth, "getValidAccessTokenSnapshot")
+      .mockRejectedValue(new Error("static catalogs must not refresh Cloud Code Assist OAuth"));
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      throw new Error("static catalogs must not make a network request");
+    }) as typeof fetch;
+    try {
+      for (const adapter of ["openai-chat", "google"] as const) {
+        const provider = `static-oauth-${adapter}`;
+        const outcomes: Array<{ provider: string; state: "authoritative" | "degraded" }> = [];
+        const models = await gatherRoutedModels({
+          providers: {
+            [provider]: {
+              adapter, baseUrl: "https://static-oauth.example.test/v1", authMode: "oauth",
+              ...(adapter === "google" ? { googleMode: "cloud-code-assist" as const } : {}),
+              liveModels: false,
+              ...(configuredModels === undefined ? {} : { models: configuredModels }),
+              defaultModel: "default-only",
+              retainModels: ["retained", "default-only", "retained"],
+            },
+          },
+        }, { providerModelOutcomes: outcomes });
+        expect(models.map(model => `${model.provider}/${model.id}`))
+          .toEqual([`${provider}/default-only`, `${provider}/retained`]);
+        expect(outcomes).toEqual([{ provider, state: "authoritative" }]);
+      }
+      expect(resolveToken).not.toHaveBeenCalled();
+      expect(resolveSnapshot).not.toHaveBeenCalled();
+      expect(fetchCalls).toBe(0);
+    } finally {
+      resolveToken.mockRestore();
+      resolveSnapshot.mockRestore();
+    }
+  });
+
+  test("static empty models without a default or retained ids remain authoritatively empty", async () => {
+    const provider = "static-empty-unregistered";
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      throw new Error("empty static catalogs must not make a network request");
+    }) as typeof fetch;
+    const outcomes: Array<{ provider: string; state: "authoritative" | "degraded" }> = [];
+    const models = await gatherRoutedModels({
+      providers: {
+        [provider]: {
+          adapter: "openai-chat", baseUrl: "https://static-empty.example.test/v1",
+          authMode: "key", liveModels: false,
+          models: [],
+        },
+      },
+    }, { providerModelOutcomes: outcomes });
+    expect(models).toEqual([]);
+    expect(outcomes).toEqual([{ provider, state: "authoritative" }]);
+    expect(fetchCalls).toBe(0);
+  });
+
+  test.each([false, true])("forward auth bypasses default/static seeds with liveModels=%s", async liveModels => {
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      throw new Error("forward model discovery must not request an upstream catalog");
+    }) as typeof fetch;
+    const config = withStubbedProviderFetch({ providers: {
+      "forward-static-fixture": {
+        adapter: "openai-responses", authMode: "forward" as const,
+        baseUrl: "https://forward-static.example.test/v1", liveModels,
+        models: [], defaultModel: "forward-default", retainModels: ["forward-retained"],
+      },
+    } });
+    expect(await fetchProviderModels("forward-static-fixture", config.providers["forward-static-fixture"], 0)).toEqual([]);
+    expect(fetchCalls).toBe(0);
+  });
+
+  test("successful empty live discovery never activates the default-only failure fallback", async () => {
+    const provider = "live-empty-default";
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      return Response.json({ data: [] });
+    }) as typeof fetch;
+    const config = { providers: {
+      [provider]: {
+        adapter: "anthropic", baseUrl: "https://live-empty.example.test/v1",
+        authMode: "key" as const, apiKey: "fixture-key", liveModels: true,
+        defaultModel: "failure-fallback-only",
+      },
+    } };
+    for (let read = 0; read < 2; read += 1) {
+      const outcomes: Array<{ provider: string; state: "authoritative" | "degraded" }> = [];
+      expect(await gatherRoutedModels(config, { providerModelOutcomes: outcomes })).toEqual([]);
+      expect(outcomes).toEqual([{ provider, state: "authoritative" }]);
+    }
+    expect(fetchCalls).toBe(1);
+    expect(getStaleCached(provider)).toEqual([]);
+    expect(getProviderDiscoveryStatus(provider)).toEqual({ status: "ok" });
   });
 
   test("Google Antigravity honors an explicit static catalog and suppresses stale discovery", async () => {
@@ -4652,7 +4804,7 @@ describe("Codex catalog routed normalization", () => {
         providers: {
           [provider]: {
             adapter: "openai-chat",
-            baseUrl: "http://198.18.0.1/v1",
+            baseUrl: "https://198.18.0.1/v1",
             apiKey: "sk-test",
             models: ["static-fallback"],
             fetch: globalThis.fetch,
@@ -4670,7 +4822,7 @@ describe("Codex catalog routed normalization", () => {
       });
       const warningText = warning.mock.calls.flat().join(" ");
       expect(warningText).toContain("blocked by destination policy");
-      expect(warningText).toContain("credential-bearing provider GET URL must use HTTPS");
+      expect(warningText).toContain("benchmark address");
       expect(warningText).toContain("fallback=configured");
     } finally {
       warning.mockRestore();
@@ -4694,14 +4846,15 @@ describe("Codex catalog routed normalization", () => {
         providers: {
           [provider]: {
             adapter: "openai-chat",
-            baseUrl: "http://198.18.0.1/v1",
+            baseUrl: "https://10.0.0.1/v1",
             allowPrivateNetwork: true,
+            apiKey: "sk-test",
             fetch: globalThis.fetch,
           },
         },
       });
 
-      expect(requestedUrl).toBe("http://198.18.0.1/v1/models");
+      expect(requestedUrl).toBe("https://10.0.0.1/v1/models");
       expect(models.map(model => `${model.provider}/${model.id}`)).toEqual([
         `${provider}/live-private-model`,
       ]);
@@ -5241,21 +5394,56 @@ describe("Codex catalog routed normalization", () => {
     expect(slugs).toEqual(["opencode-go/glm-5.2"]);
   });
 
-  test("liveModels false with no models exposes no augmented provider rows", async () => {
+  test.each([
+    { label: "omitted", models: undefined },
+    { label: "empty", models: [] as string[] },
+  ])("static Go $label models expose only the inherited default, not the metadata roster", async ({ models: configuredModels }) => {
+    const provider: OcxProviderConfig = {
+      adapter: "openai-chat", baseUrl: "https://opencode-go.test/v1", apiKey: "sk-test",
+      liveModels: false,
+      ...(configuredModels === undefined ? {} : { models: configuredModels }),
+    };
+    // Go keeps the registry's historical name-based ownership even with this fixture URL.
+    // This was never a genuinely default-less provider after capture-time enrichment.
+    expect(providerMatchesRegistryTransportWithStaticGuards("opencode-go", provider)).toBe(true);
+    const enriched = structuredClone(provider);
+    enrichProviderFromRegistry("opencode-go", enriched);
+    expect(enriched.defaultModel).toBe("kimi-k2.7-code");
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      throw new Error("static inherited defaults must not request upstream models");
+    }) as typeof fetch;
     const outcomes: Array<{ provider: string; state: "authoritative" | "degraded" }> = [];
-    const models = await gatherRoutedModels({
-      providers: {
-        "opencode-go": {
-          adapter: "openai-chat",
-          baseUrl: "https://opencode-go.test/v1",
-          apiKey: "sk-test",
-          liveModels: false,
-        },
-      },
-    }, { providerModelOutcomes: outcomes });
-
-    expect(models).toEqual([]);
+    const models = await gatherRoutedModels({ providers: { "opencode-go": provider } }, { providerModelOutcomes: outcomes });
+    expect(models.map(model => `${model.provider}/${model.id}`)).toEqual(["opencode-go/kimi-k2.7-code"]);
     expect(outcomes).toEqual([{ provider: "opencode-go", state: "authoritative" }]);
+    expect(fetchCalls).toBe(0);
+  });
+
+  test.each([
+    { label: "omitted", models: undefined },
+    { label: "empty", models: [] as string[] },
+  ])("custom MiMo $label models remain empty without an effective default", async ({ models: configuredModels }) => {
+    const provider: OcxProviderConfig = {
+      adapter: "mimo-free", baseUrl: "https://mimo-custom.example.test/v1", authMode: "key",
+      liveModels: false,
+      ...(configuredModels === undefined ? {} : { models: configuredModels }),
+    };
+    expect(providerMatchesRegistryTransportWithStaticGuards("mimo-free", provider)).toBe(false);
+    const enriched = structuredClone(provider);
+    enrichProviderFromRegistry("mimo-free", enriched);
+    expect(enriched.defaultModel).toBeUndefined();
+    expect(enriched.models).toEqual(configuredModels);
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      throw new Error("empty custom static providers must not request upstream models");
+    }) as typeof fetch;
+    const outcomes: Array<{ provider: string; state: "authoritative" | "degraded" }> = [];
+    expect(await gatherRoutedModels({ providers: { "mimo-free": provider } }, { providerModelOutcomes: outcomes })).toEqual([]);
+    expect(outcomes).toEqual([{ provider: "mimo-free", state: "authoritative" }]);
+    expect(fetchCalls).toBe(0);
   });
 
   test("anthropic sonnet 4.6 keeps the upstream 1M context window", () => {
@@ -5511,11 +5699,11 @@ describe("Codex catalog routed normalization", () => {
     const expected = [
       { slug: "deepseek/deepseek-v4-flash", efforts: ["low", "high", "max", "ultra"] },
       { slug: "deepseek/deepseek-v4-pro", efforts: ["low", "high", "max", "ultra"] },
-      { slug: "opencode-go/deepseek-v4-flash", efforts: ["low", "high", "max", "ultra"] },
-      { slug: "opencode-go/deepseek-v4-pro", efforts: ["low", "high", "max", "ultra"] },
-      { slug: "opencode-go/glm-5.2", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] },
-      { slug: "opencode-go/glm-5.1", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] },
-      { slug: "opencode-go/glm-5", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] },
+      { slug: "opencode-go/deepseek-v4-flash", efforts: ["low", "high", "max"] },
+      { slug: "opencode-go/deepseek-v4-pro", efforts: ["low", "high", "max"] },
+      { slug: "opencode-go/glm-5.2", efforts: ["low", "medium", "high", "xhigh", "max"] },
+      { slug: "opencode-go/glm-5.1", efforts: ["low", "medium", "high", "xhigh", "max"] },
+      { slug: "opencode-go/glm-5", efforts: ["low", "medium", "high", "xhigh", "max"] },
       { slug: "zai/glm-5.2", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] },
       { slug: "zai/glm-5.2[1m]", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] },
       { slug: "zhipu-bigmodel/glm-4.6", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] },
@@ -5998,6 +6186,19 @@ describe("Codex catalog routed normalization", () => {
     expect(routed?.auto_compact_token_limit).toBe(900_000);
     expect(models.find(model => model.id === "copilot-existing-metadata")?.contextWindow).toBe(256_000);
     expect(models.find(model => model.id === "copilot-invalid-window")?.contextWindow).toBeUndefined();
+  });
+
+  test.each([
+    ["context_window", { context_window: 310_001 }, 310_001],
+    ["max_context_window", { max_context_window: 310_002 }, 310_002],
+    ["max_context_size", { max_context_size: 310_003 }, 310_003],
+    ["n_ctx", { n_ctx: 310_004 }, 310_004],
+    ["top_provider.max_context_length", { top_provider: { max_context_length: 310_005 } }, 310_005],
+    ["metadata.top_provider.max_context_length", { metadata: { top_provider: { max_context_length: 310_006 } } }, 310_006],
+    ["default_context_size", { default_context_size: 310_007 }, 310_007],
+  ] as const)("preserves the %s live context-window alias", (_label, fields, expected) => {
+    const hints = catalogHintsFromModelsApiItem("compatible", { id: "model", ...fields });
+    expect(hints.contextWindow).toBe(expected);
   });
 
   test("liveModels false preserves configured catalog metadata without live fetch", async () => {

@@ -6,7 +6,6 @@ import type { ProviderAdapter, IncomingMeta } from "../../src/adapters/base";
 import type { AdapterEvent, OcxParsedRequest } from "../../src/types";
 import type { ImageBridgePlan, ImageCallResult } from "../../src/images/types";
 import type { ImageBridgeDeps } from "../../src/images/loop";
-import { OcxRequestValidationError } from "../../src/lib/errors";
 import { createTestTranslatorBudget } from "../helpers/translator-budget";
 import { getDebugLogEntries, resetDebugLogBufferForTests } from "../../src/lib/debug-log-buffer";
 import { resetDebugSettingsForTests } from "../../src/lib/debug-settings";
@@ -129,6 +128,7 @@ describe("runWithImageBridge", () => {
       const lines = getDebugLogEntries().map(entry => entry.line);
       expect(lines.some(line => line.includes('"stage":"adapter"') && line.includes('"eventType":"text_delta"'))).toBe(true);
       expect(lines.some(line => line.includes('"stage":"bridge"') && line.includes('"eventType":"text_delta"'))).toBe(true);
+      expect(lines.every(line => !line.includes("image diagnostic secret"))).toBe(true);
     } finally {
       error.mockRestore();
     }
@@ -659,133 +659,6 @@ describe("runWithImageBridge", () => {
     expect(seen).toEqual({ inputTokens: 1, outputTokens: 2 });
   });
 
-  test("preserves an upstream HTTP 400 as upstream_error", async () => {
-    const response = await runWithImageBridge({
-      parsed: makeParsed(),
-      adapter: {
-        ...mockAdapter,
-        fetchResponse: async () => new Response("provider rejected request", { status: 400 }),
-      },
-      plan,
-      maxRounds: 0,
-    });
-    expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({
-      error: {
-        message: "Provider error 400",
-        type: "upstream_error",
-        code: null,
-      },
-    });
-  });
-
-  test("validates a rotated adapter before the second image-bridge build", async () => {
-    let builds = 0;
-    let fetches = 0;
-    const firstAdapter: ProviderAdapter = {
-      ...mockAdapter,
-      buildRequest: async () => {
-        builds += 1;
-        return { url: "https://test/v1/chat", method: "POST", headers: {}, body: "{}" };
-      },
-      fetchResponse: async () => {
-        fetches += 1;
-        return new Response("rate limited", { status: 429 });
-      },
-    };
-    const rotatedAdapter: ProviderAdapter = {
-      ...mockAdapter,
-      buildRequest: async () => {
-        builds += 1;
-        return { url: "https://test/v1/chat", method: "POST", headers: {}, body: "{}" };
-      },
-      fetchResponse: async () => {
-        fetches += 1;
-        return new Response("unexpected rotated fetch", { status: 200 });
-      },
-    };
-    streamQueue = [[{ type: "done" }]];
-    const response = await runWithImageBridge({
-      parsed: makeParsed(), adapter: firstAdapter, plan, maxRounds: 0,
-      on429: () => rotatedAdapter,
-      validateAdapter: (_parsed, adapter) => {
-        if (adapter === rotatedAdapter) throw new OcxRequestValidationError("provider options route changed");
-      },
-    });
-    expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({
-      error: { message: "provider options route changed", type: "invalid_request_error", code: "invalid_request_error" },
-    });
-    expect(builds).toBe(1);
-    expect(fetches).toBe(1);
-  });
-
-  test("a streamed image rotation failure is a typed 400 terminal", async () => {
-    let firstBuilds = 0;
-    let rotatedBuilds = 0;
-    let fetches = 0;
-    const firstAdapter: ProviderAdapter = {
-      ...mockAdapter,
-      buildRequest: async () => {
-        firstBuilds += 1;
-        return { url: "https://test/v1/chat", method: "POST", headers: {}, body: "{}" };
-      },
-      fetchResponse: async () => {
-        fetches += 1;
-        return new Response(fetches === 1 ? "ok" : "rate limited", { status: fetches === 1 ? 200 : 429 });
-      },
-    };
-    const rotatedAdapter: ProviderAdapter = {
-      ...mockAdapter,
-      buildRequest: async () => {
-        rotatedBuilds += 1;
-        return { url: "https://test/v1/chat", method: "POST", headers: {}, body: "{}" };
-      },
-      fetchResponse: async () => {
-        fetches += 1;
-        return new Response("unexpected rotated fetch", { status: 200 });
-      },
-    };
-    streamQueue = [[...imageCallEvents]];
-    const response = await runWithImageBridge({
-      parsed: makeParsed(),
-      adapter: firstAdapter,
-      plan,
-      maxRounds: 1,
-      on429: () => rotatedAdapter,
-      validateAdapter: (_parsed, adapter) => {
-        if (adapter === rotatedAdapter) throw new OcxRequestValidationError("provider options route changed");
-      },
-    });
-    const sse = await response.text();
-    expect(response.status).toBe(200);
-    expect(firstBuilds).toBe(2);
-    expect(rotatedBuilds).toBe(0);
-    expect(fetches).toBe(2);
-    expect(sse).toContain("event: response.failed");
-    expect(sse).toContain('"type":"invalid_request_error"');
-    expect(sse).not.toContain('"code":"upstream_server_error"');
-    expect(sse).not.toContain("event: response.completed");
-  });
-
-  test("a streamed upstream HTTP 400 remains upstream_error", async () => {
-    let fetches = 0;
-    const adapter: ProviderAdapter = {
-      ...mockAdapter,
-      fetchResponse: async () => {
-        fetches += 1;
-        return new Response(fetches === 1 ? "ok" : "provider rejected request", { status: fetches === 1 ? 200 : 400 });
-      },
-    };
-    streamQueue = [[...imageCallEvents]];
-    const response = await runWithImageBridge({ parsed: makeParsed(), adapter, plan, maxRounds: 1 });
-    const sse = await response.text();
-    expect(response.status).toBe(200);
-    expect(sse).toContain("event: response.failed");
-    expect(sse).toContain('"type":"upstream_error"');
-    expect(sse).not.toContain('"type":"invalid_request_error"');
-  });
-
   test("onUsage does not double-count hiddenUsage across image iterations", async () => {
     let seen: unknown = "unset";
     streamQueue = [
@@ -1033,48 +906,5 @@ describe("runWithImageBridge — runTurn adapter", () => {
     expect(seenIds[0]).toBeUndefined();
     expect(seenIds[1]).toBe("conv-from-first-turn");
     expect(parsed._cursorConversationId).toBe("conv-from-first-turn");
-  });
-
-  test("forwards AdapterFetchContext.accountId to fetchResponse", async () => {
-    let received: string | undefined;
-    streamQueue = [[{ type: "text_delta", text: "ok" }, { type: "done" }]];
-    const response = await runWithImageBridge({
-      parsed: makeParsed(),
-      accountId: "antigravity-account-a",
-      adapter: {
-        ...mockAdapter,
-        fetchResponse: async (_request, ctx) => {
-          received = ctx?.accountId;
-          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
-        },
-      },
-      plan,
-    });
-    await response.text();
-    expect(received).toBe("antigravity-account-a");
-  });
-
-  test("runTurn adapter streams emit adapter diagnostics exactly once per event", async () => {
-    process.env.OCX_DEBUG = "1";
-    const error = spyOn(console, "error").mockImplementation(() => {});
-    try {
-      runTurnEventQueue = [
-        [{ type: "text_delta", text: "hello runTurn diagnostic" }, { type: "done" }],
-      ];
-      const response = await runWithImageBridge({
-        parsed: makeParsed(),
-        adapter: runTurnAdapter,
-        plan,
-        diagnostic: { requestId: "runturn-diag", adapterName: "test" },
-      });
-      await response.text();
-      const lines = getDebugLogEntries().map(entry => entry.line);
-      const adapterLines = lines.filter(line => line.includes('"stage":"adapter"') && line.includes('"eventType":"text_delta"'));
-      const bridgeLines = lines.filter(line => line.includes('"stage":"bridge"') && line.includes('"eventType":"text_delta"'));
-      expect(adapterLines).toHaveLength(1);
-      expect(bridgeLines).toHaveLength(1);
-    } finally {
-      error.mockRestore();
-    }
   });
 });

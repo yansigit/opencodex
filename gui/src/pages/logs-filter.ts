@@ -2,39 +2,40 @@ import { matchesLogConversationId } from "../log-conversation-id";
 import type { LogSurface, LogSurfaceFilter } from "./logs-surface-filter";
 import { logMatchesSurface } from "./logs-surface-filter";
 
-export type { LogSurface, LogSurfaceFilter };
 export type LogTimeWindow = "all" | "15m" | "1h" | "24h";
 export type LogStatusFilter = "all" | "success" | "errors";
 export type LogAgentKind = "all" | "main" | "subagent" | "internal" | "unknown";
 export type PersistedAgentKind = Exclude<LogAgentKind, "all" | "unknown">;
 
-export function normalizedAgentKind(value: unknown): Exclude<LogAgentKind, "all"> {
-  return value === "main" || value === "subagent" || value === "internal" ? value : "unknown";
-}
-
 export interface LogFilterState {
   surface: LogSurfaceFilter;
   model: string;
   provider: string;
-  agentKind: LogAgentKind;
-  statusFilter: LogStatusFilter;
+  status: LogStatusFilter;
+  /** Legacy persisted name retained across the v2.44 dashboard refresh. */
+  statusFilter?: LogStatusFilter;
   timeWindow: LogTimeWindow;
   minTokPerSec?: number;
   maxTokPerSec?: number;
-  interceptedHelpersOnly: boolean;
+  interceptedOnly: boolean;
+  /** Legacy persisted name retained across the v2.44 dashboard refresh. */
+  interceptedHelpersOnly?: boolean;
   conversationId: string;
   conversationQueryHash?: string;
+  agentKind: LogAgentKind;
 }
 
 export const DEFAULT_LOG_FILTER_STATE: LogFilterState = {
   surface: "all",
   model: "",
   provider: "",
-  agentKind: "all",
+  status: "all",
   statusFilter: "all",
   timeWindow: "all",
+  interceptedOnly: false,
   interceptedHelpersOnly: false,
   conversationId: "",
+  agentKind: "all",
 };
 
 export interface FilterableLogAttempt {
@@ -47,36 +48,36 @@ export interface FilterableLogEntry {
   model?: unknown;
   resolvedModel?: unknown;
   provider?: unknown;
-  agentKind?: unknown;
   surface?: LogSurface;
   status?: unknown;
   conversationId?: string;
   shadowCallRewrittenFrom?: unknown;
   attempts?: unknown;
+  agentKind?: unknown;
   displayMetrics?: {
     tokPerSecond?: { kind: "value"; value: number } | { kind: "unavailable" };
   };
 }
 
-export type MinimalLogAttempt = FilterableLogAttempt;
-export type MinimalLogEntry = FilterableLogEntry;
-
 /** Return whether any filter differs from the inert default state. */
-export function hasActiveFilters(filters: LogFilterState): boolean {
+export function hasActiveLogFilters(filters: LogFilterState): boolean {
   return filters.surface !== "all"
     || filters.model.trim() !== ""
     || filters.provider.trim() !== ""
-    || filters.agentKind !== "all"
-    || filters.statusFilter !== "all"
+    || filters.status !== "all"
+    || (filters.statusFilter !== undefined && filters.statusFilter !== "all")
     || filters.timeWindow !== "all"
     || filters.minTokPerSec !== undefined
     || filters.maxTokPerSec !== undefined
-    || filters.interceptedHelpersOnly
-    || filters.conversationId.trim() !== "";
+    || filters.interceptedOnly
+    || filters.interceptedHelpersOnly === true
+    || filters.conversationId.trim() !== ""
+    || filters.agentKind !== "all";
 }
 
-// Keep the upstream helper name available while the wired fork UI uses its existing name.
-export const hasActiveLogFilters = hasActiveFilters;
+export function normalizedAgentKind(value: unknown): Exclude<LogAgentKind, "all"> {
+  return value === "main" || value === "subagent" || value === "internal" ? value : "unknown";
+}
 
 /** Safely retain only object-shaped failover attempts from untrusted log data. */
 function attempts(log: FilterableLogEntry): FilterableLogAttempt[] {
@@ -110,35 +111,45 @@ export function filterLogs<T extends FilterableLogEntry>(
   const modelQuery = filters.model.trim().toLowerCase();
   const providerQuery = filters.provider.trim().toLowerCase();
   const conversationQuery = filters.conversationId.trim();
+  const statusFilter = filters.statusFilter && filters.statusFilter !== "all"
+    ? filters.statusFilter
+    : filters.status;
+  const interceptedOnly = filters.interceptedOnly || filters.interceptedHelpersOnly === true;
   const since = timeThreshold(filters.timeWindow, now);
 
   return logs.filter(log => {
     if (!logMatchesSurface(log, filters.surface)) return false;
     if (filters.agentKind !== "all" && normalizedAgentKind(log.agentKind) !== filters.agentKind) return false;
-    if (filters.interceptedHelpersOnly && typeof log.shadowCallRewrittenFrom !== "string") return false;
+    if (interceptedOnly && typeof log.shadowCallRewrittenFrom !== "string") return false;
     if (conversationQuery && !matchesLogConversationId(
       log.conversationId,
       conversationQuery,
       filters.conversationQueryHash,
     )) return false;
 
-    if (filters.statusFilter === "success"
+    if (statusFilter === "success"
       && (typeof log.status !== "number"
         || !Number.isInteger(log.status)
         || log.status < 200
         || log.status >= 300)) return false;
-    if (filters.statusFilter === "errors"
+    if (statusFilter === "errors"
       && (typeof log.status !== "number"
         || !Number.isInteger(log.status)
         || log.status < 400
         || log.status > 599)) return false;
 
     const logAttempts = attempts(log);
-    if (modelQuery && ![
-      normalized(log.model),
-      normalized(log.resolvedModel),
-      ...logAttempts.map(attempt => normalized(attempt.model)),
-    ].some(value => value?.includes(modelQuery))) return false;
+    // The model control is a free-text search with datalist suggestions. Match requested,
+    // resolved, and attempted model ids by substring so operators can search by family or
+    // suffix without knowing the complete provider-specific identity.
+    if (modelQuery) {
+      const primaryMatches = [normalized(log.model), normalized(log.resolvedModel)]
+        .some(value => value?.includes(modelQuery));
+      const attemptMatches = logAttempts
+        .map(attempt => normalized(attempt.model))
+        .some(value => value?.includes(modelQuery));
+      if (!primaryMatches && !attemptMatches) return false;
+    }
 
     if (providerQuery && ![
       normalized(log.provider),

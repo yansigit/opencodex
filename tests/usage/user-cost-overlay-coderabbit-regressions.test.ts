@@ -49,13 +49,13 @@ function readDiskConfig(): OcxConfig {
 }
 
 function seedOverlay(): OcxConfig {
-  const config = loadConfig();
-  expect(mutatePersistedConfig(persisted => {
-    persisted.providers.acme!.modelCosts = { "model-x": OVERLAY };
+  const outcome = mutatePersistedConfig(config => {
+    config.providers.acme!.modelCosts = { "model-x": OVERLAY };
     return { changed: true, value: undefined };
-  }).status).toBe("committed");
+  });
+  expect(outcome.status).toBe("committed");
   expect(resolveMatchedPrice("acme", "model-x")?.source).toBe("user");
-  return config;
+  return loadConfig();
 }
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {

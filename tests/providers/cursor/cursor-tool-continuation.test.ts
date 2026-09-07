@@ -1,10 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { create, fromBinary } from "@bufbuild/protobuf";
 import { handleCursorNativeKv } from "../../../src/adapters/cursor/native-exec";
-import {
-  CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT,
-  encodeCursorRunRequest,
-} from "../../../src/adapters/cursor/protobuf-request";
+import { encodeCursorRunRequest } from "../../../src/adapters/cursor/protobuf-request";
 import {
   AgentClientMessageSchema,
   GetBlobArgsSchema,
@@ -56,11 +53,6 @@ describe("363-B: tool result reaches the model via rootPromptMessagesJson", () =
     // tool result. Reference: danger-pi buildRootPromptMessagesJson.
     expect(serialized).toContain("FILE CONTENTS HERE");
     expect(serialized).toContain("call_1");
-    // The result envelope may carry its marker; the paired invocation must stay inside that
-    // envelope so no standalone [Tool Call] template is available for model mimicry.
-    expect(serialized).toContain("[Tool Result]");
-    expect(serialized).not.toContain("[Tool Call]");
-    expect(serialized).toContain("[tool_result]");
     // The prior user turn must also be replayed (not system-only).
     expect(serialized).toContain("read a file");
   });
@@ -292,12 +284,5 @@ describe("363-A: turn-1 termination for Responses client tool via exec mcpArgs",
     );
     expect(planB.finalizeWhenDrained).toBe(true);
     expect(finalizeAfterDrain(state).map(e => e.type)).toEqual(["done"]);
-  });
-
-  test("external tool continuation prompt instructs model to proceed without chatter", () => {
-    expect(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT).toContain("without repeating status summaries, greetings");
-    expect(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT).toContain("a tool invocation that already completed successfully");
-    expect(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT).toContain("active system and developer instructions exactly");
-    expect(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT).toContain("Answer the user request or proceed with the next step directly");
   });
 });

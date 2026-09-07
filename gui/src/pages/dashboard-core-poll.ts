@@ -247,39 +247,36 @@ export async function fetchDashboardMaMode(
   }
 }
 
+async function fetchDashboardHealth(primaryUrl: string, apiBase: string, signal: AbortSignal): Promise<HealthData> {
+  try {
+    const primary = await fetch(primaryUrl, { signal });
+    if (primary.ok) {
+      const data = (await primary.json()) as HealthData;
+      if (
+        data
+        && typeof (data as { status?: unknown }).status === "string"
+        && typeof (data as { version?: unknown }).version === "string"
+        && typeof (data as { uptime?: unknown }).uptime === "number"
+      ) return data;
+    }
+  } catch (error) {
+    if (isAbortError(error, signal)) throw error;
+  }
+  const fallback = await fetch(`${apiBase}/healthz`, { signal });
+  return requireJson<HealthData>(fallback);
+}
+
 export async function fetchDashboardOverview(
   apiBase: string,
   signal: AbortSignal,
 ): Promise<DashboardOverviewPoll> {
   try {
-    // Primary health is the authenticated management route introduced with Remote Hub.
-    // Fall back to the unauthenticated liveness route so older servers and the
-    // fork's resilience suite (which mocks only /healthz) remain compatible.
-    const healthDataPromise = (async (): Promise<HealthData> => {
-      try {
-        const primary = await fetch(`${apiBase}/api/system/health`, { signal });
-        if (primary.ok) {
-          const data = (await primary.json()) as HealthData;
-          if (
-            data
-            && typeof (data as { status?: unknown }).status === "string"
-            && typeof (data as { version?: unknown }).version === "string"
-            && typeof (data as { uptime?: unknown }).uptime === "number"
-          ) {
-            return data as HealthData;
-          }
-        }
-      } catch (err) {
-        if (isAbortError(err, signal)) throw err;
-      }
-      const fallback = await fetch(`${apiBase}/healthz`, { signal });
-      return requireJson<HealthData>(fallback);
-    })();
+    // Remote Hub serves authenticated health here; the helper retains the legacy fallback.
+    const healthDataPromise = fetchDashboardHealth(`${apiBase}/api/system/health`, apiBase, signal);
 
-    const providersPromise = fetch(`${apiBase}/api/providers`, { signal }).then((r) =>
-      requireJson<ProviderInfo[]>(r),
+    const providersPromise = fetch(`${apiBase}/api/providers`, { signal }).then((response) =>
+      requireJson<ProviderInfo[]>(response),
     );
-
     const [health, providers] = await Promise.all([healthDataPromise, providersPromise]);
     if (!Array.isArray(providers)) throw new Error("empty overview response");
     return { health, providers };

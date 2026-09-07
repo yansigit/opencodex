@@ -136,11 +136,7 @@ function chartTipPosition(rect: DOMRect): CSSProperties {
         const top = Math.max(gutter, Math.min(viewportHeight - gutter, rect.bottom + gutter));
         return { top, maxHeight: Math.max(0, viewportHeight - top - gutter) };
       })();
-  return {
-    left,
-    maxWidth,
-    ...vertical,
-  };
+  return { left, maxWidth, ...vertical };
 }
 
 function UsageChartOverlay({

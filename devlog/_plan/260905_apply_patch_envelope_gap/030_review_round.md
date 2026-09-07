@@ -128,3 +128,4 @@ Both reviewers noted the native path had no test able to go red. After adding on
 gate was mutated to return `undefined` unconditionally: `holds envelope deltas and
 compiles a raw exec patch body on the native stream` failed, and passed again on restore.
 The test fails for the right reason.
+

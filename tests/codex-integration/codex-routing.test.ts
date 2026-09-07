@@ -655,11 +655,14 @@ describe("codex routing", () => {
     expect(resolveCodexAccountForThread("next", config)).toBe("a");
   });
 
-  test("a stale writer cannot recreate health for an account absent from the reconciled live set", () => {
-    // Removed-account fencing deliberately drops a terminal outcome captured before the
-    // latest reconciliation. Production populates the live set before listening, so a stale
-    // generation for an account that remains configured is accepted; this fixture exercises
-    // only the removed-account side of that boundary.
+  test("a stale writer generation drops the failure entirely, so the streak never trips (#3425)", () => {
+    // #3425: 118 consecutive 502s to one account with sendCount 1 and no recoveryKinds, and
+    // rotation only after a MANUAL pause. The quota selector is not the cause -- a known 100%
+    // account already switches (see the exhaustion tests above). This is the path that can
+    // swallow the evidence instead: recordCodexUpstreamOutcome returns before any health write
+    // when the writer's captured generation predates the last reconcile and the account is not
+    // in the live set. consecutiveFailures never increments, so upstreamFailoverThreshold is
+    // unreachable no matter how many failures arrive.
     const config = makeConfig();
     updateAccountQuota("a", 10);
     updateAccountQuota("b", 20);
@@ -670,7 +673,8 @@ describe("codex routing", () => {
       recordCodexUpstreamOutcome(config, "a", 502, { writerGeneration: -1 });
     }
 
-    // Nothing is recreated for the removed identity.
+    // Characterization, not an endorsement: nothing was recorded, so the account keeps
+    // serving. A fix for #3425 should turn these two assertions around.
     expect(getCodexUpstreamHealth("a")).toBeNull();
     expect(resolveCodexAccountForThread("stale-writer-next", config)).toBe("a");
 
@@ -1377,6 +1381,90 @@ describe("codex routing", () => {
     expect(getCodexUpstreamHealth("a")).toBeNull();
   });
 
+  test("flat bare error at inspection EOF records failed 502 without clearing avoidance", async () => {
+    const config = makeConfig();
+    updateAccountQuota("a", 10);
+    updateAccountQuota("b", 10);
+    const now = 1_800_000_000_000;
+    recordCodexUpstreamOutcome(config, "a", 503, { now });
+    recordCodexUpstreamOutcome(config, "a", 503, { now: now + 1 });
+    recordCodexUpstreamOutcome(config, "a", 503, { now: now + 2 });
+    expect(isCodexAccountSoftAvoided("a", now + 2)).toBe(true);
+    expect(getCodexUpstreamHealth("a")?.consecutiveFailures).toBe(3);
+    const terminals: Array<[string, number | undefined]> = [];
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode("data: " + JSON.stringify({
+          type: "error",
+          message: "provider reset",
+        }) + "\n\n"));
+        controller.close();
+      },
+    });
+
+    await new Promise<void>(resolve => {
+      consumeForInspection(stream, (status, override) => {
+        terminals.push([status, override]);
+        recordCodexUpstreamOutcome(
+          config,
+          "a",
+          status === "failed" ? (override ?? 502) : 200,
+          { now: now + 3, threadId: "bare-error-flat" },
+        );
+      }, undefined, resolve);
+    });
+
+    expect(terminals).toEqual([["failed", 502]]);
+    expect(isCodexAccountSoftAvoided("a", now + 3)).toBe(true);
+    expect(getCodexUpstreamHealth("a")).toMatchObject({
+      consecutiveFailures: 4,
+      lastFailureStatus: 502,
+    });
+  });
+
+  test("nested bare error at inspection EOF records failed 502 without clearing avoidance", async () => {
+    const config = makeConfig();
+    updateAccountQuota("a", 10);
+    updateAccountQuota("b", 10);
+    const now = 1_800_000_000_000;
+    recordCodexUpstreamOutcome(config, "a", 503, { now });
+    recordCodexUpstreamOutcome(config, "a", 503, { now: now + 1 });
+    recordCodexUpstreamOutcome(config, "a", 503, { now: now + 2 });
+    expect(isCodexAccountSoftAvoided("a", now + 2)).toBe(true);
+    expect(getCodexUpstreamHealth("a")?.consecutiveFailures).toBe(3);
+    const terminals: Array<[string, number | undefined]> = [];
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode("data: " + JSON.stringify({
+          type: "error",
+          error: { message: "nested provider reset" },
+        }) + "\n\n"));
+        controller.close();
+      },
+    });
+
+    await new Promise<void>(resolve => {
+      consumeForInspection(stream, (status, override) => {
+        terminals.push([status, override]);
+        recordCodexUpstreamOutcome(
+          config,
+          "a",
+          status === "failed" ? (override ?? 502) : 200,
+          { now: now + 3, threadId: "bare-error-nested" },
+        );
+      }, undefined, resolve);
+    });
+
+    expect(terminals).toEqual([["failed", 502]]);
+    expect(isCodexAccountSoftAvoided("a", now + 3)).toBe(true);
+    expect(getCodexUpstreamHealth("a")).toMatchObject({
+      consecutiveFailures: 4,
+      lastFailureStatus: 502,
+    });
+  });
+
   test("transient cooldown escalates to 2m, 10m, then the 30m cap", () => {
     const config = makeConfig();
     const now = 1_800_000_000_000;
@@ -1655,11 +1743,11 @@ describe("codex routing", () => {
         },
       }],
     })).toEqual({
-      fiveHourPercent: 11,
-      fiveHourResetAt: 1,
       shortPercent: 11,
       shortResetAt: 1,
       shortWindowSeconds: 5 * 60 * 60,
+      fiveHourPercent: 11,
+      fiveHourResetAt: 1,
       weeklyPercent: 22,
       weeklyResetAt: 2,
       customWindows: [{ label: "GPT-5.3-Codex-Spark Weekly", percent: 33, resetAt: 3 }],

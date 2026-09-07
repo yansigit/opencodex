@@ -108,6 +108,14 @@ export default function AddProviderModal({
   } = state;
 
   useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !oauthTosPending) onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [oauthTosPending, onClose]);
+
+  useEffect(() => {
     aliveRef.current = true;
     previousFocusRef.current = document.activeElement as HTMLElement | null;
     onOpen?.();

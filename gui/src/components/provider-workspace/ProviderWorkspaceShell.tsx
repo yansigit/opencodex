@@ -24,7 +24,7 @@ import {
 import { providerKind } from "../../provider-workspace/kind";
 import { readJsonIfOk, readJsonOrThrow } from "../../fetch-json";
 import { readSessionListCache, writeSessionListCache } from "../../session-list-cache";
-import { buildProviderModelUsage, buildProviderUsageTotals, countAvailableModels, parseAvailableModels, parseLiveModelCounts, parseSelectedModels, type ProviderAvailableModels, type ProviderLiveModelCounts, type ProviderModelCounts, type ProviderSelectedModels } from "../../provider-workspace/usage";
+import { buildProviderModelUsage, buildProviderUsageTotals } from "../../provider-workspace/usage";
 import {
   freshQuotaReportRecord,
   freshQuotaReportsFromResponse,
@@ -36,18 +36,23 @@ import type { PricingFilter, ProviderModelUsageRow, ProviderUsageTotals, StatusF
 import ProviderOverviewDashboard from "./ProviderOverviewDashboard";
 import ProviderJsonEditor, { type JsonEditorState } from "./ProviderJsonEditor";
 
+import type { ModelRow } from "../../pages/models-shared";
+import { parseModelInventory, countModelInventory, parseModelSelection } from "../../provider-workspace/model-inventory";
+
 export type AddProviderIntent = { tier?: "accounts" | "free" | "paid"; custom?: boolean };
 
 /** Detail-slot data plumbed per selected provider (props-down; no shared hook). */
 export interface DetailSlotData {
   usageTotals?: import("./types").ProviderUsageTotals;
   modelUsage?: ProviderModelUsageRow[];
-  accountUsage?: import("./types").ProviderAccountUsageRow[];
   quotaReport?: ProviderQuotaReportView;
   availableModels: string[];
   /** Did the last successful discovery return rows? Server-reported, never inferred. */
   hasLiveModels: boolean;
   selectedModels: string[];
+  modelRows: ModelRow[] | null;
+  modelRevision: string;
+  modelRowsReady: boolean;
   modelsLoading: boolean;
   modelsLoadFailed: boolean;
   onRetryModels?: () => void;
@@ -138,10 +143,9 @@ export default function ProviderWorkspaceShell({
   const [sortMode, setSortMode] = useState<ProviderSortMode>("az");
   const [filterOpen, setFilterOpen] = useState(false);
   const [railFocusName, setRailFocusName] = useState<string | null>(null);
-  const [modelCounts, setModelCounts] = useState<ProviderModelCounts>({});
-  const [availableModels, setAvailableModels] = useState<ProviderAvailableModels>({});
-  const [liveModelCounts, setLiveModelCounts] = useState<ProviderLiveModelCounts>({});
-  const [selectedModels, setSelectedModels] = useState<ProviderSelectedModels>({});
+  const [modelSnapshot, setModelSnapshot] = useState<{
+    revision: string; rows: ModelRow[]; selection: ReturnType<typeof parseModelSelection>;
+  } | null>(null);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsLoadFailed, setModelsLoadFailed] = useState(false);
   const quotasCacheKey = `ocx.providers.quotas.v1:${apiBase}`;
@@ -152,9 +156,6 @@ export default function ProviderWorkspaceShell({
   const [usageModels, setUsageModels] = useState<Record<string, ProviderModelUsageRow[]>>(() => (
     readSessionListCache<{ models: Record<string, ProviderModelUsageRow[]> }>(usageCacheKey)?.models ?? {}
   ));
-  const [usageAccounts, setUsageAccounts] = useState<Record<string, import("./types").ProviderAccountUsageRow[]>>(() => (
-    readSessionListCache<{ accounts: Record<string, import("./types").ProviderAccountUsageRow[]> }>(usageCacheKey)?.accounts ?? {}
-  ));
   const [quotaReports, setQuotaReports] = useState<Record<string, ProviderQuotaReportView>>(() => (
     readFreshQuotaReportCache(quotasCacheKey) ?? {}
   ));
@@ -164,6 +165,11 @@ export default function ProviderWorkspaceShell({
     return !cached || Object.keys(cached).length === 0;
   });
   const [modelsLoadEpoch, setModelsLoadEpoch] = useState(0);
+  const modelRevision = JSON.stringify([apiBase, modelsRefreshToken, modelsLoadEpoch]);
+  const modelRowsReady = modelSnapshot?.revision === modelRevision && !modelsLoading && !modelsLoadFailed;
+  const modelCounts = useMemo(() => countModelInventory(modelSnapshot?.rows ?? []), [modelSnapshot]);
+  const modelsSettled = useRef(onModelsSettled);
+  useEffect(() => { modelsSettled.current = onModelsSettled; }, [onModelsSettled]);
   const filterWrapRef = useRef<HTMLDivElement>(null);
   // Shared usage-summary key: all four subscribers raise the deadline together (30d usage is ~5s cold).
   const usageResource = useKeyedClientResource(usageSummary30dResourceKey(apiBase), [apiBase], async (signal) => { const res = await fetch(apiBase + "/api/usage?range=30d", { signal }); if (!res.ok) throw new Error(String(res.status)); return await res.json(); }, { deadlineMs: 60_000 });
@@ -174,45 +180,52 @@ export default function ProviderWorkspaceShell({
   }, [providers, activeAccountNeedsReauth]);
 
   const retryModels = useCallback(() => {
+    setModelsLoading(true);
+    setModelsLoadFailed(false);
     setModelsLoadEpoch(epoch => epoch + 1);
   }, []);
 
   useEffect(() => {
-    // Deferred load (matches Models/Usage/ClaudeCode): avoids synchronous setState
-    // inside the effect, per the react-hooks/set-state-in-effect lint gate.
     let cancelled = false;
+    const bounded = createBoundedFetch(60_000);
     const timeout = window.setTimeout(() => {
       setModelsLoading(true);
       void (async () => {
         let succeeded = false;
         try {
-          const res = await fetch(`${apiBase}/api/selected-models`);
-          const data = await readJsonOrThrow(res);
+          // Adopt this pair together. The server does not promise a transaction across reads.
+          const [selection, rows] = await Promise.all([
+            fetch(`${apiBase}/api/selected-models`, { signal: bounded.signal })
+              .then(readJsonOrThrow).then(parseModelSelection),
+            fetch(`${apiBase}/api/models`, { signal: bounded.signal })
+              .then(readJsonOrThrow).then(parseModelInventory),
+          ]);
           if (cancelled) return;
-          setModelCounts(countAvailableModels(data));
-          setAvailableModels(parseAvailableModels(data));
-          setLiveModelCounts(parseLiveModelCounts(data));
-          setSelectedModels(parseSelectedModels(data));
+          setModelSnapshot({ revision: modelRevision, selection, rows });
           setModelsLoadFailed(false);
           succeeded = true;
         } catch {
           if (cancelled) return;
           setModelsLoadFailed(true);
         } finally {
-          if (!cancelled) { setModelsLoading(false); onModelsSettled?.(succeeded); }
+          bounded.controller.abort();
+          bounded.clear();
+          if (!cancelled) { setModelsLoading(false); modelsSettled.current?.(succeeded); }
         }
       })();
     }, 0);
     return () => {
       cancelled = true;
       window.clearTimeout(timeout);
+      bounded.controller.abort();
+      bounded.clear();
     };
-  }, [apiBase, modelsRefreshToken, modelsLoadEpoch, onModelsSettled]);
+  }, [apiBase, modelRevision]);
 
   useEffect(() => {
     let cancelled = false;
     const timeout = window.setTimeout(() => {
-      const data = usageResource.data as { providers?: Array<{ provider: string; requests: number; totalTokens?: number }>; models?: Array<ProviderModelUsageRow & { provider: string }>; accounts?: Array<{ accountLogLabel: string; provider?: string; requests: number; totalTokens: number; estimatedCostUsd?: number }> } | undefined;
+      const data = usageResource.data as { providers?: Array<{ provider: string; requests: number; totalTokens?: number }>; models?: Array<ProviderModelUsageRow & { provider: string }> } | undefined;
       if (cancelled) return;
       if (!data) {
         if (usageResource.loading) setUsageLoading(!readSessionListCache(usageCacheKey));
@@ -222,20 +235,7 @@ export default function ProviderWorkspaceShell({
       setUsageTotals(byProvider);
       const byProviderModels = buildProviderModelUsage(data.models ?? [], byProvider);
       setUsageModels(byProviderModels);
-      const byProviderAccounts: Record<string, import("./types").ProviderAccountUsageRow[]> = {};
-      for (const a of data.accounts ?? []) {
-        const key = a.provider ?? "openai";
-        if (!byProviderAccounts[key]) byProviderAccounts[key] = [];
-        byProviderAccounts[key].push({
-          accountLogLabel: a.accountLogLabel,
-          provider: a.provider,
-          requests: a.requests,
-          totalTokens: a.totalTokens,
-          ...(a.estimatedCostUsd !== undefined ? { estimatedCostUsd: a.estimatedCostUsd } : {}),
-        });
-      }
-      setUsageAccounts(byProviderAccounts);
-      writeSessionListCache(usageCacheKey, { totals: byProvider, models: byProviderModels, accounts: byProviderAccounts });
+      writeSessionListCache(usageCacheKey, { totals: byProvider, models: byProviderModels });
       setUsageLoading(false);
     }, 0);
     return () => { cancelled = true; window.clearTimeout(timeout); };
@@ -526,7 +526,7 @@ export default function ProviderWorkspaceShell({
                       item={item}
                       selected={selectedName === item.name}
                       tabbable={railTabbableName === item.name}
-                      modelCount={modelCounts[item.name]}
+                      modelCount={modelSnapshot ? (Object.hasOwn(modelCounts, item.name) ? modelCounts[item.name] : 0) : undefined}
                       isDefault={defaultProvider === item.name}
                       showConfigId={duplicateDisplayNames.has(formatProviderDisplayName(item.name, t))}
                       onClick={() => onSelect(item.name)}
@@ -560,7 +560,7 @@ export default function ProviderWorkspaceShell({
           })}
         </div>
         </aside>
-        <section className="pws-main" aria-label={t("pws.workspaceMainAria")}>
+        <main className="pws-main" aria-label={t("pws.workspaceMainAria")}>
         {jsonEditor?.open ? (
           <ProviderJsonEditor
             editor={jsonEditor}
@@ -572,12 +572,14 @@ export default function ProviderWorkspaceShell({
           detail?.(selectedItem, {
             usageTotals: usageTotals[selectedItem.name],
             modelUsage: usageModels[selectedItem.name],
-            accountUsage: usageAccounts[selectedItem.name],
             quotaReport: quotaReports[selectedItem.name],
-            availableModels: availableModels[selectedItem.name] ?? [],
-            hasLiveModels: (liveModelCounts[selectedItem.name] ?? 0) > 0,
-            selectedModels: selectedModels[selectedItem.name] ?? [],
-            modelsLoading,
+            availableModels: modelSnapshot?.selection.available[selectedItem.name] ?? [],
+            hasLiveModels: (modelSnapshot?.selection.liveModelCounts[selectedItem.name] ?? 0) > 0,
+            selectedModels: modelSnapshot?.selection.selected[selectedItem.name] ?? [],
+            modelRows: modelSnapshot?.rows.filter(row => row.provider === selectedItem.name) ?? null,
+            modelRevision,
+            modelRowsReady,
+            modelsLoading: modelsLoading || (!modelRowsReady && !modelsLoadFailed),
             modelsLoadFailed,
             onRetryModels: retryModels,
           }) ?? (
@@ -601,7 +603,7 @@ export default function ProviderWorkspaceShell({
             {...(onRefreshAllQuotas ? { onRefreshAllQuotas } : {})}
           />
         )}
-        </section>
+        </main>
       </div>
     </div>
   );

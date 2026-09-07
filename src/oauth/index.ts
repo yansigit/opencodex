@@ -7,8 +7,8 @@ import {
   initializePersistedConfigIfMissing,
   loadConfig,
   mutatePersistedConfig,
-  resolveEnvValue,
 } from "../config";
+import { resolveProviderApiKey } from "../providers/key-store";
 import { maskEmail } from "../lib/privacy";
 import { KiroTokenRefreshError, environmentKiroRoutingMetadata, loginKiro, refreshKiroToken, settleKiroLoginTransaction } from "./kiro";
 import {
@@ -282,7 +282,6 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderDef> = {
     refresh: refreshAntigravityToken,
     providerConfig: oauthConfig("google-antigravity"),
     defaultModel: oauthDefaultModel("google-antigravity"),
-    defaultRefreshPolicy: "lazy-only",
   },
   cursor: {
     login: (ctrl, opts) => loginCursor(ctrl, undefined, { forceLogin: opts?.forceLogin }),
@@ -362,6 +361,19 @@ export class OAuthLoginRequiredError extends Error {
   }
 }
 
+/**
+ * A terminal provider refresh rejection that also made the stored account unusable.
+ *
+ * Keep the login-required subtype for internal recovery/account-health semantics, but retain
+ * enough provenance for the public projection boundary to avoid presenting a provider failure
+ * as a locally missing credential. The provider response itself is deliberately not retained.
+ */
+class OAuthRefreshRejectedError extends OAuthLoginRequiredError {
+  constructor(provider: string) {
+    super(provider);
+  }
+}
+
 export class OAuthProviderPublicationError extends Error {
   constructor() {
     super("OAuth credential was saved, but the provider entry was not written. Resolve the account namespace collision, then retry login.");
@@ -392,6 +404,9 @@ class OAuthLoginSupersededError extends Error {
 
 /** Project arbitrary OAuth failures onto the small, stable public error vocabulary. */
 export function publicOAuthAuthenticationErrorMessage(error: unknown): string {
+  if (error instanceof OAuthRefreshRejectedError) {
+    return "OAuth authentication failed. Check the OpenCodex account status and retry.";
+  }
   if (error instanceof OAuthMutationBusyError) {
     return error.message === "OAuth mutation queue wait timed out"
       ? "OAuth mutation queue wait timed out"
@@ -598,14 +613,6 @@ export async function getValidAccessSnapshotForAccount(
   opts: { requireUsableAccount?: boolean } = {},
 ): Promise<OAuthAccessSnapshot> {
   return resolveAccessSnapshotForAccount(provider, accountId, undefined, opts.requireUsableAccount === true);
-}
-
-/** Backward-compatible account snapshot name retained for fork call sites. */
-export async function getValidAccessTokenSnapshotForAccount(
-  provider: string,
-  accountId: string,
-): Promise<OAuthAccessSnapshot> {
-  return getValidAccessSnapshotForAccount(provider, accountId);
 }
 
 /** Terminal refresh failures (revoked/rotated-away grants) — retrying cannot succeed. */
@@ -1054,7 +1061,7 @@ export async function refreshGenericAccountWithLock(
         }
       }
       await markAccountNeedsReauthIfGeneration(provider, accountId, generation, writerGeneration);
-      throw new OAuthLoginRequiredError(provider);
+      throw new OAuthRefreshRejectedError(provider);
     }
   } finally {
     guard.release();
@@ -1089,7 +1096,7 @@ export async function resolveModelsAuthToken(name: string, prov: OcxProviderConf
       return undefined;
     }
   }
-  return resolveEnvValue(prov.apiKey);
+  return resolveProviderApiKey(prov.apiKey);
 }
 
 function modelDiscoveryTransportSeed(providerName: string, prov: OcxProviderConfig): OcxProviderConfig {
@@ -1262,6 +1269,37 @@ function isLegacyAntigravityStaticCatalog(provider: OcxProviderConfig): boolean 
     ]);
 }
 
+/** Refresh registry-owned catalog fields while preserving valid operator selections. */
+function applyOAuthPresetCatalog(
+  provider: OcxProviderConfig,
+  preset: OcxProviderConfig,
+): void {
+  for (const field of OAUTH_RECONCILE_FIELDS) {
+    if (JSON.stringify(provider[field]) === JSON.stringify(preset[field])) continue;
+    if (preset[field] !== undefined) {
+      provider[field] = cloneProviderField(preset[field]) as never;
+    } else {
+      delete provider[field];
+    }
+  }
+  if (provider.liveModels === undefined && preset.liveModels !== undefined) {
+    provider.liveModels = preset.liveModels;
+  }
+  // Heal only a selection that the refreshed static catalog no longer contains. Providers
+  // with live discovery do not expose an enumerable account catalog here, so their saved
+  // default remains operator-owned.
+  if (
+    provider.liveModels !== true &&
+    provider.defaultModel
+    && preset.defaultModel
+    && preset.models
+    && preset.models.length > 0
+    && !(provider.models ?? []).includes(provider.defaultModel)
+  ) {
+    provider.defaultModel = preset.defaultModel;
+  }
+}
+
 /** Promote only the versioned canonical static seed; unmarked `liveModels: false` remains user intent. */
 function migrateLegacyAntigravityStaticCatalog(config: OcxConfig): boolean {
   if (config.googleAntigravityStaticCatalogVersion !== 1) return false;
@@ -1300,24 +1338,7 @@ function projectOAuthProviderReconciliation(config: OcxConfig): OAuthReconcilePr
     }
     if (def && prov.authMode === "oauth") {
       const preset = def.providerConfig;
-      for (const field of OAUTH_RECONCILE_FIELDS) {
-        if (JSON.stringify(prov[field]) === JSON.stringify(preset[field])) continue;
-        if (preset[field] !== undefined) {
-          prov[field] = cloneProviderField(preset[field]) as never;
-        } else {
-          delete prov[field];
-        }
-      }
-      if (prov.liveModels === undefined && preset.liveModels !== undefined) {
-        prov.liveModels = preset.liveModels;
-      }
-      // Heal a defaultModel that no longer exists in the refreshed list (e.g. a deprecated snapshot).
-      // Skip providers without a static preset `models` list: for live-discovery providers
-      // (e.g. command-code OAuth) the account-scoped catalog is not enumerable here, so any
-      // persisted defaultModel is a user selection and must not be overwritten by the seed.
-      if (prov.defaultModel && preset.defaultModel && preset.models && preset.models.length > 0 && !(prov.models ?? []).includes(prov.defaultModel)) {
-        prov.defaultModel = preset.defaultModel;
-      }
+      applyOAuthPresetCatalog(prov, preset);
     }
     if (JSON.stringify(prov) !== beforeProvider) {
       changed = true;
@@ -1438,7 +1459,6 @@ const OAUTH_LOGIN_OWNED_PROVIDER_FIELDS = [
   "headers",
   "apiKeyTransport",
   "responsesPath",
-  "tlsProfile",
   "googleMode",
   "keyOptional",
 ] as const satisfies readonly (keyof OcxProviderConfig)[];
@@ -1452,17 +1472,31 @@ export function upsertOAuthProvider(config: OcxConfig, provider: string): void {
   const namespaceCollision = codexAccountNamespaceProviderCollisionError(config.codexAccountNamespaces, provider);
   if (namespaceCollision) throw new Error(namespaceCollision);
   const existing = config.providers[provider];
+  // Clone operator state, including xAI wire choices and their migration version.
   const next: OcxProviderConfig = structuredClone(existing ?? def.providerConfig);
   for (const field of OAUTH_LOGIN_OWNED_PROVIDER_FIELDS) {
     const value = def.providerConfig[field];
     if (value === undefined) delete next[field];
     else next[field] = structuredClone(value) as never;
   }
+  // A login may activate a different account. CCA dispatch must take that account's
+  // project from its credential snapshot, never retain the previous account's project.
+  if (next.googleMode === "cloud-code-assist") delete next.project;
+  // Login used to rebuild the whole row from the preset, so catalog data refreshed
+  // immediately. Keep that timing without overwriting unrelated operator-owned fields.
+  applyOAuthPresetCatalog(next, def.providerConfig);
+  // The original Command Code seed was an implementation-owned static catalog, not an
+  // operator opt-out. Promote that exact legacy shape when OAuth login refreshes the row.
+  if (provider === "command-code" && existing && isLegacyCommandCodeStaticCatalog(existing)) {
+    next.liveModels = def.providerConfig.liveModels;
+  }
   // OAuth-only providers must never retain credentials for a different auth mechanism.
   delete next.apiKey;
   delete next.apiKeyPool;
-  delete next.azureCredential;
+  delete (next as unknown as Record<string, unknown>).azureCredential;
   if (existing && getProviderRegistryEntry(provider)?.allowKeyAuthOverride === true) {
+    // Retain stored key billing intent without resolving env references in the login process.
+    // An explicit OAuth choice stays OAuth even when usable key material is retained.
     // Shared sanitizeApiKeyValue trim / no-CRLF checks from api-key pool writes.
     let storedApiKey = sanitizeApiKeyValue(existing.apiKey);
     const storedApiKeyPool = preservableApiKeyPool(existing.apiKeyPool);
@@ -1561,18 +1595,15 @@ export async function runLogin(
       const existing = getAccountCredential(provider, opts.reauthAccountId);
       if (!existing) throw new Error(`Unknown account for reauth: ${opts.reauthAccountId}`);
       if (!existing.accountId && !existing.email) {
-        if (provider !== GOOGLE_ANTIGRAVITY_PROVIDER || (!cred.accountId && !cred.email)) {
-          throw new OAuthReauthIdentityUnverifiedError();
-        }
-      } else {
-        const identityMatches = existing.accountId && cred.accountId
-          ? existing.accountId === cred.accountId
-          : existing.email && cred.email
-            ? existing.email.toLowerCase() === cred.email.toLowerCase()
-            : false;
-        if (!identityMatches) {
-          throw new OAuthReauthIdentityMismatchError();
-        }
+        throw new OAuthReauthIdentityUnverifiedError();
+      }
+      const identityMatches = existing.accountId && cred.accountId
+        ? existing.accountId === cred.accountId
+        : existing.email && cred.email
+          ? existing.email.toLowerCase() === cred.email.toLowerCase()
+          : false;
+      if (!identityMatches) {
+        throw new OAuthReauthIdentityMismatchError();
       }
       await (deps.saveAccountCredential ?? saveAccountCredential)(provider, opts.reauthAccountId, cred, {
         assertBeforePersist: deps.assertCurrentOwner,

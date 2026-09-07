@@ -244,6 +244,12 @@ kullanıcı birimi**, Windows **Görev Zamanlayıcı**) olarak çalıştırın. 
 çalıştırmaları `OCX_SERVICE=1` ayarlar, böylece bir yeniden başlatma Codex
 yapılandırmasını dalgalandırmaz.
 
+Windows Görev Zamanlayıcı kurulumları normal işlem önceliğini (`Priority=4`) kullanır. Eski arka plan
+önceliği (`7`; değer belirtilmediğinde de zamanlayıcının varsayılanı `7` olur), CPU çekişmesi sırasında
+sağlık denetimi yanıtlarını geciktirebilir ve işlem çalışırken bile sistem tepsisinde Offline görünmesine neden olabilir.
+Güncellemeden sonra kayıtlı bu önceliği değiştirmek ve servisi yeniden başlatmak için `ocx service repair` komutunu çalıştırın.
+UAC onayı gerekebilir. Zaten normal veya yüksek öncelik ayarlanmışsa yalnızca öncelik nedeniyle yeniden kayıt yapılmaz.
+
 | Alt komut | Eylem |
 | --- | --- |
 | none | Servis yoksa kurup başlatın; varsa yenileyip yeniden başlatın. Sağlıklı bir Windows Task Scheduler tanımı yeniden kullanılır; eski bir tanım yeniden kaydedilebilir ve yükseltme gerektirebilir. |
@@ -444,7 +450,7 @@ ocx update --tag preview
 ```
 
 Yeni sürümler, [Sürüm iş
-akışı](https://github.com/lidge-jun/opencodex/actions/workflows/release.yml)
+akışı](https://github.com/yansigit/opencodex/actions/workflows/release.yml)
 bunları npm'de yayınladığında kullanılabilir hale gelir.
 
 ## Remote Hub istemci yaşam döngüsü

@@ -62,6 +62,11 @@ when a maintainer steps down.
   generic maintainer approval is not a merge prerequisite.
 - The fork owner may merge their own pull requests or push directly. An explicit owner request is
   sufficient authorization; no upstream or second-maintainer approval is required.
+- `scripts/ci/assert-mergeable-review.sh --maintainer-integration` is an optional,
+  fail-closed validation snapshot for that owner-controlled `dev` integration path. It revalidates
+  the trusted `dev` maintainer roster, live maintain/admin permission, PR base, author, head, and
+  outstanding objections. It neither performs nor authorizes a merge, and it does not replace CI
+  or the explicit security review required below.
 - Authentication, credential handling, GitHub Actions, release automation, dependency installation,
   and other security-boundary changes require explicit security review.
 - A new or promoted provider preset is a credential-destination change. Before merge it needs the
@@ -119,6 +124,10 @@ Adding or removing a maintainer requires:
 3. updates to this file and [`.github/CODEOWNERS`](./.github/CODEOWNERS).
 
 ### Change log
+
+- 2026-09-06 — Ported the upstream maintainer-integration validator to the fork's
+  `yansigit/opencodex` authority. Its output is a dev-bound validation snapshot only;
+  merge authorization, exact-head CI, and security review remain separate gates.
 
 - 2026-08-28 — [@yansigit](https://github.com/yansigit) recorded as owner and sole current
   maintainer of this fork. Upstream maintainers remain credited as upstream contacts but are not

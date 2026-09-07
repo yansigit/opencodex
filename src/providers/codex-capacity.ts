@@ -36,9 +36,6 @@ export const CODEX_CAPACITY_MAX_QUOTA_AGE_MS = 30 * 60_000;
 export type CodexCapacityQuota = {
   fiveHourPercent?: number;
   fiveHourResetAt?: number;
-  shortPercent?: number;
-  shortResetAt?: number;
-  shortWindowSeconds?: number;
   weeklyPercent?: number;
   weeklyResetAt?: number;
   monthlyPercent?: number;
@@ -137,7 +134,7 @@ function futureResetMs(value: unknown, now: number): number | undefined {
 
 function hasKnownQuotaWindow(quota: CodexCapacityQuota | null): quota is CodexCapacityQuota {
   if (!quota) return false;
-  return normalizedPercent(quota.fiveHourPercent ?? quota.shortPercent) !== undefined
+  return normalizedPercent(quota.fiveHourPercent) !== undefined
     || normalizedPercent(quota.weeklyPercent) !== undefined
     || normalizedPercent(quota.monthlyPercent) !== undefined
     || !!quota.customWindows?.some(window => normalizedPercent(window.percent) !== undefined);
@@ -230,7 +227,7 @@ export function aggregateCodexPoolCapacity(
       && now - quota.updatedAt <= CODEX_CAPACITY_MAX_QUOTA_AGE_MS;
     if (quota && !quotaFresh) staleQuotaAccounts += 1;
     const standard = quota ? [
-      ["fiveHour", quota.fiveHourPercent ?? quota.shortPercent, quota.fiveHourResetAt ?? quota.shortResetAt],
+      ["fiveHour", quota.fiveHourPercent, quota.fiveHourResetAt],
       ["weekly", quota.weeklyPercent, quota.weeklyResetAt],
       ["monthly", quota.monthlyPercent, quota.monthlyResetAt],
     ] as const : [];

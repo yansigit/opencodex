@@ -9,7 +9,7 @@ Le développement depuis les sources exige la CLI `bun` dans votre `PATH`. Le pa
 runtime Bun aux utilisateurs, mais les scripts de ce dépôt utilisent votre installation locale de Bun.
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy    # proxy API in dev mode
@@ -144,7 +144,7 @@ une contribution normale ; indiquez les commits sources dans la description.
 ## Responsables du projet
 
 Les responsables actuels, leurs attributions et les règles de revue et de fusion sont décrits dans
-[`MAINTAINERS.md`](https://github.com/lidge-jun/opencodex/blob/main/MAINTAINERS.md). La propriété GitHub
+[`MAINTAINERS.md`](https://github.com/yansigit/opencodex/blob/main/MAINTAINERS.md). La propriété GitHub
 du dépôt et des chemins sensibles du point de vue de la sécurité est déclarée dans `.github/CODEOWNERS`.
 
 ## Conventions

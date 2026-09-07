@@ -20,7 +20,7 @@ duyduğunda ChatGPT oturumunuzu da kullanabilir.
 ## Kurulum
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @yansigit/opencodex
 ```
 
 :::note[npm bun postinstall betiğini engelledi mi?]
@@ -31,10 +31,10 @@ vererek yeniden kurun — ve her zaman paket adını ekleyin (npm'nin kısaltıl
 önerisi paket adını atlar ve bu da geçerli dizini yeniden kurmaya çalışır):
 
 ```bash
-npm install -g --allow-scripts=bun @bitkyc08/opencodex
+npm install -g --allow-scripts=bun @yansigit/opencodex
 
 # orijinal kurulum sudo kullandıysa, sudo kullanmaya devam edin:
-sudo npm install -g --allow-scripts=bun @bitkyc08/opencodex
+sudo npm install -g --allow-scripts=bun @yansigit/opencodex
 ```
 :::
 
@@ -54,7 +54,7 @@ erişim sağlamaz. Önizleme kanalını yalnızca yayınlanmamış opencodex
 derlemelerini test etmek için kullanın:
 
 ```bash
-npm install -g @bitkyc08/opencodex@preview
+npm install -g @yansigit/opencodex@preview
 ocx update --tag preview
 ```
 
@@ -63,7 +63,7 @@ ocx update --tag preview
 opencodex'in kendisi üzerinde geliştirmeler yapmak için:
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy   # geliştirme modunda proxy API'sini başlatır (src/cli/index.ts start)
@@ -104,4 +104,3 @@ opencodex'in eklediği satırları kaldırır ve yerel Codex'i geri yükler.
 İlk sağlayıcınızı yapılandırmak için [Hızlı
 Başlangıç](/tr/getting-started/quickstart/) ile devam edin veya mimari için
 [Nasıl Çalışır](/tr/getting-started/how-it-works/) bölümünü okuyun.
-

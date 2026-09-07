@@ -73,24 +73,6 @@ let persistTimer: ReturnType<typeof setTimeout> | null = null;
 let firstDeferredPersistAt: number | null = null;
 let accountSalt: string | null = null;
 
-const EPOCH_SECONDS_UPPER_BOUND = 10_000_000_000;
-
-/**
- * Version-1 Codex baselines were persisted before the observation seam normalized upstream
- * epoch seconds. Normalize them as they enter memory so an upgrade cannot compare a seconds
- * baseline with a millisecond observation and manufacture a scheduled reset.
- */
-function normalizeHydratedObservation(
-  key: string,
-  window: QuotaWindowObservation,
-): QuotaWindowObservation {
-  if (!key.startsWith("codex\u0000")) return window;
-  const resetAt = window?.resetAt;
-  if (typeof resetAt !== "number" || !Number.isFinite(resetAt)
-    || resetAt <= 0 || resetAt >= EPOCH_SECONDS_UPPER_BOUND) return window;
-  return { ...window, resetAt: resetAt * 1000 };
-}
-
 function statePath(): string {
   return join(getConfigDir(), STATE_FILENAME);
 }
@@ -115,9 +97,7 @@ function hydrate(): void {
     if (Array.isArray(parsed.events)) ring = parsed.events.slice(-MAX_RING_EVENTS);
     if (parsed.observed && typeof parsed.observed === "object") {
       for (const [key, windows] of Object.entries(parsed.observed)) {
-        if (Array.isArray(windows)) {
-          observed.set(key, windows.map(window => normalizeHydratedObservation(key, window)));
-        }
+        if (Array.isArray(windows)) observed.set(key, windows);
       }
     }
     if (typeof parsed.accountSalt === "string" && parsed.accountSalt.length >= 16) {

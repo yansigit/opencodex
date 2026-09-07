@@ -105,6 +105,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
     const logs = filterRequestLogs(all, url.searchParams);
     return jsonResponse({
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      generatedAt: Date.now(),
       total,
       logs: logs.map(requestLogDto),
     });

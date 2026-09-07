@@ -46,7 +46,6 @@ import {
   unwrapUpstreamRetryEvidenceError,
   CodexMainProfileDrainingError,
   headersForCodexAuthContext,
-  materializeCodexUpstreamAuth,
   materializeCodexUpstreamAuthAsync,
   isCodexAuthContextUsable,
   resolveCodexAuthContext,
@@ -57,6 +56,10 @@ import {
   type CodexAuthContext,
 } from "../../codex/auth-context";
 import {
+  forceRefreshMainAccountToken,
+  type NativeMainRefreshDependencies,
+} from "../../codex/main-account";
+import {
   formatCodexProviderForLog,
   handOffThreadAffinityGeneration,
   recordCodexUpstreamOutcome,
@@ -65,12 +68,10 @@ import {
 import {
   TokenRefreshError,
   forceRefreshCodexPoolToken,
+  readCodexAccountRecord,
 } from "../../codex/account-store";
 import {
-  forceRefreshMainAccountToken,
-  type NativeMainRefreshDependencies,
-} from "../../codex/main-account";
-import {
+  fetchWithResetRetry,
   fetchWithTransientRetry,
   applyUpstreamRecoveryInit,
   type UpstreamSendRecovery,
@@ -86,7 +87,11 @@ import {
   upstreamHostHealthKey,
   type UpstreamHostAdmissionLease,
 } from "../../codex/upstream-host-health";
-import { ForwardAdmissionCredentialError, hasForwardableCodexBearer, validateForwardAdmissionCredential } from "../auth-cors";
+import {
+  ForwardAdmissionCredentialError,
+  hasForwardableCodexBearer,
+  validateForwardAdmissionCredential,
+} from "../auth-cors";
 import type { DataPlaneAdmission } from "../auth-cors";
 import { listOpenAiForwardSidecarCandidates, resolveFirstUsableOpenAiSidecar, type ResolvedOpenAiForwardSidecar } from "../../providers/openai-sidecar";
 import { CODEX_FORWARD_BASE_URL, isCanonicalOpenAiForwardProvider, supportsNativeResponsesCompactEndpoint } from "../../providers/openai-tiers";
@@ -159,6 +164,11 @@ interface CompactHandoffRoute {
   lastUsedAt: number;
 }
 
+/**
+ * The Codex client does not send its newly selected model on an automatic
+ * previous-model compact request. Keep the last route that demonstrably compacted
+ * this same thread so a quota-blocked previous model has one safe fallback target.
+ */
 const compactHandoffRoutes = new Map<string, CompactHandoffRoute>();
 
 export function clearCompactHandoffRoutesForTests(): void {
@@ -280,10 +290,16 @@ async function refreshNativeMainCompactContext(args: {
   }
 }
 
+/** See the core counterpart: only a dead grant is terminal (#2887). */
 function isTerminalCompactPoolRefreshFailure(error: unknown): boolean {
   return error instanceof TokenRefreshError && (error.reason === "revoked" || error.reason === "expired");
 }
 
+/**
+ * Compact's forced refresh for an ordinary stored pool credential rejected with a
+ * pre-stream 401. Mirrors {@link refreshNativeMainCompactContext} so the two 401
+ * contracts on this endpoint cannot drift.
+ */
 async function refreshPoolCompactContext(args: {
   req: Request;
   config: OcxConfig;
@@ -310,6 +326,8 @@ async function refreshPoolCompactContext(args: {
       rejectedAccessToken: authCtx.accessToken,
       signal: req.signal,
     });
+    // See the core counterpart: a successful response can rotate only the refresh grant,
+    // so the credential may already sit at a later generation than the one we rejected.
     if (!refreshed.rotated) {
       return { ok: false, quarantine: true, quarantineGeneration: refreshed.generation, response: reauthResponse() };
     }
@@ -350,7 +368,11 @@ async function refreshPoolCompactContext(args: {
     if (isTerminalCompactPoolRefreshFailure(error)) {
       return { ok: false, quarantine: true, response: reauthResponse() };
     }
-    const response = formatErrorResponse(503, "server_busy", "Codex credential refresh did not complete; retry this request");
+    const response = formatErrorResponse(
+      503,
+      "server_busy",
+      "Codex credential refresh did not complete; retry this request",
+    );
     const headers = new Headers(response.headers);
     headers.set("Retry-After", "1");
     return { ok: false, quarantine: false, response: new Response(response.body, { status: response.status, headers }) };
@@ -384,6 +406,7 @@ async function resolveAlternateCompactContext(args: {
       admission: args.admission,
       ...(selectedModelId ? { modelId: selectedModelId } : {}),
       excludeAccountId,
+      requestScopedMainCredential: hasForwardableCodexBearer(req.headers, config),
       beginCodexAccountSelection: codexAccountSelectionForTurn(turnAdmissionLease),
     });
     // Caller-owned main has no Pool account id. It is still a valid one-shot alternate after a
@@ -514,6 +537,7 @@ export async function handleResponsesCompact(
   // base id above, and logCtx.requestedModel is assigned from it further down, so without
   // this the log would lose which id the client actually asked for.
   const compactRequestedModel = compactFastRow ? compactFastRow.baseId + "--fast" : raw.model;
+  const requestedModel = raw.model;
 
   let route;
   try {
@@ -533,10 +557,8 @@ export async function handleResponsesCompact(
     }
     return formatErrorResponse(404, "invalid_request_error", err instanceof Error ? err.message : String(err));
   }
-  const requestedModel = raw.model;
-  // Populate source-route identity before the opt-in decision can fail closed. This keeps
-  // malformed/unavailable targets observable as the caller's route without exposing any new data.
-  logCtx.requestedModel = requestedModel;
+  // Populate source-route identity before the opt-in decision can fail closed.
+  logCtx.requestedModel = compactRequestedModel;
   logCtx.model = route.modelId;
   logCtx.routeDecision = route.routeDecision;
   logCtx.provider = route.codexAccountNamespace
@@ -667,6 +689,7 @@ export async function handleResponsesCompact(
           accountId: route.codexAccountId,
           modelId: selectedModelId,
           substituteMainCredentialForDirect: substituteMainCredential,
+          requestScopedMainCredential,
           beginCodexAccountSelection: codexAccountSelectionForTurn(turnAdmissionLease),
           signal: req.signal,
           nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
@@ -774,6 +797,9 @@ export async function handleResponsesCompact(
         fixedAccount: ctx.fixedAccount,
         modelId: selectedModelId,
         probeLeaseId: codexProbeLeaseId(ctx),
+        // Fence a stored pool account's outcome on the credential the request was
+        // holding, so a 401 that lost a race with re-authentication cannot retire the
+        // replacement (#2887). Also covers the replay's own second 401.
         ...(ctx.kind === "pool" ? { credentialGeneration: ctx.generation } : {}),
         probeQuotaScope: codexProbeQuotaScope(ctx),
         writerGeneration: ctx.kind === "pool" || ctx.kind === "main-pool"
@@ -819,11 +845,7 @@ export async function handleResponsesCompact(
       });
       return recovery === "single"
         ? doFetch()
-        : fetchWithTransientRetry(doFetch, {
-          abortSignal: req.signal,
-          label: safeHostLabel(compactUrl),
-          replayTransientFailures: sendProvider.replayTransientFailures,
-        });
+        : fetchWithTransientRetry(doFetch, { abortSignal: req.signal, label: safeHostLabel(compactUrl) });
     };
 
     // The account each outcome belongs to. Reassigned only when the alternate send below
@@ -908,6 +930,8 @@ export async function handleResponsesCompact(
           options,
         });
       if (!replay.ok) {
+        // A transient refresh failure must not retire the account; only a dead grant
+        // does, and only while the rejected credential is still the stored one (#2887).
         if (poolAuthCtx) {
           if (poolReplay && !poolReplay.ok && poolReplay.quarantine) {
             recordCodexUpstreamOutcome(config, poolAuthCtx.accountId, 401, {
@@ -1053,8 +1077,9 @@ export async function handleResponsesCompact(
       recordCompactPoolOutcome(outcomeCtx, 499);
       return buffered;
     }
-    // A quota failure may arrive behind a generic 5xx body. Preserve that evidence while a local
-    // buffering failure after a healthy 200 remains tied to the real upstream status.
+    // A body-confirmed quota failure can arrive behind a generic 5xx. Record it as
+    // quota evidence; otherwise preserve the real upstream status so a local buffering
+    // failure after a 200 cannot soft-avoid a healthy account or rotate a thread.
     recordCompactPoolOutcome(outcomeCtx, bodyInferredQuota ? 429 : upstream.status, { retryAfter, resetAt });
     // Lift usage and response metadata from the buffered upstream JSON into the
     // request log; the routed branch gets the same through handleResponses. The
@@ -1083,7 +1108,8 @@ export async function handleResponsesCompact(
           if (fallback.ok || fallback.status === 499) return fallback;
           await fallback.body?.cancel().catch(() => undefined);
         } catch {
-          // Preserve the previous-model rejection if the remembered route is no longer viable.
+          // The previous-model rejection is the authoritative failure when the
+          // remembered handoff route can no longer compact this thread.
         }
       }
     }

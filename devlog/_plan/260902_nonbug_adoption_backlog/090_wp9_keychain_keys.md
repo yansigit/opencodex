@@ -38,3 +38,4 @@ async resolution.
 - store: config rewritten to refs, pool refs, read-back verified; restore reverses; failure leaves config.
 - `maskApiKey("keychain:x")` verbatim; `hasApiKey` true.
 - tsc, privacy, focused tests: new `tests/provider-key-store.test.ts`, `tests/provider-api-keys.test.ts` (if exists), `tests/router*.test.ts` sanity.
+

@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { commandCodeSessionId, createCommandCodeAdapter } from "../../src/adapters/command-code";
+import { projectContextCache } from "../../src/adapters/command-code-project-context";
 import { loginCommandCode, parseCommandCodeCallback, shouldImportLocalCommandCodeAuth } from "../../src/oauth/command-code";
 import { buildModelsRequest, OAUTH_PROVIDERS } from "../../src/oauth";
 import {
@@ -8,8 +12,6 @@ import {
   resetCommandCodeReasoningEffortsForTest,
 } from "../../src/providers/command-code-efforts";
 import { PROVIDER_REGISTRY } from "../../src/providers/registry";
-import { classifyError } from "../../src/lib/errors";
-import { beginRequestAttempt, finishRequestAttempt } from "../../src/server/request-log";
 import type { OcxParsedRequest, OcxProviderConfig } from "../../src/types";
 import { createTestTranslatorBudget } from "../helpers/translator-budget";
 
@@ -38,7 +40,10 @@ async function builtRequest(...args: Parameters<ReturnType<typeof createCommandC
   return createCommandCodeAdapter(provider).buildRequest(...args);
 }
 
-afterEach(() => resetCommandCodeReasoningEffortsForTest());
+afterEach(() => {
+  resetCommandCodeReasoningEffortsForTest();
+  projectContextCache.clear();
+});
 
 describe("Command Code provider", () => {
   test("registry and OAuth surfaces stay in parity", () => {
@@ -235,6 +240,43 @@ describe("Command Code provider", () => {
     expect(body.params).toMatchObject({ model: "deepseek/deepseek-v4-flash", reasoning_effort: "high", max_tokens: 100, stream: true });
     expect(body.params.tools[0]).toMatchObject({ name: "lookup" });
     expect(built.body).not.toContain("secret-command-key");
+  });
+
+  test("keeps project context empty unless the provider explicitly opts in", async () => {
+    for (const configured of [provider, { ...provider, projectContext: "off" as const }]) {
+      const built = await createCommandCodeAdapter(configured).buildRequest(parsed());
+      expect(JSON.parse(built.body)).toMatchObject({ memory: "", taste: null, skills: null });
+    }
+  });
+
+  test("loads the bounded project context envelope from the current working directory when enabled", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ocx-cc-provider-context-"));
+    const previousCwd = process.cwd();
+    try {
+      writeFileSync(join(root, "AGENTS.md"), "provider project memory", "utf8");
+      mkdirSync(join(root, ".commandcode", "taste"), { recursive: true });
+      writeFileSync(join(root, ".commandcode", "taste", "taste.md"), "provider taste", "utf8");
+      mkdirSync(join(root, ".commandcode", "skills", "provider-skill"), { recursive: true });
+      writeFileSync(
+        join(root, ".commandcode", "skills", "provider-skill", "SKILL.md"),
+        "---\nname: Provider Skill\n---\nprovider skill body",
+        "utf8",
+      );
+      process.chdir(root);
+
+      const contextualProvider = { ...provider, projectContext: "on" as const };
+      const built = await createCommandCodeAdapter(contextualProvider).buildRequest(parsed());
+      expect(JSON.parse(built.body)).toMatchObject({
+        memory: "provider project memory",
+        taste: "provider taste",
+        skills: '<skills>\n  <skill name="Provider Skill">provider skill body</skill>\n</skills>',
+      });
+      expect(built.headers["x-taste-learning"]).toBe("false");
+    } finally {
+      process.chdir(previousCwd);
+      projectContextCache.clear();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("passes every canonical Command Code id through unchanged", async () => {
@@ -601,38 +643,6 @@ describe("Command Code provider", () => {
     expect(JSON.parse(built.body).params.tools).toEqual([]);
   });
 
-  test("sorts tools deterministically so prompt cache prefix stays stable across input order", async () => {
-    const tool = (name: string, namespace?: string) => ({
-      name,
-      ...(namespace ? { namespace } : {}),
-      description: name,
-      parameters: { type: "object" },
-    });
-    const tools = [
-      tool("beta"),
-      tool("alpha"),
-      tool("gamma", "mcp"),
-    ];
-    const shuffled = [tools[1], tools[2], tools[0]];
-    const reversed = [...tools].reverse();
-    const base = parsed();
-    const builtA = await builtRequest({ ...base, context: { ...base.context, tools } });
-    const builtB = await builtRequest({ ...base, context: { ...base.context, tools: shuffled } });
-    const builtC = await builtRequest({ ...base, context: { ...base.context, tools: reversed } });
-    const bodyA = JSON.parse(builtA.body);
-    const bodyB = JSON.parse(builtB.body);
-    const bodyC = JSON.parse(builtC.body);
-    expect(bodyB.params.tools).toEqual(bodyA.params.tools);
-    expect(bodyC.params.tools).toEqual(bodyA.params.tools);
-    expect(bodyB.params.system).toBe(bodyA.params.system);
-    expect(bodyC.params.system).toBe(bodyA.params.system);
-    expect(bodyA.params.tools.map((row: { name: string }) => row.name)).toEqual([
-      "alpha",
-      "beta",
-      "mcp__gamma",
-    ]);
-  });
-
   test("matches a forced namespaced tool choice by dot or unique bare alias", async () => {
     const namespacedParsed = {
       ...parsed(),
@@ -831,79 +841,138 @@ describe("Command Code provider", () => {
     expect(JSON.parse(built.body).params.stream).toBe(true);
   });
 
-  test("derives a stable UUID only from trusted conversation identities", async () => {
-    const threadTurn = await builtRequest({ ...parsed(), _clientThreadId: "thread-abc" });
-    const threadFollowup = await builtRequest({
+  test("derives an opaque stable session id from trusted conversation identity", async () => {
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const identities = {
+      thread: "thread-secret-value",
+      replay: "replay-secret-value",
+      cache: "cache-secret-value",
+    };
+    const thread = {
       ...parsed(),
-      _clientThreadId: "thread-abc",
-      context: { ...parsed().context, messages: [...parsed().context.messages, { role: "user", content: "followup", timestamp: 2 }] },
-    });
-    expect(threadTurn.headers["x-session-id"]).toBe(threadFollowup.headers["x-session-id"]);
-    expect(threadTurn.headers["x-session-id"]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+      _clientThreadId: `  ${identities.thread}  `,
+      _reasoningReplayScope: { clientThreadId: identities.replay },
+      options: { ...parsed().options, promptCacheKey: identities.cache },
+    };
+    const sameThread = {
+      ...thread,
+      _reasoningReplayScope: { clientThreadId: "different-replay" },
+      options: { ...thread.options, promptCacheKey: "different-cache" },
+    };
+    const replay = {
+      ...parsed(),
+      _reasoningReplayScope: { clientThreadId: identities.replay },
+      options: { ...parsed().options, promptCacheKey: identities.cache },
+    };
+    const sameReplay = { ...replay, options: { ...replay.options, promptCacheKey: "different-cache" } };
+    const cache = {
+      ...parsed(),
+      options: { ...parsed().options, promptCacheKey: ` ${identities.cache} ` },
+      _promptCacheKeyIsSharedCohort: false,
+    };
+    const sameCache = {
+      ...cache,
+      options: { ...cache.options, promptCacheKey: identities.cache },
+    };
 
-    const cursorTurn = await builtRequest({ ...parsed(), _cursorConversationId: "cursor-conv-1" });
-    const cursorFollowup = await builtRequest({
-      ...parsed(),
-      _cursorConversationId: "cursor-conv-1",
-      context: { ...parsed().context, messages: [...parsed().context.messages, { role: "user", content: "followup", timestamp: 2 }] },
-    });
-    expect(cursorTurn.headers["x-session-id"]).toBe(cursorFollowup.headers["x-session-id"]);
+    const threadId = commandCodeSessionId(thread);
+    expect(threadId).toBe(commandCodeSessionId(sameThread));
+    expect(threadId).not.toBe(commandCodeSessionId({ ...thread, _clientThreadId: "different-thread" }));
+    expect(commandCodeSessionId(replay)).toBe(commandCodeSessionId(sameReplay));
+    expect(commandCodeSessionId(cache)).toBe(commandCodeSessionId(sameCache));
+    expect(commandCodeSessionId(replay)).not.toBe(commandCodeSessionId(cache));
+    expect(threadId).toMatch(uuid);
+    expect(commandCodeSessionId(replay)).toMatch(uuid);
+    expect(commandCodeSessionId(cache)).toMatch(uuid);
+    for (const raw of Object.values(identities)) expect(threadId).not.toContain(raw);
 
-    const rootTurn = await builtRequest(parsed());
-    const rootFollowup = await builtRequest({
-      ...parsed(),
-      context: { ...parsed().context, messages: [...parsed().context.messages, { role: "user", content: "followup", timestamp: 2 }] },
-    });
-    expect(rootTurn.headers["x-session-id"]).toBe(rootFollowup.headers["x-session-id"]);
-
-    const otherRoot = await builtRequest({
-      ...parsed(),
-      context: { ...parsed().context, messages: [{ role: "user", content: "different root", timestamp: 1 }] },
-    });
-    expect(rootTurn.headers["x-session-id"]).not.toBe(otherRoot.headers["x-session-id"]);
+    const built = await builtRequest(thread);
+    expect(built.headers["x-session-id"]).toBe(threadId);
   });
 
-  test("does not use a shared prompt-cache cohort for session affinity", async () => {
-    const first = await builtRequest({ ...parsed(), options: { ...parsed().options, promptCacheKey: "shared" }, _promptCacheKeyIsSharedCohort: true });
-    const second = await builtRequest({ ...parsed(), options: { ...parsed().options, promptCacheKey: "shared" }, context: { ...parsed().context, messages: [{ role: "user", content: "different", timestamp: 1 }] }, _promptCacheKeyIsSharedCohort: true });
-    expect(first.headers["x-session-id"]).not.toBe(second.headers["x-session-id"]);
+  test("whitespace thread and replay identities fall through to the next trusted identity at the wire", async () => {
+    const replay: OcxParsedRequest = {
+      ...parsed(),
+      _clientThreadId: " \t\n ",
+      _reasoningReplayScope: { clientThreadId: "  replay-after-blank-thread  " },
+      _promptCacheKeyIsSharedCohort: false,
+      options: { ...parsed().options, promptCacheKey: "distinct-cache-fallback" },
+    };
+    const cache: OcxParsedRequest = {
+      ...replay,
+      _reasoningReplayScope: { clientThreadId: " \t\n " },
+      options: { ...parsed().options, promptCacheKey: "  cache-after-blank-replay  " },
+    };
+    const cleanReplay: OcxParsedRequest = {
+      ...parsed(),
+      _reasoningReplayScope: { clientThreadId: "replay-after-blank-thread" },
+    };
+    const cleanCache: OcxParsedRequest = {
+      ...parsed(),
+      _promptCacheKeyIsSharedCohort: false,
+      options: { ...parsed().options, promptCacheKey: "cache-after-blank-replay" },
+    };
+    const cases: Array<[OcxParsedRequest, OcxParsedRequest]> = [[replay, cleanReplay], [cache, cleanCache]];
+    for (const [withWhitespace, clean] of cases) {
+      const built = await builtRequest(withWhitespace);
+      const expected = await builtRequest(clean);
+      expect(built.headers["x-session-id"]).toBe(expected.headers["x-session-id"]);
+      expect(commandCodeSessionId(withWhitespace)).toBe(built.headers["x-session-id"]);
+    }
   });
 
-  test("memoizes the session identity on a parsed request across compaction", () => {
-    const request = parsed();
-    const first = commandCodeSessionId(request);
-    request.context.messages = [{ role: "user", content: "compacted history", timestamp: 2 }];
-    expect(commandCodeSessionId(request)).toBe(first);
+  test("whitespace-only trusted identities produce fresh session headers", async () => {
+    const blank: OcxParsedRequest = {
+      ...parsed(),
+      _clientThreadId: " \t ",
+      _reasoningReplayScope: { clientThreadId: "\n " },
+      _promptCacheKeyIsSharedCohort: false,
+      options: { ...parsed().options, promptCacheKey: " \t\n " },
+    };
+    const first = (await builtRequest(blank)).headers["x-session-id"];
+    const second = (await builtRequest(blank)).headers["x-session-id"];
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    expect(first).toMatch(uuid);
+    expect(second).toMatch(uuid);
+    expect(first).not.toBe(second);
   });
 
-  test("formats credit depletion 400 and classifies as insufficient_quota", () => {
-    const adapter = createCommandCodeAdapter(provider);
-    const rawPayload = JSON.stringify({
-      success: false,
-      error: {
-        code: "BAD_REQUEST",
-        status: 400,
-        message: "You have insufficient credits to make this request. Please purchase more credits to continue using the service.",
-        docs: "https://commandcode.ai/docs/reference/errors/bad_request",
+  test("the same literal in thread, replay and cache namespaces yields distinct stable session headers", async () => {
+    const literal = "same-identity-in-every-kind";
+    const requests: OcxParsedRequest[] = [
+      { ...parsed(), _clientThreadId: literal },
+      { ...parsed(), _reasoningReplayScope: { clientThreadId: literal } },
+      {
+        ...parsed(),
+        _promptCacheKeyIsSharedCohort: false,
+        options: { ...parsed().options, promptCacheKey: literal },
       },
-    });
-    const formatted = adapter.formatErrorBody!(400, new Headers(), rawPayload);
-    expect(formatted).toContain("insufficient credits");
-    const classified = classifyError(400, "upstream_error", formatted);
-    expect(classified.code).toBe("insufficient_quota");
-    expect(classified.type).toBe("insufficient_quota");
-
-    const attempt = beginRequestAttempt(1, "command-code", "deepseek/deepseek-v4-flash", "command-code");
-    finishRequestAttempt(attempt, 400, 50, undefined, formatted);
-    expect(attempt.errorCode).toBe("insufficient_quota");
-
-    // Flat error format sent by Command Code API
-    const flatPayload = JSON.stringify({
-      code: "BAD_REQUEST",
-      status: 400,
-      message: "You have insufficient credits to make this request. Please purchase more credits to continue using the service.",
-    });
-    const formattedFlat = adapter.formatErrorBody!(400, new Headers(), flatPayload);
-    expect(formattedFlat).toContain("insufficient credits");
+    ];
+    const ids: string[] = [];
+    for (const request of requests) {
+      const id = (await builtRequest(request)).headers["x-session-id"]!;
+      expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/i);
+      expect(id).not.toContain(literal);
+      expect((await builtRequest(request)).headers["x-session-id"]).toBe(id);
+      expect(commandCodeSessionId(request)).toBe(id);
+      ids.push(id);
+    }
+    expect(new Set(ids).size).toBe(3);
   });
+
+  test("does not derive affinity from a shared cohort or prompt text", () => {
+    const shared = {
+      ...parsed(),
+      options: { ...parsed().options, promptCacheKey: "shared-cache-key" },
+      _promptCacheKeyIsSharedCohort: true,
+    };
+    expect(commandCodeSessionId(shared)).not.toBe(commandCodeSessionId(shared));
+    const unclassifiedCache = {
+      ...parsed(),
+      options: { ...parsed().options, promptCacheKey: "possibly-shared-cache-key" },
+    };
+    expect(commandCodeSessionId(unclassifiedCache)).not.toBe(commandCodeSessionId(unclassifiedCache));
+    expect(commandCodeSessionId(parsed())).not.toBe(commandCodeSessionId(parsed()));
+  });
+
 });

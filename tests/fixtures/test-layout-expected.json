@@ -1176,5 +1176,21 @@
   "zhipu-bigmodel-provider.test.ts": "providers",
   "zz-ci-api-usage-isolation.test.ts": "ci-workflows",
   "zz-ci-storage-policy-isolation.test.ts": "ci-workflows",
-  "zz-pr-coderabbit-readiness-revalidation.test.ts": "ci-workflows"
+  "zz-pr-coderabbit-readiness-revalidation.test.ts": "ci-workflows",
+  "aside-profiles-routes.test.ts": "server",
+  "aside-profiles.test.ts": "clients",
+  "aside-profile-paths.test.ts": "clients",
+  "aside-profile-sync-owner.test.ts": "clients",
+  "catalog-full-picker-order.test.ts": "codex-integration",
+  "catalog-go-exact-efforts.test.ts": "codex-integration",
+  "claude-desktop-discovery.test.ts": "claude-integration",
+  "claude-desktop-remote-hub.test.ts": "claude-integration",
+  "client-injection-guard.test.ts": "codex-integration",
+  "client-lifecycle-lock.test.ts": "clients",
+  "desktop-remote-store.test.ts": "clients",
+  "lab-fabric-producer-deadline.test.ts": "lab",
+  "opencode-go-agent-messages.test.ts": "providers",
+  "responses-function-tool-repair.test.ts": "responses",
+  "server-agent-task-recovery-replay.test.ts": "server",
+  "server-google-antigravity-oauth-401-replay.test.ts": "server"
 }

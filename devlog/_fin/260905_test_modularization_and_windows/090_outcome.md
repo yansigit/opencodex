@@ -65,3 +65,4 @@ CodeRabbit / grok-bot reviews on each, folded before merge.
 - Linux shard count (measured as no wall gain while macOS is the critical path).
 - Windows product or CI repair (owned elsewhere; 010).
 - Any test deleted or assertion weakened: none.
+

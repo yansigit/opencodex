@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getConfigPath, mutatePersistedConfig, saveConfig } from "../../src/config";
 import { OAUTH_PROVIDERS, upsertOAuthProvider } from "../../src/oauth";
+import { getConfigPath, loadConfig, mutatePersistedConfig, saveConfig } from "../../src/config";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { migrateXaiResponsesDefault } from "../../src/providers/xai-responses-opt-in";
 import { resolveWireProtocolOverride } from "../../src/server/adapter-resolve";
 import {
@@ -39,42 +41,48 @@ function configWithKey(provider: string, adapter: string, baseUrl: string): OcxC
 }
 
 describe("upsertOAuthProvider credential preservation", () => {
-  test("login, add-account, and reauth preserve non-auth provider settings", () => {
-    const preserved = {
-      disabled: true,
-      requestPacing: { enabled: true, requestsPerMinute: 3, minIntervalMs: 20_000 },
-      retryOn429: { enabled: true, attempts: 2 },
-      refreshPolicy: "disabled" as const,
-      selectedModels: ["operator-model"],
-      note: "operator-note",
-    };
+  test("rejects a derived key ID collision without changing live or persisted config", async () => {
+    const activeKey = "provider-key-collision-58449";
+    const differentKey = "provider-key-collision-56847";
+    expect(apiKeyPoolEntryId(activeKey)).toBe(apiKeyPoolEntryId(differentKey));
     const config = {
       port: 10100,
-      defaultProvider: "google-antigravity",
+      defaultProvider: "xai",
       providers: {
-        "google-antigravity": {
-          ...structuredClone(OAUTH_PROVIDERS["google-antigravity"].providerConfig),
-          ...structuredClone(preserved),
+        xai: {
           adapter: "openai-chat",
-          baseUrl: "https://stale.example/v1",
+          baseUrl: "https://api.x.ai/v1",
           authMode: "key",
-          googleMode: "ai-studio",
-          apiKey: "stale-key",
-          apiKeyPool: [{ id: "stale", key: "stale-key" }],
+          apiKey: activeKey,
+          apiKeyPool: [{ id: apiKeyPoolEntryId(activeKey), key: differentKey }],
         },
       },
     } as OcxConfig;
+    const previousHome = process.env.OPENCODEX_HOME;
+    const testHome = mkdtempSync(join(tmpdir(), "ocx-oauth-upsert-collision-"));
+    const icaclsOk = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+    setIcaclsRunnerForTests(() => icaclsOk);
+    setAsyncIcaclsRunnerForTests(async () => icaclsOk);
+    process.env.OPENCODEX_HOME = testHome;
+    try {
+      const liveBefore = structuredClone(config);
+      expect(() => upsertOAuthProvider(config, "xai")).toThrow(/pool ID collision/);
+      expect(config).toEqual(liveBefore);
 
-    for (const action of ["login", "add-account", "reauth"]) {
-      upsertOAuthProvider(config, "google-antigravity");
-      const provider = config.providers["google-antigravity"]!;
-      expect(provider).toMatchObject(preserved);
-      expect(provider.adapter).toBe("google");
-      expect(provider.baseUrl).toBe("https://daily-cloudcode-pa.googleapis.com");
-      expect(provider.authMode).toBe("oauth");
-      expect(provider.googleMode).toBe("cloud-code-assist");
-      expect(provider.apiKey, action).toBeUndefined();
-      expect(provider.apiKeyPool, action).toBeUndefined();
+      saveConfig(config);
+      const diskBefore = readFileSync(getConfigPath());
+      expect(() => mutatePersistedConfig(fresh => {
+        upsertOAuthProvider(fresh, "xai");
+        return { changed: true, value: undefined };
+      })).toThrow(/pool ID collision/);
+      expect(readFileSync(getConfigPath())).toEqual(diskBefore);
+    } finally {
+      await flushConfigDirHardeningForTests();
+      setIcaclsRunnerForTests(null);
+      setAsyncIcaclsRunnerForTests(null);
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previousHome;
+      removeTreeWithRetry(testHome);
     }
   });
 
@@ -121,6 +129,27 @@ describe("upsertOAuthProvider credential preservation", () => {
     config.providers.xai!.modelCosts = costs;
     upsertOAuthProvider(config, "xai");
     expect(config.providers.xai!.modelCosts).toEqual(costs);
+  });
+
+  test("carries Command Code projectContext across a re-login upsert", () => {
+    const config = {
+      port: 10100,
+      defaultProvider: "command-code",
+      providers: {
+        "command-code": {
+          adapter: "command-code",
+          baseUrl: "https://api.commandcode.ai",
+          authMode: "oauth",
+          commandCodeVersion: "0.52.1",
+          projectContext: "on",
+        },
+      },
+    } as unknown as OcxConfig;
+
+    upsertOAuthProvider(config, "command-code");
+
+    expect(config.providers["command-code"]?.commandCodeVersion).toBe("0.52.1");
+    expect(config.providers["command-code"]?.projectContext).toBe("on");
   });
 
   test("carries the per-provider account-failover opt-out across a re-login upsert (#2568d)", () => {
@@ -274,15 +303,19 @@ describe("upsertOAuthProvider credential preservation", () => {
         { id: "pool-visible", key: "pool-visible-key" },
         { id: activeId, key: "routing-only-key" },
       ]);
-      saveConfig(config);
 
       const listed = listProviderApiKeys(config, "xai");
       expect(listed.activeId).toBe(activeId);
       expect(listed.keys.find(entry => entry.id === activeId)?.active).toBe(true);
       expect(listed.keys.find(entry => entry.id === "pool-visible")?.active).toBe(false);
 
+      // runLogin persists the upsert before GUI key mutations. The shared selection
+      // transaction requires that authoritative file; it must not recreate missing config.
+      saveConfig(config);
+      expect(loadConfig().providers.xai!.apiKeyPool).toEqual(provider.apiKeyPool);
       expect(setActiveProviderApiKey(config, "xai", "pool-visible")).toBe(true);
       expect(config.providers.xai!.apiKey).toBe("pool-visible-key");
+      expect(loadConfig().providers.xai!.apiKey).toBe("pool-visible-key");
       expect(listProviderApiKeys(config, "xai").activeId).toBe("pool-visible");
 
       expect(setActiveProviderApiKey(config, "xai", activeId)).toBe(true);
@@ -291,47 +324,11 @@ describe("upsertOAuthProvider credential preservation", () => {
       expect(config.providers.xai!.apiKey).toBe("pool-visible-key");
       expect(config.providers.xai!.apiKeyPool).toEqual([{ id: "pool-visible", key: "pool-visible-key" }]);
       expect(listProviderApiKeys(config, "xai").activeId).toBe("pool-visible");
+      expect(loadConfig().providers.xai!.apiKeyPool).toEqual(config.providers.xai!.apiKeyPool);
     } finally {
       if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousHome;
       removeTreeWithRetry(testHome);
-    }
-  });
-
-  test("rejects a derived key ID collision without changing live or persisted config", () => {
-    const activeKey = "routing-only-key";
-    const config = {
-      port: 10100,
-      defaultProvider: "xai",
-      providers: {
-        xai: {
-          adapter: "openai-chat",
-          baseUrl: "https://api.x.ai/v1",
-          authMode: "key",
-          apiKey: activeKey,
-          apiKeyPool: [{ id: apiKeyPoolEntryId(activeKey), key: "different-key" }],
-        },
-      },
-    } as OcxConfig;
-    const previousHome = process.env.OPENCODEX_HOME;
-    const testHome = mkdtempSync(join(tmpdir(), "ocx-oauth-upsert-collision-"));
-    process.env.OPENCODEX_HOME = testHome;
-    try {
-      const liveBefore = structuredClone(config);
-      expect(() => upsertOAuthProvider(config, "xai")).toThrow(/pool ID collision/);
-      expect(config).toEqual(liveBefore);
-
-      saveConfig(config);
-      const diskBefore = readFileSync(getConfigPath());
-      expect(() => mutatePersistedConfig(fresh => {
-        upsertOAuthProvider(fresh, "xai");
-        return { changed: true, value: undefined };
-      })).toThrow(/pool ID collision/);
-      expect(readFileSync(getConfigPath())).toEqual(diskBefore);
-    } finally {
-      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
-      else process.env.OPENCODEX_HOME = previousHome;
-      rmSync(testHome, { recursive: true, force: true });
     }
   });
 
@@ -412,12 +409,19 @@ describe("upsertOAuthProvider credential preservation", () => {
       expect(config.providers.xai!.authMode).toBe("key");
       expect(config.providers.xai!.apiKey).toBeUndefined();
       expect(config.providers.xai!.apiKeyPool).toBeUndefined();
+      expect(loadConfig().providers.xai!.apiKey).toBeUndefined();
+      expect(loadConfig().providers.xai!.apiKeyPool).toBeUndefined();
 
       upsertOAuthProvider(config, "xai");
       const provider = config.providers.xai!;
       expect(provider.authMode).toBe("oauth");
       expect(provider.apiKey).toBeUndefined();
       expect(provider.apiKeyPool).toBeUndefined();
+      expect(mutatePersistedConfig(fresh => {
+        upsertOAuthProvider(fresh, "xai");
+        return { changed: true, value: undefined };
+      }).status).toBe("committed");
+      expect(loadConfig().providers.xai!.authMode).toBe("oauth");
     } finally {
       if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousHome;
@@ -425,7 +429,7 @@ describe("upsertOAuthProvider credential preservation", () => {
     }
   });
 
-  test("removes incompatible credentials without dropping unrelated fields for oauth-only providers", () => {
+  test("applies OAuth credentials while preserving notes for oauth-only providers", () => {
     const config = {
       port: 10100,
       defaultProvider: "anthropic",
@@ -436,9 +440,6 @@ describe("upsertOAuthProvider credential preservation", () => {
           authMode: "key",
           apiKey: "stale-key",
           apiKeyPool: [{ id: "stale", key: "stale-key" }],
-          apiKeyTransport: "bearer",
-          azureCredential: { type: "default-azure-credential" },
-          headers: { Authorization: "Bearer stale-secret" },
           note: "stale-note",
         },
       },
@@ -448,18 +449,207 @@ describe("upsertOAuthProvider credential preservation", () => {
     expect(provider.authMode).toBe("oauth");
     expect(provider.apiKey).toBeUndefined();
     expect(provider.apiKeyPool).toBeUndefined();
-    expect(provider.apiKeyTransport).toBeUndefined();
-    expect(provider.azureCredential).toBeUndefined();
-    expect(provider.headers).toBeUndefined();
     expect(provider.note).toBe("stale-note");
+  });
+
+  test("replaces stale login transport fields instead of retaining an alternate credential destination", () => {
+    const config = configWithKey("anthropic", "openai-chat", "https://stale.example.invalid");
+    const existing = config.providers.anthropic!;
+    existing.headers = { Authorization: "Bearer stale-header-sentinel" };
+    existing.apiKeyTransport = "x-api-key";
+    existing.responsesPath = "/stale-responses";
+    existing.googleMode = "vertex";
+    existing.keyOptional = true;
+    const before = structuredClone(existing);
+    const preset = OAUTH_PROVIDERS.anthropic!.providerConfig;
+
+    upsertOAuthProvider(config, "anthropic");
+
+    const provider = config.providers.anthropic!;
+    expect(provider.adapter).toBe("anthropic");
+    expect(provider.baseUrl).toBe("https://api.anthropic.com");
+    expect(provider.authMode).toBe("oauth");
+    expect(provider.headers).toEqual(preset.headers);
+    expect(provider.apiKeyTransport).toBe(preset.apiKeyTransport);
+    expect(provider.responsesPath).toBeUndefined();
+    expect(provider.googleMode).toBeUndefined();
+    expect(provider.keyOptional).toBeUndefined();
+    expect(provider.apiKey).toBeUndefined();
+    expect(provider.apiKeyPool).toBeUndefined();
+    expect(existing).toEqual(before);
+  });
+
+  test("clears the previous CCA project only after resolving the canonical login mode", () => {
+    const config = configWithKey("google-antigravity", "google", "https://stale.example.invalid");
+    const existing = config.providers["google-antigravity"]!;
+    existing.googleMode = "vertex";
+    existing.project = "previous-account-project";
+
+    upsertOAuthProvider(config, "google-antigravity");
+
+    expect(config.providers["google-antigravity"]!.googleMode).toBe("cloud-code-assist");
+    expect(config.providers["google-antigravity"]!.project).toBeUndefined();
+    expect(existing.project).toBe("previous-account-project");
+  });
+
+  test("preserves an operator project when the canonical login mode is not CCA", () => {
+    const config = configWithKey("xai", "openai-chat", "https://api.x.ai/v1");
+    const existing = config.providers.xai!;
+    existing.googleMode = "cloud-code-assist";
+    existing.project = "operator-project";
+
+    upsertOAuthProvider(config, "xai");
+
+    expect(config.providers.xai!.googleMode).toBeUndefined();
+    expect(config.providers.xai!.project).toBe("operator-project");
+  });
+
+  test("isolates nested operator and unchanged catalog data from the previous row and registry", () => {
+    const preset = OAUTH_PROVIDERS.anthropic!.providerConfig;
+    const presetBefore = structuredClone(preset);
+    const existing = {
+      ...structuredClone(preset),
+      modelCosts: { "operator-model": { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } },
+      forwardCompatibleFlag: { labels: ["keep"] },
+    };
+    const before = structuredClone(existing);
+    const config: OcxConfig = { port: 10100, defaultProvider: "anthropic", providers: { anthropic: existing } };
+
+    upsertOAuthProvider(config, "anthropic");
+
+    const provider = config.providers.anthropic! as typeof existing;
+    expect(provider.models).not.toBe(preset.models);
+    expect(provider.models).not.toBe(existing.models);
+    provider.modelCosts["operator-model"]!.input = 99;
+    provider.forwardCompatibleFlag.labels.push("changed");
+    provider.models!.push("test-only-model");
+    expect(existing).toEqual(before);
+    expect(preset).toEqual(presetBefore);
+  });
+
+  test("refreshes registry-owned catalog fields immediately without losing operator fields", () => {
+    const config = {
+      port: 10100,
+      defaultProvider: "anthropic",
+      providers: {
+        anthropic: {
+          adapter: "anthropic",
+          baseUrl: "https://api.anthropic.com",
+          authMode: "oauth",
+          models: ["retired-model"],
+          defaultModel: "retired-model",
+          contextWindow: 1,
+          disabled: true,
+          note: "operator-note",
+        },
+      },
+    } as unknown as OcxConfig;
+
+    upsertOAuthProvider(config, "anthropic");
+
+    const provider = config.providers.anthropic!;
+    const preset = OAUTH_PROVIDERS.anthropic!.providerConfig;
+    expect(provider.models).toEqual(preset.models);
+    expect(provider.contextWindow).toBe(preset.contextWindow);
+    expect(provider.defaultModel).toBe(preset.defaultModel);
+    expect(provider.disabled).toBe(true);
+    expect(provider.note).toBe("operator-note");
+  });
+
+  test.each(["login", "add-account", "reauthentication"])(
+    "preserves operator policy and unknown fields during %s-shaped upsert",
+    operation => {
+      const config = configWithKey("xai", "openai-chat", "https://api.x.ai/v1");
+      const existing = config.providers.xai! as OcxConfig["providers"][string] & Record<string, unknown>;
+      existing.disabled = true;
+      existing.requestPacing = { enabled: true, minIntervalMs: 250 };
+      existing.retryOn429 = { attempts: 4, intervalMs: 900 };
+      existing.refreshPolicy = "lazy-only";
+      existing.selectedModels = ["grok-4"];
+      existing.note = `operator-${operation}`;
+      existing.modelCosts = { "grok-4": { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } };
+      existing.oauthAccountFailover = { enabled: false };
+      existing.forwardCompatibleFlag = { enabled: true };
+
+      upsertOAuthProvider(config, "xai");
+
+      const provider = config.providers.xai! as typeof existing;
+      expect(provider.disabled).toBe(true);
+      expect(provider.requestPacing).toEqual({ enabled: true, minIntervalMs: 250 });
+      expect(provider.retryOn429).toEqual({ attempts: 4, intervalMs: 900 });
+      expect(provider.refreshPolicy).toBe("lazy-only");
+      expect(provider.selectedModels).toEqual(["grok-4"]);
+      expect(provider.note).toBe(`operator-${operation}`);
+      expect(provider.modelCosts).toEqual({ "grok-4": { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } });
+      expect(provider.oauthAccountFailover).toEqual({ enabled: false });
+      expect(provider.forwardCompatibleFlag).toEqual({ enabled: true });
+      expect(provider.apiKey).toBe("stored-key-sentinel");
+    },
+  );
+
+  test("removes incompatible API-key and Azure credentials while preserving unknown fields", () => {
+    const config = {
+      port: 10100,
+      defaultProvider: "anthropic",
+      providers: {
+        anthropic: {
+          adapter: "anthropic",
+          baseUrl: "https://api.anthropic.com",
+          authMode: "key",
+          apiKey: "stale-key",
+          apiKeyPool: [{ id: "stale", key: "stale-key" }],
+          azureCredential: { token: "stale" },
+          disabled: true,
+          forwardCompatibleFlag: "retain-me",
+        },
+      },
+    } as unknown as OcxConfig;
+
+    upsertOAuthProvider(config, "anthropic");
+
+    const provider = config.providers.anthropic! as OcxConfig["providers"][string] & Record<string, unknown>;
+    expect(provider.apiKey).toBeUndefined();
+    expect(provider.apiKeyPool).toBeUndefined();
+    expect(provider.azureCredential).toBeUndefined();
+    expect(provider.disabled).toBe(true);
+    expect(provider.forwardCompatibleFlag).toBe("retain-me");
+    expect(provider.authMode).toBe("oauth");
   });
 
   test("a fresh login on an unconfigured provider gets the untouched preset", () => {
     const config = { port: 10100, defaultProvider: "openai", providers: {} } as unknown as OcxConfig;
+    const preset = OAUTH_PROVIDERS.xai!.providerConfig;
+    const before = structuredClone(preset);
     upsertOAuthProvider(config, "xai");
     const provider = config.providers.xai!;
     expect(provider.authMode).toBe("oauth");
     expect(provider.apiKey).toBeUndefined();
     expect(provider.apiKeyPool).toBeUndefined();
+    expect(provider.models).not.toBe(preset.models);
+    provider.models!.push("test-only-model");
+    expect(preset).toEqual(before);
+  });
+
+  test("promotes the legacy Command Code static catalog during OAuth upsert", () => {
+    const config = {
+      port: 10100,
+      defaultProvider: "command-code",
+      providers: {
+        "command-code": {
+          adapter: "command-code",
+          baseUrl: "https://api.commandcode.ai",
+          authMode: "oauth",
+          liveModels: false,
+          defaultModel: "deepseek-v4-flash",
+          models: ["deepseek-v4-flash", "kimi-k3", "glm-5.2"],
+          note: "operator-note",
+        },
+      },
+    } as unknown as OcxConfig;
+
+    upsertOAuthProvider(config, "command-code");
+
+    expect(config.providers["command-code"]!.liveModels).toBe(true);
+    expect(config.providers["command-code"]!.note).toBe("operator-note");
   });
 });

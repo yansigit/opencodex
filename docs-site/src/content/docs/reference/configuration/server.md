@@ -51,6 +51,56 @@ If an older development build changed resume-history metadata before backup supp
 It force-relabels every user-message `opencodex` row, including legitimate dedicated-provider
 history; review the full-scope warning in the lifecycle reference before running it.
 
+## Codex quota network diagnostics
+
+The main Codex account row may include `quotaRefresh` when a quota fetch was
+attempted. This describes that fetch, not remaining quota, model access or
+permission to retry. Cached reads and rows without a fetch may omit it; absence
+does not mean success. A `null` quota value means unavailable, not zero quota.
+
+To request fresh data and display only the diagnostic in PowerShell:
+
+```powershell
+$quotaReport = ocx account list openai --quota --refresh --json | ConvertFrom-Json
+$quotaReport.accounts |
+    ForEach-Object { if ($_.quotaRefresh) { $_.quotaRefresh } } |
+    ConvertTo-Json -Depth 3
+```
+
+If no diagnostic is present, this projection produces no diagnostic object. Share
+only these fields when comparing network modes, rather than the full account list.
+
+| `quotaRefresh.status` | Meaning |
+| --- | --- |
+| `ok` | The fetch completed and a quota object was parsed. |
+| `not_reported` | The response contained no usable quota object. |
+| `http_error` | The upstream returned an HTTP failure; `httpStatus` contains its status code. |
+| `timeout` | The quota fetch timed out. |
+| `network_error` | The request failed before a classified HTTP response. |
+| `invalid_response` | The response was not a usable quota document. |
+| `internal_error` | An internal refresh step failed. |
+
+Only `http_error` includes `httpStatus`. Other statuses do not imply HTTP 0 or an
+account entitlement problem.
+
+### Which proxy path is used?
+
+The running proxy service fetches quota. It uses its own environment, not the
+interactive shell that later runs `ocx account list`. Configure the service's
+proxy setting or environment, then restart it; changing variables in another
+terminal does not update an already running service.
+
+An unset `proxy` leaves inherited proxy variables unchanged. An explicit HTTP(S)
+proxy URL fills `HTTP_PROXY` and `HTTPS_PROXY` only where they are unset.
+`"proxy": "auto"` reads the Windows static WinINET proxy once at startup; existing
+proxy environment variables take precedence. Auto discovery does not resolve
+PAC/WPAD, SOCKS-only settings or live proxy changes. Use a supported static HTTP
+proxy setting or an explicit HTTP(S) proxy URL when needed.
+
+Compare the diagnostic on the same machine and account under the two network
+modes. A successful TUN test alone does not identify why the service's HTTP proxy
+path failed, and does not establish a general fix.
+
 ## Remote access
 
 The default `127.0.0.1` bind is loopback-only. A non-loopback address such as `0.0.0.0` requires
@@ -69,7 +119,7 @@ access. Configure the listener and export the data-plane token before starting:
 }
 ```
 
-```sh
+```bash
 export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
 ocx start
 ```
@@ -379,7 +429,6 @@ These settings govern `/v1/messages`, `/v1/messages/count_tokens`, the `ocx clau
 | `claudeCode.subagentEffort?` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | inherit | Effort written to generated `~/.claude/agents/ocx-*.md`; separate from Codex guidance and proxy caps. Restart through `ocx claude` to regenerate. |
 | `claudeCode.compatibility?` | `"shadow" \| "enforce"` | `enforce` | Compatibility gate for routed Claude ingress: `enforce` rejects unsupported requests before upstream activity with `400 invalid_request_error`; `shadow` records ordinary incompatibilities without rejecting, but signed-thinking ownership and other safety invariants still fail closed. |
 
-
 Auto auth selects subscription when stored Claude auth is found, proxy when none is found, and
 subscription with a warning when detection is inconclusive. See
 [Claude Code auth mode](/guides/claude-code/#auth-mode).
@@ -409,6 +458,7 @@ and model id (never request bodies, credentials, or account identifiers). A fixt
 its absolute error is within `max(32 tokens, 20%)`; the weighted aggregate must remain within
 10%. Routed `/v1/messages/count_tokens` remains a local approximation for routed models; only
 native Anthropic requests with an `sk-ant-` credential pass through to Anthropic.
+
 ## Shadow calls
 
 Codex uses small helper models for tasks such as titles and commit messages. Enable
@@ -488,3 +538,19 @@ Remote `https:` images and failed or empty descriptions are not cached.
 
 Anthropic OAuth sidecars reuse opencodex's existing Claude Code OAuth fingerprint. Soak-test the
 intended account and workload.
+
+## Remote Hub keys and defaults
+
+`runtimeRole` defaults to `standalone`. A hub uses `hub.managementPublicOrigin`, loopback-only `hub.managementIngress` (`enabled:false` when absent), and exact `remoteGui.allowedTailscaleUsers` (empty when absent). A client data key lives in `service-api-token`, never `config.json`; rotation may temporarily create `service-api-token.prev`. Usage stores are not mirrored.
+
+| Key | Type | Default when absent | What it does |
+| --- | --- | --- | --- |
+| `hub.managementPublicOrigin` | string | unset | The canonical browser-reachable management origin a hub advertises, for example the HTTPS origin Tailscale Serve prints. It is what `/readyz` reports as `managementUrl` while `runtimeRole` is `hub`; with it unset the hub falls back to whatever origin each request arrived on, so a client behind a different frontend can be handed an address it cannot reach. |
+| `hub.managementIngress` | `{enabled:false}` or `{enabled:true, port}` | `{enabled:false}` | An extra management-only listener for a local HTTPS frontend. The hostname is not configurable: when enabled the socket always binds `127.0.0.1`, and only GUI, session-bootstrap, and management API routes are admitted. Data-plane routes are rejected before dispatch. |
+| `remoteGui.allowedTailscaleUsers` | string[] | `[]` (empty — nobody) | Exact Tailscale login identities allowed to be issued an automatic remote GUI session. The `Tailscale-User-Login` header is trusted **only** on the separate management ingress; an empty list means no remote identity can mint a session, which is the safe default rather than an oversight. Identities are compared exactly, so a typo silently denies access. |
+| `remoteGui.allowInsecureHttp` | boolean | unset | **Retired — has no effect.** It once permitted a one-time pairing exchange over non-loopback plaintext HTTP. A pairing grant now crosses loopback or authenticated HTTPS only. The key is still parsed so an existing `config.json` keeps loading (the schema is strict, and dropping the key outright would make an older config fail to load entirely); a persisted `true` is reported once and then ignored. Remove it from your config. |
+
+A hub that is reachable from a browser needs `hub.managementPublicOrigin` and at least one entry
+in `remoteGui.allowedTailscaleUsers`. Setting the origin without the user list produces a hub that
+advertises itself correctly and then refuses every session; setting the user list without the
+origin produces sessions pointed at whichever origin the request happened to use.

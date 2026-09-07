@@ -63,15 +63,12 @@ afterEach(async () => {
   globalThis.fetch = originalFetch;
   clearProviderQuotaCache();
   clearAccountQuotaCache("meta-muse");
-  try {
-    await flushConfigDirHardeningForTests();
-  } finally {
-    setIcaclsRunnerForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
-    if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
-    else process.env.OPENCODEX_HOME = originalHome;
-    removeTreeWithRetry(home);
-  }
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+  if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = originalHome;
+  removeTreeWithRetry(home);
 });
 
 async function seedObservation(ageMs: number): Promise<void> {

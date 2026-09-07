@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   apiKeyTransportConfigError,
-  azureCredentialConfigError,
   booleanRecordConfigError,
   modelAdapterRecordConfigError,
   modelDisplayNamesConfigError,
@@ -16,22 +15,6 @@ import {
 } from "../../src/config/provider-validation";
 
 describe("provider config validation leaf", () => {
-  test("validates the exact Azure identity shape and auth conflicts", () => {
-    const identity = {
-      adapter: "azure-openai",
-      azureCredential: { type: "default-azure-credential", managedIdentityClientId: "  client-123  " },
-    };
-    expect(azureCredentialConfigError(identity)).toBeNull();
-    expect(azureCredentialConfigError({ ...identity, adapter: "openai-chat" })).toContain("azure adapters");
-    expect(azureCredentialConfigError({ ...identity, azureCredential: { type: "default-azure-credential", managedIdentityClientId: "   " } })).toContain("non-empty");
-    expect(azureCredentialConfigError({ ...identity, azureCredential: { type: "default-azure-credential", unknown: "x" } })).toContain("unrecognized");
-    expect(azureCredentialConfigError({ ...identity, apiKey: "${AZURE_KEY}" })).toContain("apiKey");
-    expect(azureCredentialConfigError({ ...identity, apiKeyPool: [] })).toContain("apiKeyPool");
-    for (const authMode of ["forward", "oauth", "local"] as const) {
-      expect(azureCredentialConfigError({ ...identity, authMode })).toContain("authMode");
-    }
-    expect(azureCredentialConfigError({ ...identity, authMode: "key" })).toBeNull();
-  });
   test("accepts only credential-free HTTP(S) base URLs", () => {
     expect(providerBaseUrlConfigError("https://example.test/v1")).toBeNull();
     expect(providerBaseUrlConfigError("file:///tmp/provider")).toBe("baseUrl must be an http(s) URL");
@@ -43,9 +26,6 @@ describe("provider config validation leaf", () => {
   test("rejects sensitive, malformed, non-string, and multiline headers", () => {
     expect(providerHeadersConfigError({ "X-Custom": "ok" })).toBeNull();
     expect(providerHeadersConfigError({ Authorization: "Bearer secret" })).toContain("sensitive header");
-    for (const name of ["API-KEY", "api-key"]) {
-      expect(providerHeadersConfigError({ [name]: "secret" })).toContain("sensitive header");
-    }
     expect(providerHeadersConfigError({ "Bad Header": "x" })).toContain("valid HTTP header names");
     expect(providerHeadersConfigError({ "X-Count": 1 })).toContain("must be a string");
     expect(providerHeadersConfigError({ "X-Custom": "ok\r\nInjected: yes" })).toContain("line breaks");

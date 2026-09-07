@@ -26,15 +26,13 @@ docker/**
 
 !gui/
 !gui/**
-gui/node_modules/
-gui/dist/
-gui/.vite/
 
 # Keep recursive credential, state, and generated-artifact exclusions after
 # the source allowlist above so nested local files cannot be re-admitted.
 **/node_modules
 **/dist
 **/coverage
+**/.vite
 **/*.log
 **/*.log.*
 **/*.tgz
@@ -42,14 +40,14 @@ gui/.vite/
 **/*.tar.gz
 **/*.zip
 
-# Re-apply credential and state exclusions after the source allowlist above.
-# Negation patterns can otherwise admit local files that Vite or a remote
-# container builder would consume.
+# Negation patterns above admit the runtime source subtrees, so re-apply the
+# host credential and mutable-state boundary after every source inclusion.
 **/.git
 **/.tmp
 **/.worktrees
 **/.codex
 **/.opencode
+**/.opencodex
 **/.planning
 **/.agents
 **/.claude
@@ -61,7 +59,6 @@ gui/.vite/
 **/.docker/config.json
 **/.config/containers/auth.json
 **/.config/gh/hosts.yml
-**/.opencodex
 **/.env
 **/.env.*
 **/.npmrc

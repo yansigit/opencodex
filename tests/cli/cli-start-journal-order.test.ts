@@ -10,7 +10,7 @@ import { repoPath } from "../helpers/repo-root";
 // binding a port, and writing its runtime record. That is intrinsic to the
 // assertion, so the bound stays -- but a fixed 10s is a latency assertion on the
 // Windows leg, where four Bun pools share one runner. Hosted runs have observed
-// a healthy owner taking just over the shared 45s floor to publish its record,
+// healthy children taking longer than the shared 45s floor to publish their record,
 // so this process-heavy case keeps its own 90s readiness bound.
 const OWNER_WAIT_MS = process.env.CI === "true" && process.platform === "win32"
   ? 90_000
@@ -22,6 +22,7 @@ const OWNER_WAIT_MS = process.env.CI === "true" && process.platform === "win32"
 // waits (owner runtime record, owner health, and two CLI children), so the budget
 // is derived from the deadline rather than pinned next to it.
 const JOURNAL_OWNERSHIP_BUDGET_MS = Math.max(30_000, OWNER_WAIT_MS * 4);
+const CLIENT_JOURNAL_BUDGET_MS = Math.max(30_000, OWNER_WAIT_MS * 2);
 
 const cliPath = repoPath("src/cli/index.ts");
 const roots: string[] = [];
@@ -224,7 +225,7 @@ describe("start and ensure journal ownership (#1230)", () => {
         await child.exited;
       }
     }
-  }, 30_000);
+  }, CLIENT_JOURNAL_BUDGET_MS);
 
   test("a healthy proxy owner preserves the journal for both start and ensure", async () => {
     const fx = fixture();

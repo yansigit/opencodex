@@ -18,3 +18,4 @@ Findings folded into 060:
    `ocx system settings --desktop-authless` is added.
 5. Non-loopback must never lose `env_key`: enforced by deriving `desktopAuthless` only when
    `requiresAdmissionToken` is false.
+

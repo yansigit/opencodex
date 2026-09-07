@@ -69,7 +69,7 @@ OAuth は `POST /api/oauth/login` で開始し、コールバックできない�
 ビルドは古いマニフェストを拒否し、すべての SHA-256 をコンテキストとコピー後のファイルに照合します。マニフェストは `Dockerfile`、`compose.yaml`、`.dockerignore`、Git 管理下のすべての Docker authority ファイル、`src/`、`package.json`、`bun.lock`、`scripts/model-metadata.source.json` を認証します。欠落・不一致のファイル、マニフェストにない余分なソースまたは Docker authority ファイル、シンボリックリンクは拒否されます。
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun scripts/generate-compatibility-version.ts
 docker compose build

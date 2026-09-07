@@ -4,13 +4,13 @@
 
 <p align="center">
   <a href="https://x.com/claudeebum"><img src="https://img.shields.io/badge/%40claudeebum-000000?logo=x&logoColor=white" alt="在 X 上關注 @claudeebum"></a>
-  <a href="https://www.npmjs.com/package/@bitkyc08/opencodex"><img src="https://img.shields.io/npm/v/@bitkyc08/opencodex?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
-  <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@bitkyc08/opencodex?color=blue" alt="license"></a>
-  <img src="https://img.shields.io/node/v/@bitkyc08/opencodex?logo=node.js&label=node" alt="node version">
+  <a href="https://www.npmjs.com/package/@yansigit/opencodex"><img src="https://img.shields.io/npm/v/@yansigit/opencodex?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
+  <a href="https://github.com/yansigit/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@yansigit/opencodex?color=blue" alt="license"></a>
+  <img src="https://img.shields.io/node/v/@yansigit/opencodex?logo=node.js&label=node" alt="node version">
 </p>
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @yansigit/opencodex
 ocx start        # 代理 + 儀表板: localhost:10100
 ```
 
@@ -77,7 +77,7 @@ flowchart LR
 ```bash
 # 安裝（自動打包 Bun 執行時 —— 只需 Node 22+）
 # 建議使用自己的 Node（nvm/fnm）—— 避免使用 `sudo npm install -g …`
-npm install -g @bitkyc08/opencodex
+npm install -g @yansigit/opencodex
 
 # 互動式初始化（寫入設定並注入 Codex）
 ocx init
@@ -97,14 +97,14 @@ codex "Write a hello world in Rust"
 opencodex 把 Bun 執行時作為依賴打包，並透過 Node 啟動器執行，因此你**不必**自己安裝 Bun。如果看到 "bundled Bun runtime is missing" 錯誤，代表安裝時略過了 lifecycle 腳本（包括 npm 透過 `allowScripts` 攔截 bun postinstall 的情況）或 optional 依賴。請允許 bun 安裝腳本後再重裝：
 
 ```bash
-npm install -g --allow-scripts=bun @bitkyc08/opencodex   # 不要加 --ignore-scripts、--omit=optional
+npm install -g --allow-scripts=bun @yansigit/opencodex   # 不要加 --ignore-scripts、--omit=optional
 
 # 若一開始用 sudo 安裝，請繼續用 sudo：
-sudo npm install -g --allow-scripts=bun @bitkyc08/opencodex
+sudo npm install -g --allow-scripts=bun @yansigit/opencodex
 ```
 
 npm 警告給的縮寫指令少了套件名，會把目前目錄重裝進去，
-請務必明確寫上 `@bitkyc08/opencodex`。
+請務必明確寫上 `@yansigit/opencodex`。
 
 如果之前用 sudo 安裝到了 root 字首，上面的 sudo 重灌可以解除該字首的攔截 ——
 但條件允許時建議改用自己的 Node（nvm、fnm 或使用者層級的 npm prefix）。
@@ -118,7 +118,7 @@ npm 警告給的縮寫指令少了套件名，會把目前目錄重裝進去，
 - **安全地池化 ChatGPT 帳號。** 現有 Codex 執行緒保持在一個帳號上，而新會話可以從池中自動挑選使用量更低的帳號，並帶有配額重新整理和非 PII 請求標籤。
 - **登入一次，不必填 API key。** xAI、Anthropic、Kimi 支援 OAuth，可用現有帳號認證，token 自動重新整理。也可以轉發 `codex login`、貼上 API key，或使用 `${ENV_VAR}` 引用 —— 隨你選擇。
 - **Codex 在哪裡能用，它就在哪裡能用。** 自動注入 Codex CLI、TUI、App 和 SDK。路由模型像原生模型一樣出現在 Codex 的模型選擇器裡。
-- **委派給合適的模型。** 在儀表板或 config 中把最多 5 個路由/原生模型放進 Codex 的 subagent 選擇器 —— 複雜任務交給 reasoning 模型，快速任務交給便宜模型。在 v2 多智慧體表面（GPT-5.6 Sol/Terra）上，代理會注入精簡的委派指引：首選子智慧體模型與 effort（`injectionModel` / `injectionEffort`）、featured 模型清單及各自支援的 effort 階梯，以及讓跨模型 `spawn_agent` 覆蓋得以應用的 `fork_turns` 規則。已知限制：原生父代理 spawn 路由子代理時，任務本文可能以後端加密形式到達而丟失（[#92](https://github.com/lidge-jun/opencodex/issues/92)）—— 需要可靠的跨 provider 委派請使用 v1 表面。想自訂文案，可在 `injectionPrompt` 中使用 `{{model}}` / `{{effort}}` / `{{roster}}` 預留位置。
+- **委派給合適的模型。** 在儀表板或 config 中把最多 5 個路由/原生模型放進 Codex 的 subagent 選擇器 —— 複雜任務交給 reasoning 模型，快速任務交給便宜模型。在 v2 多智慧體表面（GPT-5.6 Sol/Terra）上，代理會注入精簡的委派指引：首選子智慧體模型與 effort（`injectionModel` / `injectionEffort`）、featured 模型清單及各自支援的 effort 階梯，以及讓跨模型 `spawn_agent` 覆蓋得以應用的 `fork_turns` 規則。已知限制：原生父代理 spawn 路由子代理時，任務本文可能以後端加密形式到達而丟失（[#92](https://github.com/yansigit/opencodex/issues/92)）—— 需要可靠的跨 provider 委派請使用 v1 表面。想自訂文案，可在 `injectionPrompt` 中使用 `{{model}}` / `{{effort}}` / `{{roster}}` 預留位置。
 - **為 preview-gated OpenAI rollout 做好準備。** GPT-5.6 Sol/Terra/Luna 保留 upstream effort 階梯。Direct/Multi 使用 372k Codex 契約，OpenAI API 與 OpenRouter 使用 1.05M 後設資料。
 - **給任意模型超能力。** 非 OpenAI 模型可透過 `gpt-5.4-mini` sidecar（使用你的 ChatGPT 登入）獲得真正的網頁搜尋與圖片理解。
 - **原生生成圖片。** Codex 的獨立 `image_gen` 工具透過 `POST /v1/images/generations` 生成圖片、透過 `POST /v1/images/edits` 編輯圖片；它獨立於 hosted Responses 的 `image_generation` 工具。
@@ -305,7 +305,7 @@ shim。仍在變動中的啟動器不會被改動，會在後續命令重試。�
 
 ```bash
 ocx uninstall
-npm uninstall -g @bitkyc08/opencodex
+npm uninstall -g @yansigit/opencodex
 ```
 
 `ocx uninstall` 會停止代理、移除已安裝的 service、移除 Codex shim、恢復原生 Codex config/catalog/history，並刪除 `~/.opencodex`。
@@ -412,7 +412,7 @@ ocx recover-history --legacy-openai
 ## 開發
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy    # 以開發模式啟動代理 API

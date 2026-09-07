@@ -62,6 +62,7 @@ beforeAll(async () => {
       adapterRunsTurn: boolean,
       isStreaming = true,
     ) => hasMediaPlan && isStreaming && (!hasWebSearchPlan || adapterRunsTurn),
+    resolveCcaInTurnGrounding: () => undefined,
     planWebSearch: () => sidecarMode
       ? {
           backend: "anthropic",
@@ -70,7 +71,6 @@ beforeAll(async () => {
           maxSearches: 1,
         }
       : undefined,
-    resolveCcaInTurnGrounding: () => undefined,
     shouldResolveOpenAiWebSearchSidecar: () => false,
     runWithWebSearch: async (args: {
       parsed: OcxParsedRequest;

@@ -63,3 +63,4 @@ So each row gains, when the catalog knows a default window and a larger opt-in w
 
 Update PR #3230/#3231 bodies, address reviewer feedback, admin squash-merge #3230 → dev,
 retarget #3231 → dev, CI, merge, git merge-base --is-ancestor proof.
+

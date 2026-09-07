@@ -1,6 +1,6 @@
 {
   "name": "@yansigit/opencodex",
-  "version": "2.43.0",
+  "version": "2.44.0",
   "description": "Universal provider proxy for OpenAI Codex & Claude Code — use any LLM with Codex CLI/App/SDK and Claude Code",
   "type": "module",
   "main": "./bin/package-main.mjs",
@@ -18,7 +18,6 @@
   "files": [
     "bin",
     "src",
-    "scripts/benchmark-claude-tokens.ts",
     "gui/dist",
     "assets/banner.png",
     "assets/architecture.png",
@@ -26,7 +25,8 @@
     "assets/codex-app-picker.png",
     "README.md",
     "AGENTS_INSTALL.md",
-    "LICENSE"
+    "LICENSE",
+    "scripts/benchmark-claude-tokens.ts"
   ],
   "engines": {
     "node": ">=18"

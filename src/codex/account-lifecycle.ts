@@ -1,6 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
 import {
-  atomicWriteFile,
   deleteConfigTopLevelKey,
   getConfigPath,
   saveConfigPreservingClaudeCode,
@@ -107,8 +106,8 @@ function restoreRuntimeConfig(target: OcxConfig, snapshot: OcxConfig): void {
   Object.assign(target, snapshot);
 }
 
-function assertPersistedConfigUnchanged(configPath: string, previousBytes: string): void {
-  if (readFileSync(configPath, "utf8") !== previousBytes) {
+function assertPersistedConfigUnchanged(configPath: string, previousBytes: Buffer): void {
+  if (!readFileSync(configPath).equals(previousBytes)) {
     throw new CodexAccountDeleteRollbackError();
   }
 }
@@ -130,7 +129,7 @@ export function deleteCodexAccount(runtimeConfig: OcxConfig, accountId: string):
     const previousConfig = structuredClone(runtimeConfig);
     const configPath = getConfigPath();
     const hasPersistedConfig = existsSync(configPath);
-    const previousPersistedConfig = hasPersistedConfig ? readFileSync(configPath, "utf8") : undefined;
+    const previousPersistedConfig = hasPersistedConfig ? readFileSync(configPath) : undefined;
     const hadStoredAccount = (runtimeConfig.codexAccounts ?? [])
       .some(account => !account.isMain && account.id === accountId);
     const hadVisiblePickerBinding = hadStoredAccount

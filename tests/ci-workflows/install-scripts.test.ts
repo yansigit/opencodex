@@ -83,7 +83,7 @@ describe("install scripts", () => {
   test("Node can import the package main without executing the CLI", () => {
     const result = spawnSync("node", [
       "-e",
-      "import('./bin/package-main.mjs').then(m => { if (m.cliCommand !== 'ocx') process.exit(2); })",
+      "import('./bin/package-main.mjs').then(m => { if (m.cliCommand !== 'ocx' || m.packageName !== '@yansigit/opencodex') process.exit(2); })",
     ], {
       cwd: repoRoot,
       encoding: "utf8",

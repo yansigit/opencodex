@@ -105,19 +105,7 @@ function normalizeProfile(data: DesktopResponse): DesktopProfile {
       sonnet: data.profile.defaults.sonnet ?? null,
       haiku: data.profile.defaults.haiku ?? null,
     },
-    ...(data.profile.appliedFingerprint !== undefined ? { appliedFingerprint: data.profile.appliedFingerprint } : {}),
-    ...(data.profile.appliedAt !== undefined ? { appliedAt: data.profile.appliedAt } : {}),
   };
-}
-
-function mergeCatalogConflict(draft: DesktopProfile, fresh: DesktopResponse, route?: string): DesktopProfile {
-  const next = cloneProfile(draft);
-  const freshAssignment = route ? fresh.profile.assignments[route] : undefined;
-  if (route && freshAssignment) next.assignments[route] = { ...freshAssignment };
-  for (const family of FAMILIES) {
-    if (next.defaults[family] === route) next.defaults[family] = fresh.profile.defaults[family] ?? null;
-  }
-  return next;
 }
 
 function errorMessage(value: unknown, fallback: string): string {
@@ -194,7 +182,6 @@ export default function ClaudeDesktop({
   // a family's fold is a durable preference, but which single model you were inspecting
   // is not, and restoring five open rows on reload would rebuild the wall this removes.
   const [openRows, setOpenRows] = useState<Record<string, boolean>>({});
-  const dirtyRef = useRef(false);
   const importRef = useRef<HTMLInputElement>(null);
   const fetchDesktop = useCallback(async (signal: AbortSignal): Promise<CachedDesktop> => {
     const response = await fetch(`${apiBase}/api/claude-desktop`, { signal });
@@ -210,11 +197,9 @@ export default function ClaudeDesktop({
     if (signal.aborted) throw new Error("Claude Desktop request aborted");
     // A successful read is authoritative until the user edits again. Updating drafts here keeps
     // the established save→reload contract without synchronizing resource data in an effect.
-    if (!dirtyRef.current) {
-      setProfile(normalized);
-      setSavedProfile(cloneProfile(normalized));
-      setDestinations(Object.fromEntries(payload.models.map(model => [model.route, normalized.assignments[model.route]?.family ?? "opus"])));
-    }
+    setProfile(normalized);
+    setSavedProfile(cloneProfile(normalized));
+    setDestinations(Object.fromEntries(payload.models.map(model => [model.route, normalized.assignments[model.route]?.family ?? "opus"])));
     // Fold empty families on load, but only while the user has no stored preference.
     // Doing it here rather than per render means a later move or import can never
     // re-fold a section the user opened.
@@ -263,22 +248,11 @@ export default function ClaudeDesktop({
     () => profile !== null && savedProfile !== null && JSON.stringify(profile) !== JSON.stringify(savedProfile),
     [profile, savedProfile],
   );
-  useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
 
   const modelsByFamily = useMemo(() => {
     const grouped = Object.fromEntries(FAMILIES.map(family => [family, [] as DesktopModel[]])) as Record<Family, DesktopModel[]>;
     if (!data || !profile) return grouped;
-    for (const model of data.models) {
-      if (model.available) grouped[profile.assignments[model.route]?.family ?? "opus"].push(model);
-    }
-    return grouped;
-  }, [data, profile]);
-  const unavailableByFamily = useMemo(() => {
-    const grouped = Object.fromEntries(FAMILIES.map(family => [family, [] as DesktopModel[]])) as Record<Family, DesktopModel[]>;
-    if (!data || !profile) return grouped;
-    for (const model of data.models) {
-      if (!model.available) grouped[profile.assignments[model.route]?.family ?? "opus"].push(model);
-    }
+    for (const model of data.models) grouped[profile.assignments[model.route]?.family ?? "opus"].push(model);
     return grouped;
   }, [data, profile]);
 
@@ -287,16 +261,10 @@ export default function ClaudeDesktop({
     for (const family of FAMILIES) {
       const active = modelsByFamily[family].filter(model => model.available).map(model => model.route).sort();
       const stored = profile?.defaults[family] ?? null;
-      result[family] = stored && active.includes(stored) ? stored : null;
+      result[family] = stored && active.includes(stored) ? stored : (active[0] ?? null);
     }
     return result;
   }, [modelsByFamily, profile]);
-
-  const invalidDefaults = useMemo(() => {
-    if (!profile) return FAMILIES;
-    return FAMILIES.filter(family => modelsByFamily[family].length > 0 && !effectiveDefaults[family]);
-  }, [effectiveDefaults, modelsByFamily, profile]);
-  const canPersist = invalidDefaults.length === 0;
 
   // The status poll is a separate resource: visibility pauses it without unmounting the
   // profile editor, which keeps its drafts intact across Code/Desktop tab switches.
@@ -322,14 +290,17 @@ export default function ClaudeDesktop({
 
   const moveModel = (route: string, family: Family) => {
     if (!profile || profile.assignments[route]?.family === family) return;
-    dirtyRef.current = true;
     setProfile(current => {
       if (!current) return current;
       const previous = current.assignments[route];
       if (!previous || previous.family === family) return current;
       const assignments = { ...current.assignments, [route]: { ...previous, family } };
       const defaults = { ...current.defaults };
-      if (defaults[previous.family] === route) defaults[previous.family] = null;
+      if (defaults[previous.family] === route) {
+        defaults[previous.family] = Object.keys(assignments)
+          .filter(key => key !== route && assignments[key].family === previous.family)
+          .sort()[0] ?? null;
+      }
       if (defaults[family] === null) defaults[family] = route;
       return { ...current, assignments, defaults };
     });
@@ -346,7 +317,7 @@ export default function ClaudeDesktop({
   };
 
   const save = async (applyAfter: boolean) => {
-    if (!profile || pending || !canPersist) return;
+    if (!profile || pending) return;
     setPending("save");
     setMessage(null);
     try {
@@ -355,27 +326,8 @@ export default function ClaudeDesktop({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ profile }),
       });
-      if (!response.ok) {
-        const body = response.text ? await response.text() : "";
-        const parsed = body ? JSON.parse(body) as { error?: unknown; current?: DesktopResponse } : {};
-        const error = parsed.error;
-        if (response.status === 409 && error && typeof error === "object" && "code" in error && error.code === "catalog_changed" && parsed.current) {
-          const route = "route" in error && typeof error.route === "string" ? error.route : undefined;
-          const reconciled = mergeCatalogConflict(profile, parsed.current, route);
-          setProfile(reconciled);
-          setSavedProfile(cloneProfile(parsed.current.profile));
-          if (route) {
-            setDestinations(current => ({ ...current, [route]: reconciled.assignments[route]?.family ?? "opus" }));
-          }
-          dirtyRef.current = true;
-          void desktopResource.refresh();
-          setMessage({ tone: "warn", text: t("claudeDesktop.catalogChanged") });
-          return;
-        }
-        throw new Error(typeof error === "string" ? error : t("claudeDesktop.saveFailed"));
-      }
+      await readJsonOrThrow<{ error?: string }>(response, t("claudeDesktop.saveFailed"));
       setSavedProfile(cloneProfile(profile));
-      dirtyRef.current = false;
 
       if (applyAfter) {
         setPending("apply");
@@ -429,9 +381,6 @@ export default function ClaudeDesktop({
       const candidate = JSON.parse(await file.text()) as Partial<DesktopProfile>;
       if (candidate.version !== 1 || !candidate.assignments || !candidate.defaults) throw new Error(t("claudeDesktop.importExpected"));
       const imported = normalizeProfile({ ...data!, profile: candidate as DesktopProfile });
-      delete imported.appliedFingerprint;
-      delete imported.appliedAt;
-      dirtyRef.current = true;
       setProfile(imported);
       setMessage({ tone: "ok", text: t("claudeDesktop.importReady") });
       setAnnouncement(t("claudeDesktop.importedAnnounce"));
@@ -533,55 +482,24 @@ export default function ClaudeDesktop({
       <div className="claude-profile-bar">
         <span className={`claude-dirty${dirty ? " active" : ""}`}>{dirty ? t("claudeDesktop.unsaved") : t("claudeDesktop.upToDate")}</span>
         <div className="claude-save-actions">
-          <button type="button" className="btn btn-ghost" disabled={!dirty || pending !== null || !canPersist} onClick={() => void save(false)}>
+          <button type="button" className="btn btn-ghost" disabled={!dirty || pending !== null} onClick={() => void save(false)}>
             {pending === "save" ? t("claudeDesktop.saving") : t("common.save")}
           </button>
-          <button type="button" className="btn btn-primary" disabled={pending !== null || !canPersist} onClick={() => void save(true)}>
+          <button type="button" className="btn btn-primary" disabled={pending !== null} onClick={() => void save(true)}>
             {pending === "apply" ? t("claudeDesktop.applying") : pending === "save" ? t("claudeDesktop.saving") : status?.desiredEnabled === false ? t("claudeDesktop.enableApply") : t("claudeDesktop.saveApply")}
           </button>
         </div>
-      </div>
-
-      <div className="panel claude-defaults" aria-label={t("claudeDesktop.assignmentsLabel")}>
-        {FAMILIES.map(family => {
-          const available = modelsByFamily[family];
-          return (
-            <label key={family} className="claude-default-select">
-              <span>{t(FAMILY_KEYS[family])}</span>
-              <select
-                className="input"
-                value={effectiveDefaults[family] ?? ""}
-                disabled={available.length === 0}
-                onChange={event => {
-                  dirtyRef.current = true;
-                  setProfile(current => current && ({
-                    ...current,
-                    defaults: { ...current.defaults, [family]: event.target.value || null },
-                  }));
-                }}
-              >
-                <option value="">{t("claudeDesktop.chooseDefault")}</option>
-                {available.map(model => (
-                  <option key={model.route} value={model.route}>{model.label} — {model.route}</option>
-                ))}
-              </select>
-            </label>
-          );
-        })}
       </div>
 
       {data.models.length === 0 && (
         <EmptyState title={t("claudeDesktop.emptyTitle")}>{t("claudeDesktop.emptyHint")}</EmptyState>
       )}
 
-      <details className="claude-mapping-details">
-        <summary>{t("claudeDesktop.mappingDetails")}</summary>
-        <div className="ocx-group-stack" aria-label={t("claudeDesktop.assignmentsLabel")}>
+      <div className="ocx-group-stack" aria-label={t("claudeDesktop.assignmentsLabel")}>
         {FAMILIES.map(family => {
           // Render-only narrowing: the lane header, effectiveDefaults and every assignment keep
           // reading the full list, so filtering can never change what Claude Desktop resolves.
           const all = modelsByFamily[family];
-          const unavailable = unavailableByFamily[family];
           const lane = laneView(all, laneSearch[family] ?? "", laneLimit[family] ?? LANE_PAGE);
           const isCollapsed = collapsedFamilies.has(family);
           const familyDefault = effectiveDefaults[family];
@@ -622,7 +540,10 @@ export default function ClaudeDesktop({
                 </button>
               </h3>
               {/* Warnings stay outside the fold — never hide state the user must act on. */}
-              {all.length > 0 && !effectiveDefaults[family] && <span className="claude-default-needed">{t("claudeDesktop.chooseDefault")}</span>}
+              {all.length > 0 && profile.defaults[family] === null && <span className="claude-default-needed">{t("claudeDesktop.chooseDefault")}</span>}
+              {familyDefault && familyDefault !== profile.defaults[family] && (
+                <span className="claude-default-needed" title={familyDefault}>{t("claudeDesktop.temporaryDefault")}</span>
+              )}
             </header>
 
             {!isCollapsed && (
@@ -645,7 +566,7 @@ export default function ClaudeDesktop({
             )}
 
             <div className="claude-lane-models">
-              {all.length === 0 && unavailable.length === 0 ? (
+              {all.length === 0 ? (
                 <div className="claude-lane-empty">{t("claudeDesktop.laneEmpty")}</div>
               ) : lane.noMatch ? (
                 <div className="claude-lane-empty">{t("claudeDesktop.laneNoMatch")}</div>
@@ -702,6 +623,10 @@ export default function ClaudeDesktop({
 
                     {rowOpen && (
                     <div className="claude-model-body" id={`claude-model-body-${model.route}`}>
+                    {effectiveDefaults[family] === model.route && profile.defaults[family] !== model.route && (
+                      <span className="claude-effective-default">{t("claudeDesktop.temporaryDefault")}</span>
+                    )}
+
                     <div className="claude-field">
                       <span>{t("claudeDesktop.alias")}</span>
                       <code className="claude-alias" title={assignment.alias}>{assignment.alias}</code>
@@ -713,10 +638,7 @@ export default function ClaudeDesktop({
                         name={`default-${family}`}
                         checked={profile.defaults[family] === model.route}
                         disabled={!model.available}
-                        onChange={() => {
-                          dirtyRef.current = true;
-                          setProfile(current => current && ({ ...current, defaults: { ...current.defaults, [family]: model.route } }));
-                        }}
+                        onChange={() => setProfile(current => current && ({ ...current, defaults: { ...current.defaults, [family]: model.route } }))}
                       />
                       {t("claudeDesktop.useAsDefault", { family: t(FAMILY_KEYS[family]) })}
                     </label>
@@ -755,20 +677,13 @@ export default function ClaudeDesktop({
                   {t("models.showMore", { n: lane.hidden })}
                 </button>
               )}
-              {unavailable.length > 0 && (
-                <details className="claude-lane-empty">
-                  <summary>{t("claudeDesktop.unavailable")} ({unavailable.length})</summary>
-                  <div>{unavailable.map(model => model.route).join(", ")}</div>
-                </details>
-              )}
             </div>
             </div>
             )}
           </section>
           );
         })}
-        </div>
-      </details>
+      </div>
     </>
   );
 }

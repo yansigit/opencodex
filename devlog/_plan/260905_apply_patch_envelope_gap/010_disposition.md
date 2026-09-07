@@ -107,3 +107,4 @@ It is *not* established as the cause. The decorated form predates the sentence, 
 direct A/B probe came back null on both arms (`000_survey.md`). Any change here ships
 as a readability improvement with an unproven effect on the defect rate. Claiming more
 than that would be unsupported by the evidence gathered.
+

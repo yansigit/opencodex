@@ -1,3 +1,4 @@
+import { isOpenCodeGo, normalizeOpenCodeGoAgentMessages } from "./opencode-go";
 import { createHash } from "node:crypto";
 import type { IncomingMeta, ProviderAdapter } from "./base";
 import { namespacedToolName, type AdapterEvent, type OcxParsedRequest, type OcxProviderConfig, type OcxUsage, type TierDecision } from "../types";
@@ -621,7 +622,7 @@ function isLiteSparkRequestBody(body: unknown): boolean {
   if (!isPlainObject(body)) return false;
   const model = typeof body.model === "string" ? body.model : "";
   if (!model.includes("codex-spark")) return false;
-  const input = (body as Record<string, unknown>).input;
+  const input = body.input;
   if (!Array.isArray(input)) return false;
   for (const item of input) {
     if (!isPlainObject(item) || item.type !== "additional_tools" || !Array.isArray(item.tools)) continue;
@@ -2375,6 +2376,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         parsed._rawBody,
         forward || parsed._previousResponseInputExpanded === true,
       );
+      if (!forward && isOpenCodeGo(provider.baseUrl)) outBody = normalizeOpenCodeGoAgentMessages(outBody);
       outBody = mapRoutedResponsesReasoningEffort(outBody, provider, parsed.modelId);
       // stripPreviousResponseId() intentionally returns its input on a no-op. Detach before the
       // tier write so a force-fast/default decision can never mutate parsed._rawBody.
@@ -2445,10 +2447,9 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       }
       if ((!isCanonicalOpenAiForwardProvider(provider) || canonicalSpark) && !isLiteSparkRequestBody(outBody)) {
         // Codex 0.147 emits private namespace tool groups, while public/third-party Responses
-        // gateways accept only flat tool variants. Spark keeps the reserved `functions` group intact
-        // (#3217) via stripSparkCompatibility, so routed namespace lowering is skipped for spark.
-        // lowering so namespace children already carry their final public kind before promotion.
-        const rewritten = rewriteRoutedNamespaceToolsForUpstream(outBody);
+        // gateways accept only flat tool variants. Run after custom/tool-search lowering so
+        // namespace children already carry their final public kind before they are promoted.
+        const rewritten = rewriteRoutedNamespaceToolsForUpstream(outBody, convertedRoutedCustomToolNames);
         outBody = rewritten.body;
         convertedRoutedNamespaceToolAliases = rewritten.aliases;
       }

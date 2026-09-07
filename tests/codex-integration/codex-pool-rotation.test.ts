@@ -43,12 +43,9 @@ import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src
 let testDir = "";
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
-
 const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function installScratchHome(): void {
-  // These tests exercise account routing, not Windows ACL behavior. Stub both runners so
-  // optional hardening never spawns a real icacls.exe child that can hold the fixture open.
   setIcaclsRunnerForTests(() => ICACLS_OK);
   setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   testDir = mkdtempSync(join(tmpdir(), "ocx-codex-pool-rotation-"));
@@ -57,8 +54,6 @@ function installScratchHome(): void {
 }
 
 async function removeScratchHome(): Promise<void> {
-  // Settle hardening before restoring env/removing the directory: Windows holds the directory
-  // open until the child exits, and a failed teardown otherwise poisons subsequent tests.
   await flushConfigDirHardeningForTests();
   setIcaclsRunnerForTests(null);
   setAsyncIcaclsRunnerForTests(null);

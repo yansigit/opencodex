@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { OcxConfig } from "../../src/types/config";
 import { providerObservationAccountKeyForTests } from "../../src/providers/quota";
-import { setProviderKeychainEntryFactoryForTests } from "../../src/providers/key-store";
 
 describe("provider observation account key", () => {
   function configWithKey(apiKey: string): OcxConfig {
@@ -38,21 +37,6 @@ describe("provider observation account key", () => {
     const first = providerObservationAccountKeyForTests("deepseek", configWithKey("sk-stable-key"));
     const second = providerObservationAccountKeyForTests("deepseek", configWithKey("sk-stable-key"));
     expect(first).toBe(second);
-  });
-
-  test("keychain and plaintext forms of the same key share one observation identity", () => {
-    setProviderKeychainEntryFactoryForTests((_service, account) => ({
-      getPassword: () => account === "deepseek" ? "sk-stable-key" : null,
-      setPassword: () => {},
-      deletePassword: () => true,
-    }));
-    try {
-      const plaintext = providerObservationAccountKeyForTests("deepseek", configWithKey("sk-stable-key"));
-      const keychain = providerObservationAccountKeyForTests("deepseek", configWithKey("keychain:deepseek"));
-      expect(keychain).toBe(plaintext);
-    } finally {
-      setProviderKeychainEntryFactoryForTests(null);
-    }
   });
 
   test("a provider with no key at all still yields a usable identity", () => {

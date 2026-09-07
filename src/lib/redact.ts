@@ -275,6 +275,13 @@ export function redactSecretString(value: string): string {
   return redacted;
 }
 
+export function redactErrorMessage(value: string): string {
+  return redactSecretString(value).replace(
+    /[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi,
+    match => redactUrlForLog(match),
+  );
+}
+
 /** Shared bounded representation for caller-controlled scalar metadata stored in logs. */
 export function sanitizeLogMetadataString(value: unknown, maxLength = 64): string | undefined {
   if (typeof value !== "string" || !Number.isInteger(maxLength) || maxLength < 1) return undefined;
@@ -322,17 +329,8 @@ export function redactUrlForLog(url: string): string {
     parsed.hash = "";
     return parsed.toString();
   } catch {
-    const stripped = (url.split(/[?#]/)[0] ?? url).replace(/:\/\/[^@\s]+@/g, "://");
-    return redactSecretString(stripped);
+    return redactSecretString(url.split("?")[0] ?? url);
   }
-}
-
-/** Redact credentials and userinfo from arbitrary diagnostic text. */
-export function redactErrorMessage(value: string): string {
-  return redactSecretString(value).replace(
-    /[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi,
-    match => redactUrlForLog(match),
-  );
 }
 
 const USER_HOME_PATH_PATTERNS: Array<[RegExp, string]> = [

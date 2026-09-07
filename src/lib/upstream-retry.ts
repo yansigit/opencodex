@@ -17,7 +17,7 @@
 import { clearableDeadline } from "./abort";
 
 // 1 initial + 2 retries: the pool may hold more than one stale socket.
-const RESET_RETRY_MAX_ATTEMPTS = 1;
+const RESET_RETRY_MAX_ATTEMPTS = 3;
 const RESET_RETRY_BASE_DELAY_MS = 150;
 const RESET_RETRY_MAX_DELAY_MS = 1_000;
 
@@ -250,7 +250,11 @@ export interface TransientRetryOptions extends ResetRetryOptions {
   slowAttemptMs?: number;
   /** Opt in to replaying transient 5xx responses (up to three total sends). */
   replayTransientFailures?: boolean;
-  /** Report the exact send count to callers sharing one budget across request legs. */
+  /**
+   * Reports how many upstream sends this call actually consumed, so a caller that spans
+   * several legs of one request (initial send, then a 429/account-recovery refetch) can
+   * keep them on ONE budget instead of handing each leg a fresh one.
+   */
   onSendsConsumed?: (sends: number) => void;
 }
 
@@ -370,53 +374,71 @@ export async function fetchWithTransientRetry(
 ): Promise<Response> {
   const configuredBudget = Math.max(
     1,
-    opts.attempts ?? (opts.replayTransientFailures ? TRANSIENT_RETRY_MAX_ATTEMPTS : 1),
+    opts.attempts ?? TRANSIENT_RETRY_MAX_ATTEMPTS,
   );
   const budget = opts.replayBudget
     ? Math.min(configuredBudget, Math.max(1, opts.replayBudget.remaining + 1))
     : configuredBudget;
   const slowAttemptMs = opts.slowAttemptMs ?? TRANSIENT_RETRY_SLOW_ATTEMPT_MS;
   const transientStatuses: number[] = [];
+  // `attempts` is ONE total-send budget shared with the inner reset layer, not a per-layer
+  // count. Forwarding it into every `fetchWithResetRetry` made the two multiply: with
+  // `attempts: 3` the outer loop ran 3 transient rounds and each round independently retried
+  // 3 connection resets, so a single call could emit 9 upstream sends — and 10 could emit 100.
+  // That was harmless only because no caller passed `attempts`; the provider-level
+  // `transientRetryOn5xx` policy is the first one that does, and multiplying load against an
+  // already-failing provider is worse than not retrying at all.
   let sent = 0;
   const countedFetch: ReplayableFetch = (recovery) => {
     if (sent > 0 && opts.replayBudget) opts.replayBudget.remaining -= 1;
+    // Incremented BEFORE the await so a rejected send still consumes budget; counting only
+    // successes would let a reset storm loop without bound.
     sent += 1;
     return doFetch(recovery);
   };
+  // Floor of 1 keeps the inner call legal once the budget is spent; the loop condition, not a
+  // zero-attempt inner call, is what actually stops the retries.
   const remaining = () => Math.max(1, budget - sent);
+  // Reported in `finally` rather than at each exit: this function returns from five places
+  // and throws from one, and a caller sharing the budget across request legs must be told the
+  // real count on every one of them.
   try {
-    let attemptStart = Date.now();
-    let res = await fetchWithResetRetry(countedFetch, {
-      ...opts,
-      replayBudget: undefined,
-      attempts: remaining(),
+  let attemptStart = Date.now();
+  let res = await fetchWithResetRetry(countedFetch, { ...opts, replayBudget: undefined, attempts: remaining() });
+  for (let attempt = 0; sent < budget; attempt++) {
+    if (res.ok || !isTransientUpstreamStatus(res.status)) return res;
+    // Checked before cancelResponseBodyBestEffort so an already-aborted caller never receives
+    // a response whose body we just cancelled.
+    if (opts.abortSignal?.aborted) return res;
+    if (Date.now() - attemptStart > slowAttemptMs) return res;
+    console.warn(
+      `[upstream-retry] transient ${res.status}${opts.label ? ` (${opts.label})` : ""} — retrying (${sent + 1}/${budget})`,
+    );
+    const delay = retryBackoffDelayMs(attempt, {
+      baseDelayMs: TRANSIENT_RETRY_BASE_DELAY_MS,
+      maxDelayMs: TRANSIENT_RETRY_MAX_DELAY_MS,
+      headers: res.headers,
     });
-    for (let attempt = 0; sent < budget; attempt++) {
-      if (res.ok || !isTransientUpstreamStatus(res.status)) return res;
-      if (opts.abortSignal?.aborted || Date.now() - attemptStart > slowAttemptMs) return res;
-      console.warn(
-        `[upstream-retry] transient ${res.status}${opts.label ? ` (${opts.label})` : ""} — retrying (${sent + 1}/${budget})`,
+    cancelResponseBodyBestEffort(res);
+    // Throws on abort (see sleepWithAbort): the rejection propagates, and the body we just
+    // cancelled belonged to a response we were discarding anyway.
+    await sleepWithAbort(delay, opts.abortSignal);
+    attemptStart = Date.now();
+    transientStatuses.push(res.status);
+    try {
+      res = await fetchWithResetRetry(
+        countedFetch,
+        { ...opts, replayBudget: undefined, attempts: remaining() },
+        "transient-5xx",
       );
-      const delay = retryBackoffDelayMs(attempt, {
-        baseDelayMs: TRANSIENT_RETRY_BASE_DELAY_MS,
-        maxDelayMs: TRANSIENT_RETRY_MAX_DELAY_MS,
-        headers: res.headers,
-      });
-      cancelResponseBodyBestEffort(res);
-      await sleepWithAbort(delay, opts.abortSignal);
-      attemptStart = Date.now();
-      transientStatuses.push(res.status);
-      try {
-        res = await fetchWithResetRetry(countedFetch, {
-          ...opts,
-          replayBudget: undefined,
-          attempts: remaining(),
-        }, "transient-5xx");
-      } catch (err) {
-        throw new UpstreamRetryEvidenceError(transientStatuses, err);
-      }
+    } catch (err) {
+      // Keep the prior 5xx evidence attached: the origin already responded, so
+      // this rejection is not pre-connection and must not classify as neutral.
+      throw new UpstreamRetryEvidenceError(transientStatuses, err);
     }
-    return res;
+  }
+  // Budget exhausted: the last response is returned with its body intact.
+  return res;
   } finally {
     opts.onSendsConsumed?.(sent);
   }

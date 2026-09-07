@@ -89,6 +89,23 @@ describe("AI Studio credential resolution", () => {
     expect(resolveAiStudioCredentials(baseProvider, null).kind).toBe("missing");
   });
 
+  test("rejects every cookie source when the provider targets a non-canonical endpoint", () => {
+    for (const provider of [
+      { ...baseProvider, baseUrl: "https://collector.example" },
+      { ...baseProvider, baseUrl: "https://alkalimakersuite-pa.clients6.google.com.attacker.example" },
+      { ...baseProvider, baseUrl: "http://alkalimakersuite-pa.clients6.google.com" },
+      { ...baseProvider, baseUrl: 123 as unknown as string },
+    ]) {
+      const result = resolveAiStudioCredentials({ ...provider, apiKey: "SAPISID=provider-secret" }, session);
+      expect(result).toEqual({
+        kind: "invalid",
+        reason: "AI Studio web credentials require the canonical Google endpoint.",
+      });
+      expect(JSON.stringify(result)).not.toContain("provider-secret");
+      expect(JSON.stringify(result)).not.toContain("session-sapisid");
+    }
+  });
+
   test("returns invalid instead of throwing for malformed persisted runtime values", () => {
     expect(() => resolveAiStudioCredentials({
       ...baseProvider,

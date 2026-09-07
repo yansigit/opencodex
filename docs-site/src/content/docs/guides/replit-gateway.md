@@ -4,7 +4,7 @@ description: Pair opencodex with your own Replit deployment that relays OpenAI C
 ---
 
 The **Replit gateway companion** is a user-owned Bun service in
-[`integrations/replit-gateway`](https://github.com/lidge-jun/opencodex/tree/dev/integrations/replit-gateway)
+[`integrations/replit-gateway`](https://github.com/yansigit/opencodex/tree/dev/integrations/replit-gateway)
 that runs **inside your Replit deployment**. It reads Replit-managed AI Integration credentials from
 the Repl environment and exposes two native wire endpoints to opencodex:
 
@@ -39,7 +39,7 @@ every gateway request.
 - A running opencodex proxy (`ocx start`) for dashboard pairing or CLI install.
 
 Deploy and configure the gateway using
-[`integrations/replit-gateway/README.md`](https://github.com/lidge-jun/opencodex/blob/dev/integrations/replit-gateway/README.md).
+[`integrations/replit-gateway/README.md`](https://github.com/yansigit/opencodex/blob/dev/integrations/replit-gateway/README.md).
 
 ## Deploy the gateway (summary)
 
@@ -163,7 +163,7 @@ The gateway does not retry billable upstream calls automatically.
 
 ## Gateway limits (v1 contract)
 
-Default limits from [`replit-gateway-contract-v1.json`](https://github.com/lidge-jun/opencodex/blob/dev/docs/superpowers/specs/replit-gateway-contract-v1.json)
+Default limits from [`replit-gateway-contract-v1.json`](https://github.com/yansigit/opencodex/blob/dev/docs/superpowers/specs/replit-gateway-contract-v1.json)
 (status **`experimental-pending-canary`**):
 
 | Limit | Default |
@@ -253,7 +253,7 @@ The Replit companion **does not** meet that bar today.
 | Replit `AI_INTEGRATIONS_*` env names and base URLs | **Unverified observed convention.** Not published as an official off-platform contract; live Repl canary pending. |
 | Terms of service and operating legal entity | **Primary source:** [Replit Terms of Service](https://replit.com/terms-of-service) — **Replit, Inc.**; Pro/Enterprise may be under [Commercial Agreement](https://replit.com/commercial-agreement). |
 | Resale / off-platform routing authorization | **Not obtained.** No written Replit authorization that users may expose their own AI Integrations deployment to an off-platform opencodex client. |
-| Named maintenance owner | **opencodex:** [@lidge-jun](https://github.com/lidge-jun) (project owner) and [@Ingwannu](https://github.com/Ingwannu) per [`MAINTAINERS.md`](https://github.com/lidge-jun/opencodex/blob/main/MAINTAINERS.md). **Replit:** not engaged as a partner for this workflow. |
+| Named maintenance owner | **opencodex:** [@lidge-jun](https://github.com/lidge-jun) (project owner) and [@Ingwannu](https://github.com/Ingwannu) per [`MAINTAINERS.md`](https://github.com/yansigit/opencodex/blob/main/MAINTAINERS.md). **Replit:** not engaged as a partner for this workflow. |
 | Citable verification date | **2026-08-22** — Replit AI Integrations docs and applicable Replit terms reviewed; no off-platform routing policy or official env contract found. |
 
 **Registry promotion blocked.** `replit` / `replit-anthropic` remain absent from
@@ -262,7 +262,7 @@ provider evidence exist. Users may still pair via the experimental custom workfl
 
 ## See also
 
-- Package README: [`integrations/replit-gateway/README.md`](https://github.com/lidge-jun/opencodex/blob/dev/integrations/replit-gateway/README.md)
-- Design spec: [`docs/superpowers/specs/2026-08-22-replit-gateway-design.md`](https://github.com/lidge-jun/opencodex/blob/dev/docs/superpowers/specs/2026-08-22-replit-gateway-design.md)
+- Package README: [`integrations/replit-gateway/README.md`](https://github.com/yansigit/opencodex/blob/dev/integrations/replit-gateway/README.md)
+- Design spec: [`docs/superpowers/specs/2026-08-22-replit-gateway-design.md`](https://github.com/yansigit/opencodex/blob/dev/docs/superpowers/specs/2026-08-22-replit-gateway-design.md)
 - [Providers](/guides/providers/) — auth modes and custom OpenAI-compatible providers
 - [Web dashboard](/guides/web-dashboard/) — Providers page

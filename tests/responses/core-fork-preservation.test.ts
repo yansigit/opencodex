@@ -67,9 +67,9 @@ describe("fork Responses core preservation", () => {
     expect(media).toBeGreaterThan(policy);
   });
 
-  test("wrapped quota retries retain live Reserve admission and native WS quota observation", () => {
-    const start = coreSource.indexOf("// Wrapped quota in 5xx");
-    const end = coreSource.indexOf("if (poolRetryOutcome !== undefined)", start);
+  test("transient retries retain live Reserve admission and native WS quota observation", () => {
+    const start = coreSource.indexOf("// Transient-5xx pre-stream retry");
+    const end = coreSource.indexOf("const opaqueBlobRecoveryGuard", start);
     const retry = coreSource.slice(start, end);
 
     expect(start).toBeGreaterThanOrEqual(0);

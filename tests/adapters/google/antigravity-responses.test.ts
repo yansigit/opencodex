@@ -313,7 +313,7 @@ describe("Antigravity Responses integration", () => {
       return completed();
     }) as typeof fetch;
     const response = await handleResponses(request(), config(), { model: "", provider: "" }, {});
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(401);
     expect(calls).toBe(0);
   });
 

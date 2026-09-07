@@ -6,7 +6,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Database } from "bun:sqlite";
 import { EXPORT_CLIENT_IDS } from "../../src/clients/config-export";
-import { diagnoseService, serviceLogPath } from "../../src/service";
 import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
@@ -65,6 +64,23 @@ describe("CLI subcommand help", () => {
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("Usage: ocx start [--port <port>]");
     expect(result.stdout).toContain("Start the proxy server and sync models to Codex.");
+  });
+
+  test("init help documents explicit overwrite consent and agent roles", () => {
+    const topLevel = runCli([]);
+    expectSpawnFinished(topLevel, "ocx help");
+    expect(topLevel.status).toBe(0);
+    expect(topLevel.stdout).toContain("ocx setup [--yes]");
+    expect(topLevel.stdout).toContain("ocx init [--yes]");
+    expect(topLevel.stdout).toContain("Subagents, roles, injection");
+
+    for (const command of ["init", "setup"]) {
+      const result = runCli(["help", command]);
+      expectSpawnFinished(result, `ocx help ${command}`);
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toContain(`Usage: ocx ${command} [--yes]`);
+    }
   });
 
   test("top-level help counts every export client and export help names them", () => {
@@ -198,13 +214,7 @@ describe("CLI subcommand help", () => {
       expect(result.stdout).toContain("Default provider: openai");
       expect(result.stdout).toContain("Codex autostart: disabled");
       expect(result.stdout).toContain("Service:");
-      const service = diagnoseService();
-      if (service.supported) {
-        expect(result.stdout).toContain(join(opencodexHome, "service.log"));
-      } else {
-        expect(result.stdout).toContain(`Service: ${service.summary}`);
-        expect(result.stdout).not.toContain(serviceLogPath());
-      }
+      expect(result.stdout).toContain(join(opencodexHome, "service.log"));
       expect(result.stdout).toContain("Codex autostart shim");
       // #2411: status must name the routing kind it already computes. The
       // proxy is down in this fixture, so the unused-proxy warning must stay

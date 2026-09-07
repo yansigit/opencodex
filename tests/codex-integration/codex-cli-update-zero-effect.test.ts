@@ -7,12 +7,6 @@ import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoPath, repoRoot } from "../helpers/repo-root";
 
 const roots: string[] = [];
-// Hosted Windows may spend more than 15 seconds loading a fresh published-launcher
-// child while the rest of its shard is saturated (promotion run 33753980703).
-// This is an outer startup envelope; the assertions below keep the zero-effect
-// behavior boundary exact.
-const LAUNCHER_CHILD_TIMEOUT_MS = 30_000;
-const LAUNCHER_TEST_TIMEOUT_MS = 35_000;
 afterEach(() => {
   for (const root of roots.splice(0)) removeTreeWithRetry(root);
 });
@@ -23,13 +17,13 @@ describe("Codex CLI updater zero-effect boundary", () => {
       repoPath("bin", "ocx.mjs"),
       "system", "codex-cli-update", "check", "--json",
     ], {
-      cwd: repoRoot(), encoding: "utf8", timeout: LAUNCHER_CHILD_TIMEOUT_MS,
+      cwd: repoRoot(), encoding: "utf8", timeout: 15_000,
       env: { ...process.env }, windowsHide: true,
     });
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("must use the published Node launcher");
-  }, LAUNCHER_TEST_TIMEOUT_MS);
+  });
 
   test("published Node launcher check neither executes the candidate launcher nor rewrites invalid state", () => {
     const root = mkdtempSync(join(tmpdir(), "ocx-codex-check-zero-effect-"));
@@ -48,7 +42,7 @@ describe("Codex CLI updater zero-effect boundary", () => {
     const result = spawnSync("node", [repoPath("bin", "ocx.mjs"), "system", "codex-cli-update", "check", "--json"], {
       cwd: repoRoot(),
       encoding: "utf8",
-      timeout: LAUNCHER_CHILD_TIMEOUT_MS,
+      timeout: 15_000,
       env: { ...process.env, OPENCODEX_HOME: home, CODEX_CLI_PATH: launcher },
       windowsHide: true,
     });
@@ -65,7 +59,7 @@ describe("Codex CLI updater zero-effect boundary", () => {
     }
     expect(readFileSync(statePath)).toEqual(before);
     expect(existsSync(marker)).toBe(false);
-  }, LAUNCHER_TEST_TIMEOUT_MS);
+  });
 
   test("published Node launcher rejects malformed updater input before any repair or candidate command", () => {
     const root = mkdtempSync(join(tmpdir(), "ocx-codex-invalid-zero-effect-"));
@@ -86,7 +80,7 @@ describe("Codex CLI updater zero-effect boundary", () => {
       "--ocx-internal-launch-proof=bad",
       "system", "codex-cli-update", "invalid",
     ], {
-      cwd: repoRoot(), encoding: "utf8", timeout: LAUNCHER_CHILD_TIMEOUT_MS,
+      cwd: repoRoot(), encoding: "utf8", timeout: 15_000,
       env: { ...process.env, OPENCODEX_HOME: home, CODEX_CLI_PATH: launcher }, windowsHide: true,
     });
     expect(result.error).toBeUndefined();
@@ -94,5 +88,5 @@ describe("Codex CLI updater zero-effect boundary", () => {
     expect(result.stderr).toContain("codex-cli-update action must be check");
     expect(readFileSync(statePath)).toEqual(before);
     expect(existsSync(marker)).toBe(false);
-  }, LAUNCHER_TEST_TIMEOUT_MS);
+  });
 });

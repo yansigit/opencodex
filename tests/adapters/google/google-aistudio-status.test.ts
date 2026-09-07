@@ -82,6 +82,35 @@ async function probe(config: OcxConfig): Promise<{ status: number; body: Record<
   return { status: res.status, body: await res.json() as Record<string, unknown> };
 }
 
+async function nativeLoginFetch(
+  server: { url: URL },
+  init: Omit<RequestInit, "method" | "headers"> & { headers?: HeadersInit } = {},
+  options: { includeCsrf?: boolean } = {},
+): Promise<Response> {
+  const origin = server.url.origin;
+  const bootstrap = await fetch(new URL("/opencodex-session", server.url), {
+    headers: { Host: server.url.host },
+  });
+  expect(bootstrap.status).toBe(200);
+  const html = await bootstrap.text();
+  const meta = (name: string): string =>
+    new RegExp(`<meta name="${name}" content="([^"]*)">`).exec(html)?.[1] ?? "";
+  const token = meta("opencodex-session-token");
+  const csrf = meta("opencodex-session-csrf");
+  expect(token).not.toBe("");
+  expect(csrf).not.toBe("");
+  const headers = new Headers(init.headers);
+  headers.set("Origin", origin);
+  headers.set("x-opencodex-api-key", token);
+  headers.set("x-opencodex-gui-origin", origin);
+  if (options.includeCsrf !== false) headers.set("x-opencodex-csrf-token", csrf);
+  return fetch(new URL("/api/aistudio/login/native", server.url), {
+    ...init,
+    method: "POST",
+    headers,
+  });
+}
+
 describe("AI Studio status & re-auth", () => {
   test("safeConfigDTO exposes compatibility session state and needs-reauth auth state", () => {
     const dto = safeConfigDTO(cfg()) as any;
@@ -213,8 +242,24 @@ describe("AI Studio status & re-auth", () => {
     const server = startServer(0, { runAiStudioNativeLogin: async () => ({ kind: "unsupported" }) });
     try {
       const res = await fetch(new URL("/api/aistudio/login/native", server.url), { method: "POST" });
-      expect([200, 400, 500].includes(res.status)).toBe(true);
+      expect(res.status).toBe(401);
       expect(res.status).not.toBe(404);
+    } finally { await server.stop(true); }
+  });
+
+  test("native login refuses a minted GUI session without its CSRF token", async () => {
+    cfg();
+    let invoked = false;
+    const server = startServer(0, {
+      runAiStudioNativeLogin: async () => {
+        invoked = true;
+        return { kind: "unsupported" };
+      },
+    });
+    try {
+      const res = await nativeLoginFetch(server, {}, { includeCsrf: false });
+      expect(res.status).toBe(401);
+      expect(invoked).toBe(false);
     } finally { await server.stop(true); }
   });
 
@@ -226,12 +271,14 @@ describe("AI Studio status & re-auth", () => {
     const login = new Promise<{ kind: "authenticated"; sessionPath: string }>(resolve => { resolveLogin = resolve; });
     const server = startServer(0, { runAiStudioNativeLogin: async () => login });
     try {
-      const responsePromise = fetch(new URL("/api/aistudio/login/native", server.url), { method: "POST" });
+      const responsePromise = nativeLoginFetch(server);
       await new Promise(resolve => setTimeout(resolve, 5));
       resolveLogin({ kind: "authenticated", sessionPath });
       const res = await responsePromise;
       expect(res.status).toBe(200);
-      expect((await res.json()).ok).toBe(true);
+      const body = await res.json() as Record<string, unknown>;
+      expect(body.ok).toBe(true);
+      expect(body).not.toHaveProperty("sessionPath");
     } finally { await server.stop(true); }
   });
 
@@ -243,11 +290,11 @@ describe("AI Studio status & re-auth", () => {
       runAiStudioNativeLogin: async () => ({ kind: "authenticated", sessionPath }),
     });
     try {
-      const res = await fetch(new URL("/api/aistudio/login/native", server.url), { method: "POST" });
+      const res = await nativeLoginFetch(server);
       expect(res.status).toBe(502);
       const body = await res.json() as { ok?: boolean; error?: string };
       expect(body.ok).toBe(false);
-      expect(String(body.error)).not.toContain("re-authentication required");
+      expect(body.error).toBe("AI Studio connection probe failed");
     } finally { await server.stop(true); }
   });
 
@@ -270,10 +317,7 @@ describe("AI Studio status & re-auth", () => {
     });
     try {
       const controller = new AbortController();
-      const responsePromise = fetch(new URL("/api/aistudio/login/native", server.url), {
-        method: "POST",
-        signal: controller.signal,
-      });
+      const responsePromise = nativeLoginFetch(server, { signal: controller.signal });
       // Abort only after the server has entered the injected login. A fixed sleep can
       // cancel fetch before a loaded Windows runner dispatches the request at all.
       await loginStarted;
@@ -310,7 +354,7 @@ describe("AI Studio status & re-auth", () => {
     } finally { await server.stop(true); }
   });
 
-  test("native login rejects a cross-origin request even with valid admission", async () => {
+  test("native login rejects data-plane credentials and requires a GUI session with CSRF", async () => {
     const c = cfg();
     c.hostname = "0.0.0.0";
     c.apiKeys = [{ id: "test-key", name: "test", key: "remote-secret", createdAt: new Date().toISOString() }];
@@ -325,7 +369,33 @@ describe("AI Studio status & re-auth", () => {
           "X-OpenCodex-API-Key": "remote-secret",
         },
       });
-      expect(res.status).toBe(403);
+      expect(res.status).toBe(401);
     } finally { await server.stop(true); }
+  });
+
+  test("native login redacts daemon errors and thrown paths", async () => {
+    cfg();
+    const failed = startServer(0, {
+      runAiStudioNativeLogin: async () => ({ kind: "failed", error: `failed at ${testDir}/aistudio-session.json` }),
+    });
+    try {
+      const res = await nativeLoginFetch(failed);
+      expect(res.status).toBe(500);
+      const text = await res.text();
+      expect(text).toContain("Native AI Studio login failed");
+      expect(text).not.toContain(testDir);
+      expect(text).not.toContain("aistudio-session.json");
+    } finally { await failed.stop(true); }
+
+    const thrown = startServer(0, {
+      runAiStudioNativeLogin: async () => { throw new Error(`boom ${testDir}/private`); },
+    });
+    try {
+      const res = await nativeLoginFetch(thrown);
+      expect(res.status).toBe(500);
+      const text = await res.text();
+      expect(text).toContain("Native AI Studio login failed");
+      expect(text).not.toContain(testDir);
+    } finally { await thrown.stop(true); }
   });
 });

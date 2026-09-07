@@ -64,7 +64,7 @@ Usage:
   ocx account <sub>           Accounts, login/reauth, key pools, and quota controls
   ocx models <sub>            Live/custom models, visibility, context, and shadow calls
   ocx alias <sub>             Short names for providers and models (list, set, rm, defaults)
-  ocx combo <sub>             Combo failover/round-robin routing
+  ocx combo <sub>             Combo routing strategies and failover
   ocx agent <sub>             Subagents, roles, injection, effort caps, and sidecars
   ocx effort [sub]            Inspect and configure reasoning effort caps and defaults
   ocx observe <sub>           Logs, usage, storage, memory, and debug data
@@ -80,9 +80,9 @@ Usage:
   ocx export --client <id>    Print a client config wired to the running proxy (12 clients)
   ocx integration client <sub> Enable, disable, inspect or roll back a client integration
   ocx grok <sub>              Grok Build model selection and apply
-  ocx system <sub>            Runtime settings, startup, sync, and updates
+  ocx system <sub>            Runtime settings, startup, sync, OpenCodex updates, and Codex CLI inspection
   ocx config <sub>            Validated configuration show/get/set/import/export
-  ocx lab <sub>               Compatibility Lab (status, run, oracle cursor)
+  ocx lab <sub>               Read-only Compatibility Lab projection inspection
   ocx claude [args...]        Launch Claude Code wired to the proxy (model discovery on)
   ocx claude desktop [sub]    Manage and apply Claude Desktop's four-family profile
   ocx opencode [args...]      Launch opencode wired to the proxy (runtime provider config)

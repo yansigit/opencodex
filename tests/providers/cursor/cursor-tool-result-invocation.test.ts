@@ -137,7 +137,6 @@ describe("cursor replayed tool results name their invocation", () => {
     expect(root).toContain(`call_id: ${CALL_ID}`);
     expect(root).toContain("invoked: exec_command with");
     expect(root).toContain("echo AAA");
-    expect(root).toContain("already ran successfully; do not repeat it");
   });
 
   test("no standalone [Tool Call] entry is ever emitted (363-B mimicry guard)", () => {

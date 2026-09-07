@@ -73,6 +73,7 @@ import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../p
 import { providerCodexAccountMode } from "../providers/registry";
 import type { OcxConfig, StorageCleanupPolicy } from "../types";
 import { MAX_DECOMPRESSED_BODY_BYTES } from "./request-decompress";
+import { canonicalServerOrigin } from "../lib/server-tls";
 import {
   CodexAccountCooldownError,
   cooldownErrorMessage,
@@ -195,7 +196,8 @@ export { disableResponsesRequestTimeout, linkAbortSignal } from "./responses";
 import { handleClaudeCountTokens, handleClaudeMessages } from "./claude-messages";
 import { handleChatCompletions } from "./chat-completions";
 import { anthropicErrorResponse } from "../claude/outbound";
-import { buildDesktop3pRegistry } from "../claude/desktop-3p";
+import { buildDesktop3pRegistry, generateDesktop3pModels } from "../claude/desktop-3p";
+import { buildDesktopDiscoveryInputs } from "../claude/desktop-discovery-inputs";
 import { runClaudeAuthModeMigration } from "../claude/auth-mode-migration";
 import {
   bindNativeMainStartupLifecycle,
@@ -247,7 +249,6 @@ import { recordCursorSeen } from "../integrations/cursor-seen";
 import { detectCursorInstalls } from "../integrations/cursor-detect";
 import { loadCursorEffortTable } from "../integrations/cursor-effort-table";
 import { expandCursorEffortRow, knownEffortRowIds } from "./effort-row";
-import { canonicalServerOrigin } from "../lib/server-tls";
 import { runAiStudioNativeLogin } from "../oauth/aistudio-native-daemon";
 import { catalogFastRowEligible, expandFastRow } from "./fast-row";
 
@@ -258,6 +259,17 @@ function isAiStudioSessionOrigin(origin: string | null, config: Pick<OcxConfig, 
   );
 }
 
+export function isLoopbackPeerAddress(address: string | null | undefined): boolean {
+  if (!address) return false;
+  const normalized = address.toLowerCase().replace(/^\[|\]$/g, "").split("%")[0] ?? "";
+  if (normalized === "::1") return true;
+  const ipv4 = normalized.startsWith("::ffff:") ? normalized.slice("::ffff:".length) : normalized;
+  const octets = ipv4.split(".");
+  return octets.length === 4
+    && octets.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+    && Number(octets[0]) === 127;
+}
+
 function withAiStudioSessionCors(resp: Response, req: Request, config: RequestPolicyView): Response {
   const origin = req.headers.get("Origin");
   if (isAiStudioSessionOrigin(origin, config) && origin) resp.headers.set("Access-Control-Allow-Origin", origin);
@@ -265,8 +277,7 @@ function withAiStudioSessionCors(resp: Response, req: Request, config: RequestPo
 }
 
 export const MAX_WS_FRAME_BYTES = 50 * 1024 * 1024;
-const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 255;
-const WEBSOCKET_BACKPRESSURE_LIMIT = 1024 * 1024;
+const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 0;
 
 // Header-safe by construction: a key id reaches a response header, so anything outside this
 // class could inject a header break or a control character into a response we control.
@@ -870,17 +881,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       return req.method === "POST";
     }
     if (path === "/v1/models") return req.method === "GET";
-    // Anthropic Messages (Claude Code) inbound. A directly-spawned Claude Code session
-    // posts these against the listener's base_url with no API key available, so admitting
-    // them here is what makes the loopback socket usable for local Claude integration.
-    // The exact-path + POST-only constraints are load-bearing: trailing-slash and
-    // percent-encoded variants never match, and every other method is refused by the
-    // handler's own admission (resolveApiAuth on the loopback policy view admits only the
-    // loopback bind itself). Handlers run the same admission/origin gates the public
-    // listener applies, so this entry widens nothing beyond the unauthenticated socket.
-    if (path === "/v1/messages" || path === "/v1/messages/count_tokens") {
-      return req.method === "POST";
-    }
     // Realtime voice — a directly-spawned `codex app-server` needs these for desktop voice
     // the same way it needs /v1/responses. Two shapes, same trust model as /v1/responses:
     //  - standalone sessions (codex-rs thread/realtime/start, WebSocket transport):
@@ -1173,7 +1173,8 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         }
         if (url.pathname === "/api/aistudio/session") {
           const origin = req.headers.get("Origin");
-          if (isAiStudioSessionOrigin(origin, policy)) {
+          const peerAddress = requestServer.requestIP(req)?.address ?? null;
+          if (isLoopbackPeerAddress(peerAddress) && isAiStudioSessionOrigin(origin, policy)) {
             return new Response(null, {
               status: 204,
               headers: {
@@ -1184,6 +1185,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
               },
             });
           }
+          return new Response(null, { status: 403, headers: corsHeaders() });
         }
         const managementPreflight = url.pathname.startsWith("/api/");
         const allowed = managementPreflight
@@ -1245,6 +1247,10 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       }
 
       if (url.pathname === "/api/aistudio/session" && req.method === "POST") {
+        const peerAddress = requestServer.requestIP(req)?.address ?? null;
+        if (!isLoopbackPeerAddress(peerAddress)) {
+          return withAiStudioSessionCors(withCors(formatErrorResponse(403, "forbidden", "AI Studio session import is loopback-only"), req, policy), req, policy);
+        }
         const dedicated = req.headers.get("x-opencodex-api-key")?.trim() ?? "";
         const admission = dedicated
           ? resolveDataPlaneAdmissionSecret(dedicated, config, "dedicated")
@@ -1291,33 +1297,43 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       }
 
       if (url.pathname === "/aistudio/bridge.user.js" && req.method === "GET") {
-        return new Response("// HTTP 410 Gone: OpenCodex AI Studio browser relay and userscripts are deprecated.\\n", {
+        return new Response("// HTTP 410 Gone: OpenCodex AI Studio browser relay and userscripts are deprecated.\n", {
           status: 410,
           headers: { "Content-Type": "application/javascript; charset=utf-8" },
         });
       }
 
       if (url.pathname === "/api/aistudio/login/native" && req.method === "POST") {
-        const admission = resolveApiAuth(req, policy);
-        if (!admission) return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
-        if (!isAllowedRequestOrigin(req, policy)) {
-          return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy);
+        const peerAddress = requestServer.requestIP(req)?.address ?? null;
+        if (!isLoopbackPeerAddress(peerAddress)) {
+          return withManagementCors(jsonResponse({ ok: false, error: "Native AI Studio login is loopback-only" }, 403), req, config);
+        }
+        const localManagementAuth = {
+          attestationSecret: localAttestationSecret,
+          pid: process.pid,
+          port: boundPort ?? requestServer.port ?? listenPort,
+        };
+        const apiAuthError = requireManagementAuth(req, managementAuth, config, localManagementAuth);
+        if (apiAuthError) return withManagementCors(apiAuthError, req, config);
+        const principal = managementPrincipal(req, managementAuth, config, localManagementAuth);
+        if (principal !== "gui-session") {
+          return withManagementCors(jsonResponse({ ok: false, error: "GUI session required" }, 403), req, config);
         }
         try {
           const login = await (deps.runAiStudioNativeLogin ?? runAiStudioNativeLogin)({ signal: req.signal });
           if (login.kind === "unsupported") return jsonResponse({ ok: false, error: "Native login is only available on macOS" }, 400, req, policy);
           if (login.kind === "cancelled") return jsonResponse({ ok: false, error: "Native AI Studio login cancelled" }, 499, req, policy);
-          if (login.kind === "failed") return jsonResponse({ ok: false, error: login.error }, 500, req, policy);
+          if (login.kind === "failed") return jsonResponse({ ok: false, error: "Native AI Studio login failed" }, 500, req, policy);
           const probeRequest = new Request(new URL("/api/providers/test?name=google-aistudio", req.url), {
             method: "POST",
             headers: { Host: req.headers.get("Host") ?? "127.0.0.1" },
           });
           const probeResponse = await handleManagementAPI(probeRequest, new URL(probeRequest.url), config, managementApi);
           const probe = await probeResponse?.json().catch(() => null) as { ok?: boolean; error?: string } | null;
-          if (!probe?.ok) return jsonResponse({ ok: false, error: probe?.error ?? "AI Studio connection probe failed" }, 502, req, policy);
-          return jsonResponse({ ok: true, sessionPath: login.sessionPath }, 200, req, policy);
-        } catch (error) {
-          return jsonResponse({ ok: false, error: String(error) }, 500, req, policy);
+          if (!probe?.ok) return jsonResponse({ ok: false, error: "AI Studio connection probe failed" }, 502, req, policy);
+          return jsonResponse({ ok: true }, 200, req, policy);
+        } catch {
+          return jsonResponse({ ok: false, error: "Native AI Studio login failed" }, 500, req, policy);
         }
       }
 
@@ -1513,6 +1529,10 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         if (!isAllowedRequestOrigin(req, policy)) {
           return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin data-plane request blocked"), req, policy);
         }
+        const wantsDesktopConfig = url.searchParams.get("format") === "desktop-config";
+        if (wantsDesktopConfig && (url.searchParams.get("ids") === "cli" || url.searchParams.has("client_version"))) {
+          return jsonResponse({ error: "Desktop config format cannot use CLI or client-version selectors" }, 400, req, policy);
+        }
         // The Integrations page reports whether a Cursor client has reached this proxy; the
         // recorder keeps only a bounded User-Agent value and a timestamp, in memory.
         recordCursorSeen(req.headers);
@@ -1535,7 +1555,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           }
           throw error;
         }
-        const { accountBoundNativeOpenAiSlugsBySelector, applyNativeVisibility, buildCatalogEntries, configuredNativeAliasSlugs, desktopAllowlistSuppressedNativeSlugs, disabledNativeSlugs, exactComboCatalogSlugs, loadCatalogTemplate, NATIVE_OPENAI_MODELS, nativeContextLimits, nativeInputModalities, nativeOpenAiContextWindow, nativeOpenAiMaxOutputTokens, nativeOpenAiContextTier, nativeOpenAiSlugs, nativeReasoningEfforts, nativeDefaultReasoningEffort, orderForSubagents, filterCatalogVisibleModels, shouldIncludeAccountBoundNativeOpenAi, shouldIncludeNativeOpenAi, uniqueCatalogModelsForRawPublicList, visibleCodexAccountSelectors, visibleNativeSlugs, desktopVisibleNativeSlugs } = await import("../codex/catalog");
+        const { accountBoundNativeOpenAiSlugsBySelector, applyNativeVisibility, buildCatalogEntries, configuredNativeAliasSlugs, desktopAllowlistSuppressedNativeSlugs, disabledNativeSlugs, exactComboCatalogSlugs, loadCatalogTemplate, NATIVE_OPENAI_MODELS, nativeContextLimits, nativeInputModalities, nativeOpenAiContextWindow, nativeOpenAiMaxOutputTokens, nativeOpenAiContextTier, nativeOpenAiSlugs, nativeReasoningEfforts, nativeDefaultReasoningEffort, shouldIncludeAccountBoundNativeOpenAi, shouldIncludeNativeOpenAi, uniqueCatalogModelsForRawPublicList, visibleCodexAccountSelectors, visibleNativeSlugs, desktopVisibleNativeSlugs } = await import("../codex/catalog");
         const { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } = await import("../codex/catalog/native-models");
         const includeNativeOpenAi = shouldIncludeNativeOpenAi(config);
         const includeAccountBoundNativeOpenAi = shouldIncludeAccountBoundNativeOpenAi(config);
@@ -1585,11 +1605,12 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         const accountNativeSlugs = [...new Set(
           [...accountNativeSlugsBySelector.values()].flatMap(slugs => [...slugs]),
         )];
-        const desktopNativeSlugs = desktopVisibleNativeSlugs(config).filter(slug => (
-          !ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(slug) || availableBareGatedNativeSlugs.has(slug)
-        ));
-        const goEnabled = filterCatalogVisibleModels(goModels, config);
-        const goOrdered = orderForSubagents(goEnabled, config.subagentModels);
+        const desktopInputs = buildDesktopDiscoveryInputs({
+          config, models: goModels, modelEntitlements,
+          desktopNativeCandidates: desktopVisibleNativeSlugs(config),
+        });
+        const desktopNativeSlugs = desktopInputs.nativeSlugs;
+        const goOrdered = desktopInputs.routedModels;
         // Claude Code / Claude Desktop gateway model discovery (GET /v1/models with
         // Anthropic-style headers; 003 G1-G8 + devlog 131). Entries use the official
         // ModelInfo shape incl. capabilities (effort ladder / thinking) — Desktop 3P can
@@ -1598,7 +1619,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         // aliases; legacy claude-ocx-* ids keep decoding via resolveAlias. Detection:
         // anthropic-version header (Claude Code sends it) or explicit ?flavor=anthropic.
         // Codex catalog (client_version) and the OpenAI list shape below stay byte-identical.
-        const wantsAnthropicList = req.headers.get("anthropic-version") !== null
+        const wantsAnthropicList = wantsDesktopConfig || req.headers.get("anthropic-version") !== null
           || url.searchParams.get("flavor") === "anthropic";
         /**
          * Whether a NATIVE slug may carry a Fast sibling.
@@ -1632,12 +1653,22 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           catalogFastRowEligible(config, m);
 
         if (wantsAnthropicList && !url.searchParams.has("client_version")) {
+          if (wantsDesktopConfig) {
+            const models = config.claudeCode?.enabled === false ? [] : generateDesktop3pModels(
+              desktopInputs.nativeSlugs, desktopInputs.routedModels,
+              config.claudeCode?.desktopProfile, desktopInputs.nativeContextCap,
+            );
+            const response = jsonResponse({ version: 1, models }, 200, req, policy);
+            response.headers.set("Cache-Control", "no-store");
+            return response;
+          }
           if (config.claudeCode?.enabled === false) return jsonResponse({ data: [] }, 200, req, policy);
           // Build Desktop 3P registry so inbound alias resolution works for subsequent requests.
           buildDesktop3pRegistry(
             desktopNativeSlugs,
-            goOrdered.map(m => ({ provider: m.provider, id: m.id, contextWindow: m.contextWindow })),
+            desktopInputs.routedModels,
             config.claudeCode?.desktopProfile,
+            desktopInputs.nativeContextCap,
           );
           const { buildAnthropicModelInfos } = await import("../claude/model-info");
           const { resolveAutoContext } = await import("../claude/context-windows");
@@ -1658,7 +1689,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             resolveAutoContext(config.claudeCode),
             idStyle,
             activeDesktop3pAlias,
-            nativeContextLimits(config),
+            desktopInputs.nativeContextCap,
             config.fastMode,
             // Explicit opt-out omits the Fast predicate.
             config.fastRows !== false
@@ -2305,8 +2336,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     websocket: {
       maxPayloadLength: MAX_WS_FRAME_BYTES,
       idleTimeout: WEBSOCKET_IDLE_TIMEOUT_SECONDS,
-      backpressureLimit: WEBSOCKET_BACKPRESSURE_LIMIT,
-      closeOnBackpressureLimit: true,
       // Responses WebSocket data plane (phase 120.2). Re-frames the same SSE pipeline onto the
       // socket: parse response.create → run handleResponses unchanged → pump its SSE body as WS
       // Text frames. response.processed is a no-op ack. close() aborts the upstream (RC2 parity).

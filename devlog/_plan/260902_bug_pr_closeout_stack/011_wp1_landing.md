@@ -26,3 +26,4 @@
 Copilot models fell back to the conservative 128K window. Existing metadata precedence and
 the safe-integer rejection of malformed values are unchanged;
 `tests/codex-catalog.test.ts` covers accepted, conflicting, and invalid payloads.
+

@@ -25,6 +25,8 @@ export const REQUIRED_COMPATIBILITY_FILES = [
   "docker/config.json",
   "docker/healthcheck.ts",
   "docker/verify-compatibility.ts",
+  "gui/bun.lock",
+  "gui/package.json",
   "package.json",
   "scripts/model-metadata.source.json",
 ] as const;
@@ -61,7 +63,7 @@ export function buildCompatibilityVersionManifest(repoRoot: string): Compatibili
   const root = resolve(repoRoot);
   const output = execFileSync(
     "git",
-    ["ls-files", "-z", "--", "src", "docker", ...REQUIRED_COMPATIBILITY_FILES],
+    ["ls-files", "-z", "--", "src", "docker", "gui", ...REQUIRED_COMPATIBILITY_FILES],
     { cwd: root },
   );
   const rawPaths = decodeGitPaths(new Uint8Array(output));
@@ -85,6 +87,9 @@ export function buildCompatibilityVersionManifest(repoRoot: string): Compatibili
   }
   if (!rows.some(row => row.path.startsWith("src/"))) {
     throw new Error("compatibility manifest contains no tracked src files");
+  }
+  if (!rows.some(row => row.path.startsWith("gui/"))) {
+    throw new Error("compatibility manifest contains no tracked GUI build inputs");
   }
 
   rows.sort((a, b) => Buffer.compare(Buffer.from(a.path, "utf8"), Buffer.from(b.path, "utf8")));

@@ -10,6 +10,7 @@ import {
   McpErrorSchema,
   McpResultSchema,
   RequestContextResultSchema,
+  RequestContextSchema,
   RequestContextSuccessSchema,
   SetBlobResultSchema,
   type ExecServerMessage,
@@ -50,10 +51,8 @@ import {
   type CursorNativeToolDeps,
 } from "./native-exec-tools";
 import { clientBytes, execBytes, execStreamCloseBytes, execThrowBytes } from "./native-exec-common";
-import { type CursorNativeExecPolicyContext } from "./native-exec-policy";
 import type { McpToolDefinition } from "./gen/agent_pb";
 import { OCX_RESPONSES_TOOL_PROVIDER } from "./tool-definitions";
-import { buildCursorRequestContext } from "./request-context";
 
 export type CursorNativeExecDeps = CursorNativeNetworkDeps & CursorNativeToolDeps;
 
@@ -67,23 +66,16 @@ export interface CursorNativeExecContext extends CursorNativeExecDeps {
   sessionId?: string;
   mcpToolDefs?: McpToolDefinition[];
   clientToolDefs?: McpToolDefinition[];
-  cursorSystem?: readonly string[];
   /** Unsafe opt-in escape hatch for Cursor server-driven local fs/shell/fetch execution. */
   unsafeAllowNativeLocalExec?: boolean;
   /** apply_patch is visible for this request; Cursor-native write/delete must not bypass Codex. */
   rejectNativeFileMutations?: boolean;
   /** The synthetic exact-match edit tools (edit_file / multi_edit) are advertised this request. */
   structuredEditAvailable?: boolean;
-  /** Codex code mode advertises one freeform exec tool; native rejections must steer to nested helpers. */
-  codeMode?: boolean;
 }
 
 export function cursorUnsafeNativeLocalExecEnabled(input: Pick<CursorNativeExecContext, "unsafeAllowNativeLocalExec"> = {}): boolean {
   return input.unsafeAllowNativeLocalExec === true;
-}
-
-function nativeExecPolicyContext(deps: CursorNativeExecContext): CursorNativeExecPolicyContext {
-  return deps.codeMode === true ? { codeMode: true } : {};
 }
 
 /**
@@ -148,6 +140,10 @@ let blobOldestEvictableAt: number | null = null;
 let rejectedEntryTooLarge = 0;
 let rejectedPinnedSaturation = 0;
 let blobExpiryAccountingTimer: ReturnType<typeof setTimeout> | undefined;
+/** Earliest unpinned storedAt+ttl; skip the write-time TTL walk while this is in the future. */
+let blobNextUnpinnedExpiryAt: number | null = null;
+/** Earliest unpinned remote expiry strictly in the future; drives the single reclassify timer. */
+let blobNextRemoteExpiryAt: number | null = null;
 
 function isExpired(entry: CursorBlobEntry, now: number): boolean {
   return now - entry.storedAt >= blobLimits.ttlMs;
@@ -165,6 +161,8 @@ function recomputeBlobClassAccounting(): void {
   let pinnedBytes = 0;
   let evictableBytes = 0;
   let oldestAt: number | null = null;
+  let nextUnpinnedExpiry = Number.POSITIVE_INFINITY;
+  let nextRemoteExpiry = Number.POSITIVE_INFINITY;
   for (const [k, entry] of blobs) {
     const requestPinned = entry.requestPins.size > 0;
     const provenancePinned = entry.provenance === "remote-setBlobArgs" && !isExpired(entry, now);
@@ -177,11 +175,20 @@ function recomputeBlobClassAccounting(): void {
       evictableBytes += entry.sizeBytes + k.length;
       oldestAt = oldestAt === null ? entry.storedAt : Math.min(oldestAt, entry.storedAt);
     }
+    if (!requestPinned) {
+      const expiresAt = entry.storedAt + blobLimits.ttlMs;
+      nextUnpinnedExpiry = Math.min(nextUnpinnedExpiry, expiresAt);
+      if (entry.provenance === "remote-setBlobArgs" && expiresAt > now) {
+        nextRemoteExpiry = Math.min(nextRemoteExpiry, expiresAt);
+      }
+    }
   }
   blobLocalBytes = localBytes;
   blobPinnedBytes = pinnedBytes;
   blobEvictableBytes = evictableBytes;
   blobOldestEvictableAt = oldestAt;
+  blobNextUnpinnedExpiryAt = Number.isFinite(nextUnpinnedExpiry) ? nextUnpinnedExpiry : null;
+  blobNextRemoteExpiryAt = Number.isFinite(nextRemoteExpiry) ? nextRemoteExpiry : null;
   scheduleBlobExpiryAccounting(now);
 }
 
@@ -193,18 +200,48 @@ function reconcileBlobClassAccountingAndEnforce(): void {
 function scheduleBlobExpiryAccounting(now: number): void {
   if (blobExpiryAccountingTimer) clearTimeout(blobExpiryAccountingTimer);
   blobExpiryAccountingTimer = undefined;
-  let nextExpiry = Number.POSITIVE_INFINITY;
-  for (const entry of blobs.values()) {
-    if (entry.provenance !== "remote-setBlobArgs" || entry.requestPins.size > 0) continue;
-    const expiresAt = entry.storedAt + blobLimits.ttlMs;
-    if (expiresAt > now) nextExpiry = Math.min(nextExpiry, expiresAt);
-  }
-  if (!Number.isFinite(nextExpiry)) return;
+  const nextExpiry = blobNextRemoteExpiryAt;
+  if (nextExpiry === null || nextExpiry <= now || !Number.isFinite(nextExpiry)) return;
   blobExpiryAccountingTimer = setTimeout(() => {
     blobExpiryAccountingTimer = undefined;
     reconcileBlobClassAccountingAndEnforce();
   }, Math.max(0, nextExpiry - now));
   blobExpiryAccountingTimer.unref?.();
+}
+
+/**
+ * O(1) class/timer update for a newly admitted key when no other row changed.
+ * Full-map recompute stays on replacement, eviction, pin changes, and TTL fire —
+ * the 4096-entry ceiling fill must not walk the store on every remote admit.
+ */
+function accountAdmittedBlob(k: string, entry: CursorBlobEntry, now: number): void {
+  const requestPinned = entry.requestPins.size > 0;
+  const expired = isExpired(entry, now);
+  const provenancePinned = entry.provenance === "remote-setBlobArgs" && !expired;
+  const logicalBytes = entry.sizeBytes + k.length;
+  if (entry.provenance === "local-regenerated") blobLocalBytes += entry.sizeBytes;
+  if (requestPinned || provenancePinned) blobPinnedBytes += logicalBytes;
+  if (!requestPinned && (entry.provenance === "local-regenerated" || expired)) {
+    blobEvictableBytes += logicalBytes;
+    blobOldestEvictableAt = blobOldestEvictableAt === null ? entry.storedAt : Math.min(blobOldestEvictableAt, entry.storedAt);
+  }
+  if (requestPinned) return;
+  const expiresAt = entry.storedAt + blobLimits.ttlMs;
+  blobNextUnpinnedExpiryAt = blobNextUnpinnedExpiryAt === null
+    ? expiresAt
+    : Math.min(blobNextUnpinnedExpiryAt, expiresAt);
+  if (entry.provenance !== "remote-setBlobArgs" || expiresAt <= now) return;
+  const previousRemoteExpiry = blobNextRemoteExpiryAt;
+  blobNextRemoteExpiryAt = previousRemoteExpiry === null
+    ? expiresAt
+    : Math.min(previousRemoteExpiry, expiresAt);
+  if (
+    !blobExpiryAccountingTimer
+    || previousRemoteExpiry === null
+    || expiresAt < previousRemoteExpiry
+  ) {
+    scheduleBlobExpiryAccounting(now);
+  }
 }
 
 function deleteBlob(k: string, recompute = true): number {
@@ -254,9 +291,11 @@ function setBlob(
   }
 
   const removals = new Set<string>();
-  for (const [candidateKey, entry] of blobs) {
-    if (candidateKey === k && sameData) continue;
-    if (entry.requestPins.size === 0 && isExpired(entry, now)) removals.add(candidateKey);
+  if (blobNextUnpinnedExpiryAt !== null && now >= blobNextUnpinnedExpiryAt) {
+    for (const [candidateKey, entry] of blobs) {
+      if (candidateKey === k && sameData) continue;
+      if (entry.requestPins.size === 0 && isExpired(entry, now)) removals.add(candidateKey);
+    }
   }
 
   const existingRemovedByTtl = existing !== undefined && removals.has(k);
@@ -334,7 +373,12 @@ function setBlob(
   blobBytes += entry.sizeBytes;
   blobKeyBytes += k.length;
   for (const scope of entry.requestPins) blobRequestScopes.get(scope)?.keys.add(k);
-  reconcileBlobClassAccountingAndEnforce();
+  if (removals.size > 0 || existing !== undefined) {
+    reconcileBlobClassAccountingAndEnforce();
+  } else {
+    accountAdmittedBlob(k, entry, now);
+    enforceAppOwnedMemoryBudget();
+  }
   return { admitted: true, replaced: existing !== undefined };
 }
 
@@ -586,21 +630,20 @@ export async function handleCursorNativeExec(execMsg: ExecServerMessage, deps: C
   if (execCase === "requestContextArgs") {
     const tools = [...(deps.mcpToolDefs ?? []), ...(deps.clientToolDefs ?? [])];
     return [execBytes(execMsg, "requestContextResult", create(RequestContextResultSchema, {
-      result: { case: "success", value: create(RequestContextSuccessSchema, { requestContext: buildCursorRequestContext({ system: deps.cursorSystem, tools }) }) },
+      result: { case: "success", value: create(RequestContextSuccessSchema, { requestContext: create(RequestContextSchema, { tools }) }) },
     }))];
   }
   if (!cursorUnsafeNativeLocalExecEnabled(deps)) {
-    const policy = nativeExecPolicyContext(deps);
-    if (execCase === "readArgs") return [rejectReadExecForPolicy(execMsg, policy)];
-    if (execCase === "writeArgs") return [rejectWriteExecForPolicy(execMsg, policy)];
-    if (execCase === "deleteArgs") return [rejectDeleteExecForPolicy(execMsg, policy)];
-    if (execCase === "lsArgs") return [rejectLsExecForPolicy(execMsg, policy)];
-    if (execCase === "grepArgs") return [rejectGrepExecForPolicy(execMsg, policy)];
-    if (execCase === "shellArgs") return [rejectShellExecForPolicy(execMsg, policy)];
-    if (execCase === "shellStreamArgs") return rejectShellStreamExecForPolicy(execMsg, policy);
-    if (execCase === "backgroundShellSpawnArgs") return [rejectBackgroundShellSpawnExecForPolicy(execMsg, policy)];
-    if (execCase === "writeShellStdinArgs") return [rejectWriteShellStdinExecForPolicy(execMsg, policy)];
-    if (execCase === "fetchArgs") return [rejectFetchExecForPolicy(execMsg, policy)];
+    if (execCase === "readArgs") return [rejectReadExecForPolicy(execMsg)];
+    if (execCase === "writeArgs") return [rejectWriteExecForPolicy(execMsg)];
+    if (execCase === "deleteArgs") return [rejectDeleteExecForPolicy(execMsg)];
+    if (execCase === "lsArgs") return [rejectLsExecForPolicy(execMsg)];
+    if (execCase === "grepArgs") return [rejectGrepExecForPolicy(execMsg)];
+    if (execCase === "shellArgs") return [rejectShellExecForPolicy(execMsg)];
+    if (execCase === "shellStreamArgs") return rejectShellStreamExecForPolicy(execMsg);
+    if (execCase === "backgroundShellSpawnArgs") return [rejectBackgroundShellSpawnExecForPolicy(execMsg)];
+    if (execCase === "writeShellStdinArgs") return [rejectWriteShellStdinExecForPolicy(execMsg)];
+    if (execCase === "fetchArgs") return [rejectFetchExecForPolicy(execMsg)];
   }
   if (execCase === "readArgs") return [readExec(execMsg)];
   if (execCase === "writeArgs") return [deps.rejectNativeFileMutations ? rejectWriteExecForApplyPatch(execMsg, deps.structuredEditAvailable === true) : writeExec(execMsg)];

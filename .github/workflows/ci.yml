@@ -513,6 +513,21 @@ jobs:
           cd gui
           bun run build
 
+      - name: Record dashboard preview source
+        if: needs.changes.outputs.gui == 'true'
+        run: |
+          git rev-parse HEAD > gui/dist/build-commit.txt
+          git rev-parse HEAD:gui > gui/dist/build-gui-tree.txt
+
+      - name: Upload dashboard preview
+        if: needs.changes.outputs.gui == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dashboard-preview-${{ github.sha }}
+          path: gui/dist
+          retention-days: 7
+          if-no-files-found: error
+
       - name: CLI help smoke
         run: bun run src/cli/index.ts help
 
@@ -659,7 +674,10 @@ jobs:
     # Four shards later grew back into that ceiling as the suite expanded. Six
     # shards reduce each hosted-Windows process's filesystem, Worker, and child
     # process pressure without raising the ceiling or weakening assertions.
-    timeout-minutes: 25
+    # Shard 1 of upstream run 34036848646 then reached that wall with 2736
+    # passing tests and no test failures. Keep all six hosted shards and every
+    # test deadline, but leave the whole batch and cleanup a 30-minute bound.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

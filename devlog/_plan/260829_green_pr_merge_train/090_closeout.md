@@ -51,3 +51,4 @@ Both passed on re-run of the failed job at the same head. The rule applied: a ma
 No local `bun run test` was executed at any point — user constraint. Evidence is GitHub Actions on each exact merged head, plus `bun x tsc --noEmit` and `bun run privacy:scan` in each rebase worktree. Every merge re-ran `git merge-tree` against the then-current `dev` and confirmed zero conflict markers before landing, which is what kept the derived order honest as `dev` moved eight times underneath it.
 
 `dev` also advanced twice mid-train from another lane (#2875, #2876) plus #2861/#2862 landing earlier. That left the set two commits behind at one point — inside the gate's ten-commit tolerance, and re-verified per merge rather than assumed.
+

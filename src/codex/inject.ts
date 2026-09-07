@@ -6,6 +6,7 @@ import {
   readConfigAdmissionSnapshot,
   subagentDefaultSyncEffective,
   websocketsEnabled,
+  withConfigMutationLockSync,
 } from "../config";
 import { CodexWriteLockSkipped, withCodexWriteLock } from "./codex-write-lock";
 import { shouldSyncCodexOnStart } from "./desired-state";
@@ -39,7 +40,6 @@ import {
   writeJournal,
 } from "./journal";
 import { withCatalogWriteSerialization } from "./catalog-write-serialization";
-import { resetCodexAppServerCatalogStateCache } from "./app-server-processes";
 import { restoreCodexCatalogWithPermit } from "./catalog/sync";
 import { syncCodexHistoryProvider, type CodexHistoryFailureReason } from "./history-provider";
 import {
@@ -150,6 +150,18 @@ export interface InjectCodexOptions {
   /** Explicit remote routing target. Absence preserves byte-compatible standalone output. */
   routingTarget?: CodexRoutingTarget;
   journalOwner?: { kind: "process" } | { kind: "client"; apiKeyId: string };
+  /** Synchronous read-only client ownership guard, evaluated at the artifact commit boundary. */
+  beforeClientWrite?: () => void;
+}
+
+function runClientWriteGuard(guard: InjectCodexOptions["beforeClientWrite"]): void {
+  const result: unknown = guard?.();
+  if (result !== null && (typeof result === "object" || typeof result === "function")
+    && typeof (result as { then?: unknown }).then === "function") {
+    // Reject async guards without leaving their eventual rejection unhandled.
+    void Promise.resolve(result).catch(() => {});
+    throw new Error("Connected client write guard must be synchronous");
+  }
 }
 
 export interface CodexRoutingTarget {
@@ -334,7 +346,9 @@ export function buildOpenaiBaseUrlLine(
   if (typeof portOrTarget !== "number") {
     return buildOpenaiBaseUrlLineForTarget(validateCodexRoutingTarget(portOrTarget));
   }
-  const baseUrl = publicOrigin ? normalizePublicOriginToBaseUrl(publicOrigin) : `http://${providerBaseHost(hostname)}:${portOrTarget}/v1`;
+  const baseUrl = publicOrigin
+    ? normalizePublicOriginToBaseUrl(publicOrigin)
+    : `http://${providerBaseHost(hostname)}:${portOrTarget}/v1`;
   return `openai_base_url = ${tomlString(baseUrl)}`;
 }
 
@@ -816,15 +830,21 @@ export function buildProfileFile(
   fastMode?: boolean,
   publicOrigin?: string,
 ): string {
-  if (typeof portOrTarget !== "number") {
-    return buildProfileFileForTarget(validateCodexRoutingTarget(portOrTarget), catalogPath, supportsWebsockets, includeApiAuthHeaderOrFastMode as boolean | undefined);
-  }
-  const target = validateCodexRoutingTarget({
-    baseUrl: publicOrigin ? normalizePublicOriginToBaseUrl(publicOrigin) : `http://${providerBaseHost(hostname)}:${portOrTarget}/v1`,
-    requiresAdmissionToken: includeApiAuthHeaderOrFastMode === true,
-    tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
-  });
-  return buildProfileFileForTarget(target, catalogPath, supportsWebsockets, fastMode);
+  const target = typeof portOrTarget === "number"
+    ? validateCodexRoutingTarget({
+        baseUrl: publicOrigin
+          ? normalizePublicOriginToBaseUrl(publicOrigin)
+          : `http://${providerBaseHost(hostname)}:${portOrTarget}/v1`,
+        requiresAdmissionToken: includeApiAuthHeaderOrFastMode === true,
+        tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
+      })
+    : validateCodexRoutingTarget(portOrTarget);
+  return buildProfileFileForTarget(
+    target,
+    catalogPath,
+    supportsWebsockets,
+    typeof portOrTarget === "number" ? fastMode : includeApiAuthHeaderOrFastMode,
+  );
 }
 
 function buildProfileFileForTarget(
@@ -907,7 +927,9 @@ export async function injectCodexConfig(
   } catch (error) {
     return { success: false, message: error instanceof Error ? error.message : "Invalid Codex routing target" };
   }
-  // Fork: sync agent roles (independent of config.toml)
+  // Role files are independent of config.toml. Skip when the caller omitted
+  // config so an unknown catalog cannot prune owned files. The sync fail-closes
+  // internally; do not wrap this call in an empty catch.
   let agentRolesSyncWarning: string | undefined;
   if (!options.validateOnly && config) {
     const roleSync = syncCodexAgentRoles(config);
@@ -927,13 +949,20 @@ export async function injectCodexConfig(
   if (activeProvider) {
     // A launcher may have journaled before the provider manager took ownership. Never let shutdown
     // replay that stale snapshot over externally managed config.
-    if (!options.validateOnly) removeJournal();
+    if (!options.validateOnly) {
+      if (options.beforeClientWrite) {
+        withConfigMutationLockSync(() => {
+          runClientWriteGuard(options.beforeClientWrite);
+          removeJournal();
+        });
+      } else removeJournal();
+    }
     const nativeSubagentDefaultsWarning = configuredManagedSubagentDefaults(
       config,
     )
       ? `Native Codex sub-agent defaults were not injected: external model_provider ${tomlString(activeProvider)} owns config.toml.`
       : undefined;
-    return {
+    return withRoleWarning({
       success: true,
       ...(nativeSubagentDefaultsWarning
         ? { nativeSubagentDefaultsWarning }
@@ -944,7 +973,7 @@ export async function injectCodexConfig(
         `  Configure that provider for Responses passthrough at ${routingTarget.baseUrl}` +
         `${routingTarget.requiresAdmissionToken ? ` with x-opencodex-api-key from ${routingTarget.tokenEnv}` : ""}.\n` +
         `  For direct injection, switch to the built-in openai provider, remove any user-owned root openai_base_url, and rerun 'ocx start'.`,
-    };
+    });
   }
 
   // Marker-owned native defaults are OpenCodex residue, never part of the
@@ -1000,8 +1029,8 @@ export async function injectCodexConfig(
   // not-ours (which would make them unrestorable).
   content = stripJournaledOpenaiBaseUrl(
     content,
-    journaledInjectedOpenaiBaseUrl(),
-    journaledInjectedRealtimeWsBaseUrl(),
+    journaledInjectedOpenaiBaseUrl({ readOnly: !!options.beforeClientWrite }),
+    journaledInjectedRealtimeWsBaseUrl({ readOnly: !!options.beforeClientWrite }),
   );
   if (hasOcxProviderTable(content)) {
     content = removeOcxSection(content);
@@ -1179,7 +1208,6 @@ export async function injectCodexConfig(
       owner: options.journalOwner,
     });
     atomicWriteFile(CODEX_CONFIG_PATH, content);
-    resetCodexAppServerCatalogStateCache();
     atomicWriteFile(CODEX_PROFILE_PATH, profileContent);
     markJournalInjectedState(content, profileContent, {
       // A root override is ours only in loopback Design B when no user-owned value won.
@@ -1206,17 +1234,24 @@ export async function injectCodexConfig(
   let transitionReceipt: { nativeGeneration: number; currentTxId: string } | undefined;
 
   if (eligibility.kind === "legacy-uncoordinated") {
-    // Unchanged behavior for homes the coordinator cannot yet adopt. Stated
-    // rather than implied: this is the boundary, and adoption is its own phase.
-    if (!shouldSyncCodexOnStart(loadConfig())) {
-      return {
-        success: true,
-        status: "skipped",
-        skippedReason: "desired_disabled",
-        message: "Codex integration is OFF; no Codex config, catalog, cache, or history was changed.",
-      };
-    }
-    applyNativeArtifacts();
+    const applyLegacy = (): CodexInjectResult | undefined => {
+      if (!shouldSyncCodexOnStart(loadConfig())) {
+        return {
+          success: true,
+          status: "skipped",
+          skippedReason: "desired_disabled",
+          message: "Codex integration is OFF; no Codex config, catalog, cache, or history was changed.",
+        };
+      }
+      runClientWriteGuard(options.beforeClientWrite);
+      applyNativeArtifacts();
+    };
+    // Only connected guarded writes add C here. A concurrent disconnect claim
+    // either follows this commit or is observed by the guard before any write.
+    const skipped = options.beforeClientWrite
+      ? withConfigMutationLockSync(applyLegacy)
+      : applyLegacy();
+    if (skipped) return skipped;
   } else {
     const coordinated = await withCodexWriteLock(
       {
@@ -1237,6 +1272,10 @@ export async function injectCodexConfig(
         if (!shouldSyncCodexOnStart(loadConfig())) {
           throw new CodexWriteLockSkipped("desired_disabled");
         }
+        // N and C are held here. Reject stale client work before publishing a
+        // transition or capturing preimages; rejection must not compensate over
+        // a disconnect's restored files.
+        runClientWriteGuard(options.beforeClientWrite);
         /*
          * Publish BEFORE touching the filesystem. `assertPublished` runs after this
          * callback returns and throws unless a transition was recorded, so writing
@@ -1371,7 +1410,7 @@ export async function injectCodexConfig(
   // A user-owned root openai_base_url means we did NOT install routing — say so honestly
   // instead of claiming the proxy route is active (catalog/fast_mode were still written).
   if (keptUserBaseUrl) {
-    return {
+    return withRoleWarning({
       success: true,
       ...(nativeSubagentDefaultsWarning
         ? { nativeSubagentDefaultsWarning }
@@ -1383,14 +1422,14 @@ export async function injectCodexConfig(
         managedDefaultsMessage +
         `  To route plain codex through the proxy, remove your openai_base_url line from ~/.codex/config.toml and rerun 'ocx start'.\n` +
         `  Reference config: ${CODEX_PROFILE_PATH}`,
-    };
+    });
   }
   const headline = routingTarget.desktopAuthless === true
     ? `Injected opencodex as default provider into Codex config (authless Desktop mode: requires_openai_auth = false).\n`
     : legacyMode
       ? `Injected opencodex as default provider into Codex config.\n`
       : `Pointed Codex's built-in openai provider at the opencodex proxy (openai_base_url + realtime sideband override).\n`;
-  return {
+  return withRoleWarning({
     success: true,
     ...(nativeSubagentDefaultsWarning ? { nativeSubagentDefaultsWarning } : {}),
     message:
@@ -1404,7 +1443,7 @@ export async function injectCodexConfig(
       (legacyMode
         ? `  Fallback: codex --profile opencodex (same behavior)`
         : `  Fallback reference: ${CODEX_PROFILE_PATH}`),
-  };
+  });
 }
 
 /**

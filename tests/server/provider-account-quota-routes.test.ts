@@ -25,20 +25,17 @@ beforeEach(() => {
   clearProviderQuotaCache();
 });
 afterEach(async () => {
-  try {
-    clearAccountQuotaCache();
-    clearProviderQuotaCache();
-    await flushConfigDirHardeningForTests();
-  } finally {
-    globalThis.fetch = originalFetch;
-    setIcaclsRunnerForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
-    if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
-    else process.env.OPENCODEX_HOME = originalHome;
-    if (originalFixtureKey === undefined) delete process.env.OCX_QUOTA_ROW_FIXTURE;
-    else process.env.OCX_QUOTA_ROW_FIXTURE = originalFixtureKey;
-    removeTreeWithRetry(home);
-  }
+  globalThis.fetch = originalFetch;
+  clearAccountQuotaCache();
+  clearProviderQuotaCache();
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+  if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = originalHome;
+  if (originalFixtureKey === undefined) delete process.env.OCX_QUOTA_ROW_FIXTURE;
+  else process.env.OCX_QUOTA_ROW_FIXTURE = originalFixtureKey;
+  removeTreeWithRetry(home);
 });
 
 function keyConfig(): OcxConfig {

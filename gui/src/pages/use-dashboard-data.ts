@@ -224,8 +224,7 @@ export function useDashboardData(apiBase: string) {
     { pollMs: 5000 },
   );
   const overviewReady = health !== null || overviewPoll.data !== undefined;
-  // Connectivity is a cold-failure concern. Once health or the overview resource has
-  // succeeded, a failed poll is degraded stale data, not a blank dashboard.
+  // A cold failure replaces the page; later failures retain the last good overview.
   const error = overviewPoll.error !== undefined && health === null && !overviewPoll.hasSucceeded;
   const overviewReconnecting = overviewPoll.error !== undefined && !error;
 

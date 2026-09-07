@@ -29,21 +29,19 @@ import {
   writeStorageCleanupPolicyToConfig,
 } from "../../src/storage/policy";
 import { stopStorageCleanupScheduler } from "../../src/storage/policy-scheduler";
-import { resetQuotaResetActivationForTests } from "../../src/quota/reset-activation";
-import { resetQuotaResetNotifyCacheForTests } from "../../src/quota/reset-notify-config";
-import { hasQuotaResetSink, setQuotaResetSink } from "../../src/quota/reset-observer";
 import {
   drainStorageWorkers,
   liveStorageWorkerCount,
 } from "../../src/storage/worker-lifecycle";
 import type { OcxConfig } from "../../src/types";
-import { INTERNAL_DEADLINE_MS, SERVER_BUDGET_MS } from "../helpers/test-budget";
+import { SERVER_BUDGET_MS } from "../helpers/test-budget";
 import { managementFetch } from "../helpers/management-auth";
 import {
   installIsolatedCodexHome,
   type IsolatedCodexHome,
 } from "../helpers/isolated-codex-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { INTERNAL_DEADLINE_MS } from "../helpers/test-budget";
 
 type StartedServer = ReturnType<typeof startServer>;
 type IntervalTimer = ReturnType<typeof setInterval>;
@@ -281,9 +279,6 @@ afterEach(async () => {
   stopStorageCleanupScheduler();
   await resetStorageCleanupPolicyJobForTestsAsync();
   await drainStorageWorkers();
-  setQuotaResetSink(null);
-  resetQuotaResetActivationForTests();
-  resetQuotaResetNotifyCacheForTests();
   setStorageCleanupPolicyJobTestHooks(null);
   isolatedCodexHome?.restore();
   isolatedCodexHome = null;
@@ -296,25 +291,6 @@ afterEach(async () => {
 });
 
 describe("server background lifecycle", () => {
-  test("last-server stop removes the quota reset delivery sink", async () => {
-    saveConfig({
-      ...baseConfig(),
-      quotaResetNotify: { enabled: true, command: ["true"], pollSeconds: 0 },
-    });
-    resetQuotaResetNotifyCacheForTests();
-    resetQuotaResetActivationForTests();
-    setQuotaResetSink(null);
-    const server = trackedStart();
-    const activationDeadline = Date.now() + INTERNAL_DEADLINE_MS;
-    while (!hasQuotaResetSink() && Date.now() < activationDeadline) await Bun.sleep(5);
-    expect(hasQuotaResetSink()).toBe(true);
-
-    await stopTracked(server);
-    const deactivationDeadline = Date.now() + INTERNAL_DEADLINE_MS;
-    while (hasQuotaResetSink() && Date.now() < deactivationDeadline) await Bun.sleep(5);
-    expect(hasQuotaResetSink()).toBe(false);
-  });
-
   test("stopping the newer server preserves the older server's process-wide work", async () => {
     saveConfig(baseConfig());
     const probe = installBackgroundTimerProbe();

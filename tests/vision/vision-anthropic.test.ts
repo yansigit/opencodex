@@ -18,6 +18,7 @@ import { CLAUDE_CODE_SYSTEM_INSTRUCTION } from "../../src/oauth/anthropic";
 import { parseRequest } from "../../src/responses/parser";
 import { handleManagementAPI } from "../../src/server/management-api";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
+import { ManagementRequest as Request, inMemoryManagementPersistence } from "../helpers/management-auth";
 import {
   describeImagesInPlace,
   describeImageAnthropic,
@@ -446,4 +447,4 @@ describe("Anthropic vision planning and management config", () => {
     }
   });
 });
-import { ManagementRequest as Request, inMemoryManagementPersistence } from "../helpers/management-auth";
+import { ManagementRequest as Request } from "../helpers/management-auth";

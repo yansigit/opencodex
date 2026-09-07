@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, renameSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { INTERNAL_DEADLINE_MS, SERVER_BUDGET_MS } from "../helpers/test-budget";
@@ -13,12 +13,10 @@ import {
 } from "../../src/quota/reset-seen-store";
 import type { QuotaResetEvent } from "../../src/quota/reset-detector";
 import {
-  currentQuotaResetNotify,
   resetQuotaResetNotifyCacheForTests,
   resolveQuotaResetNotify,
 } from "../../src/quota/reset-notify-config";
 import {
-  deactivateQuotaResetActivation,
   resetQuotaResetActivationForTests,
   syncQuotaResetActivation,
 } from "../../src/quota/reset-activation";
@@ -574,132 +572,6 @@ describe("GET /api/quota-resets", () => {
 });
 
 describe("activation is the single switch", () => {
-  test("same-size same-mtime in-place rewrite invalidates the notify cache", () => {
-    const home = mkdtempSync(join(tmpdir(), "ocx-notify-cache-in-place-"));
-    const configPath = join(home, "config.json");
-    const enabled = JSON.stringify({
-      port: 10100,
-      defaultProvider: "openai",
-      providers: {
-        openai: { adapter: "openai-responses", baseUrl: "https://api.openai.com/v1" },
-      },
-      quotaResetNotify: { enabled: true, command: ["true"] },
-    });
-    const disabled = enabled.replace(
-      '"enabled":true,"command":["true"]',
-      '"enabled":false,"command":["tru"]',
-    );
-    expect(disabled.length).toBe(enabled.length);
-    const fixedTime = new Date("2026-01-01T00:00:00.000Z");
-    writeFileSync(configPath, enabled);
-    utimesSync(configPath, fixedTime, fixedTime);
-
-    const previousHome = process.env["OPENCODEX_HOME"];
-    const realNow = Date.now;
-    let now = realNow();
-    process.env["OPENCODEX_HOME"] = home;
-    Date.now = () => now;
-    try {
-      resetQuotaResetNotifyCacheForTests();
-      expect(currentQuotaResetNotify().enabled).toBe(true);
-      const before = statSync(configPath);
-
-      writeFileSync(configPath, disabled);
-      utimesSync(configPath, fixedTime, fixedTime);
-      const after = statSync(configPath);
-      expect(after.ino).toBe(before.ino);
-      expect(after.size).toBe(before.size);
-      expect(after.mtimeMs).toBe(before.mtimeMs);
-
-      now += 5_001;
-      expect(currentQuotaResetNotify().enabled).toBe(false);
-    } finally {
-      Date.now = realNow;
-      resetQuotaResetNotifyCacheForTests();
-      if (previousHome === undefined) delete process.env["OPENCODEX_HOME"];
-      else process.env["OPENCODEX_HOME"] = previousHome;
-    }
-  });
-
-  test("same-size same-mtime config replacement invalidates the notify cache", () => {
-    const home = mkdtempSync(join(tmpdir(), "ocx-notify-cache-"));
-    const configPath = join(home, "config.json");
-    const replacementPath = join(home, "replacement.json");
-    const enabled = JSON.stringify({
-      port: 10100,
-      defaultProvider: "openai",
-      providers: {
-        openai: { adapter: "openai-responses", baseUrl: "https://api.openai.com/v1" },
-      },
-      quotaResetNotify: { enabled: true, command: ["true"] },
-    });
-    const disabled = enabled.replace(
-      '"enabled":true,"command":["true"]',
-      '"enabled":false,"command":["tru"]',
-    );
-    expect(disabled.length).toBe(enabled.length);
-    const fixedTime = new Date("2026-01-01T00:00:00.000Z");
-    writeFileSync(configPath, enabled);
-    utimesSync(configPath, fixedTime, fixedTime);
-
-    const previousHome = process.env["OPENCODEX_HOME"];
-    const realNow = Date.now;
-    let now = realNow();
-    process.env["OPENCODEX_HOME"] = home;
-    Date.now = () => now;
-    try {
-      resetQuotaResetNotifyCacheForTests();
-      expect(currentQuotaResetNotify().enabled).toBe(true);
-      const before = statSync(configPath);
-
-      writeFileSync(replacementPath, disabled);
-      utimesSync(replacementPath, fixedTime, fixedTime);
-      renameSync(replacementPath, configPath);
-      const after = statSync(configPath);
-      expect(after.size).toBe(before.size);
-      expect(after.mtimeMs).toBe(before.mtimeMs);
-
-      now += 5_001;
-      expect(currentQuotaResetNotify().enabled).toBe(false);
-    } finally {
-      Date.now = realNow;
-      resetQuotaResetNotifyCacheForTests();
-      if (previousHome === undefined) delete process.env["OPENCODEX_HOME"];
-      else process.env["OPENCODEX_HOME"] = previousHome;
-    }
-  });
-
-  test("a cancelled pending activation cannot install the process-wide sink", async () => {
-    const home = mkdtempSync(join(tmpdir(), "ocx-cancelled-activation-"));
-    writeFileSync(join(home, "config.json"), JSON.stringify({
-      port: 10100,
-      defaultProvider: "openai",
-      providers: {
-        openai: { adapter: "openai-responses", baseUrl: "https://api.openai.com/v1", authMode: "forward" },
-      },
-      quotaResetNotify: { enabled: true, command: ["true"], pollSeconds: 0 },
-    }));
-
-    const previousHome = process.env["OPENCODEX_HOME"];
-    process.env["OPENCODEX_HOME"] = home;
-    try {
-      resetQuotaResetNotifyCacheForTests();
-      resetQuotaResetActivationForTests();
-      setQuotaResetSink(null);
-      let current = true;
-      const pending = syncQuotaResetActivation(() => current);
-      current = false;
-
-      expect(await pending).toBe(false);
-      expect(hasQuotaResetSink()).toBe(false);
-    } finally {
-      await deactivateQuotaResetActivation();
-      resetQuotaResetNotifyCacheForTests();
-      if (previousHome === undefined) delete process.env["OPENCODEX_HOME"];
-      else process.env["OPENCODEX_HOME"] = previousHome;
-    }
-  });
-
   test("an absent config section installs no sink at all", async () => {
     const home = mkdtempSync(join(tmpdir(), "ocx-inert-"));
     writeFileSync(join(home, "config.json"), JSON.stringify({

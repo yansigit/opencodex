@@ -22,3 +22,4 @@ manual consume (`POST .../consume` with a fresh `redeem_request_id` per call) in
 - Default off: no timer, no import cost on core files (core-lab boundary test green).
 - Fake clock + fake WHAM: schedules at expiry-lead; identity change / disable / manual consume first →
   skip; dispatch reuses the same redeem_request_id across a simulated restart; success re-reads balance.
+

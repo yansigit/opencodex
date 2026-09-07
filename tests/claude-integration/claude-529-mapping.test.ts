@@ -33,13 +33,7 @@ function nativeConfig(baseUrl: string): OcxConfig {
     port: 0,
     defaultProvider: "native",
     providers: {
-      native: {
-        adapter: "openai-responses",
-        baseUrl,
-        authMode: "forward",
-        allowPrivateNetwork: true,
-        replayTransientFailures: true,
-      },
+      native: { adapter: "openai-responses", baseUrl, authMode: "forward", allowPrivateNetwork: true },
     },
   } as OcxConfig;
 }

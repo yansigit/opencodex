@@ -41,3 +41,4 @@ remote session smoke; identity headers unspoofable past the loopback backend.
 Rotation UX; skew matrix; multi-client attribution; session invalidation/rate limits;
 catalog adversarial tests; relay SSRF negatives; docs-site sync (5 locales); full
 typecheck/test/privacy:scan/build:gui/lint:gui; MAINTAINERS security review.
+

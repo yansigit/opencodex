@@ -106,12 +106,11 @@ export function selectEagerPath(
   version: string = Bun.version,
   minFixed: string | null = MIN_FIXED_BUN_VERSION,
 ): EagerRelayDecision | null {
-  if (platform !== "win32" && platform !== "darwin" && platform !== "linux") {
+  if (platform !== "win32" && platform !== "darwin") {
     return null;
   }
 
   const decision = decideEagerRelay(mode, version, minFixed);
-  if (platform === "linux") return decision;
   if (platform === "win32") return needsClientRewrite ? null : decision;
   return decision.reason === "config-eager" ? decision : null;
 }

@@ -33,18 +33,18 @@ import {
   getNativeMainProfileRequestCount,
   resetLifecycleDrainStateForTests,
 } from "../../src/server/lifecycle";
+import type { OcxConfig } from "../../src/types";
 import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
-import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 // Phase 20 (260630_wsl-account-autoswitch): startup/lazy quota priming.
 
-let TEST_DIR = "";
-let TEST_CODEX_HOME = "";
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+let testDir = "";
+let testCodexHome = "";
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function makeConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
   return {
@@ -85,7 +85,7 @@ function whamResponse(weekly: number) {
 }
 
 function seedMainAccount(accountId = "main-account", accessToken = "main-access"): void {
-  writeFileSync(join(TEST_CODEX_HOME, "auth.json"), JSON.stringify({
+  writeFileSync(join(testCodexHome, "auth.json"), JSON.stringify({
     tokens: { access_token: accessToken, account_id: accountId },
   }));
 }
@@ -101,18 +101,15 @@ describe("primeCodexPoolQuotas", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
     previousCodexHome = process.env.CODEX_HOME;
-    // Quota behavior is the subject here, not Windows ACLs. A fixed repo-local home plus
-    // real async icacls made teardown race the child holding that directory, poisoning every
-    // following case with EPERM in main run 33905721824.
     setIcaclsRunnerForTests(() => ICACLS_OK);
     setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-    TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-codex-quota-prime-"));
-    TEST_CODEX_HOME = join(TEST_DIR, "codex");
-    mkdirSync(TEST_CODEX_HOME, { recursive: true });
-    process.env.OPENCODEX_HOME = TEST_DIR;
+    testDir = mkdtempSync(join(tmpdir(), "ocx-codex-quota-prime-"));
+    testCodexHome = join(testDir, "codex");
+    mkdirSync(testCodexHome, { recursive: true });
+    process.env.OPENCODEX_HOME = testDir;
     // Isolate the main-account source: TEST_CODEX_HOME has no auth.json, so the
     // main account is deterministically absent and priming only touches the pool.
-    process.env.CODEX_HOME = TEST_CODEX_HOME;
+    process.env.CODEX_HOME = testCodexHome;
     clearAccountQuota();
     clearThreadAccountMap();
     clearCodexQuotaPrimeState();
@@ -135,9 +132,9 @@ describe("primeCodexPoolQuotas", () => {
     else process.env.OPENCODEX_HOME = previousOpencodexHome;
     if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousCodexHome;
-    if (TEST_DIR) removeTreeWithRetry(TEST_DIR);
-    TEST_DIR = "";
-    TEST_CODEX_HOME = "";
+    if (testDir) removeTreeWithRetry(testDir);
+    testDir = "";
+    testCodexHome = "";
   });
 
   test("prime populates stale/unknown pool accounts", async () => {

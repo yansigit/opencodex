@@ -157,12 +157,12 @@ test("workspace overview navigation preserves pending secret and resets delete c
   await act(async () => {
     [...container.querySelectorAll("button")].find(b => b.textContent?.includes("Delete key"))!.click();
   });
-  expect(container.textContent).toContain("Clients using it will immediately lose access.");
+  expect(container.textContent).toContain("Are you sure you want to delete this key?");
 
   await act(async () => { overviewButton(container).click(); });
   expect(container.textContent).toContain("Generate key");
   expect(container.textContent).toContain(FULL_SECRET);
-  expect(container.textContent).not.toContain("Clients using it will immediately lose access.");
+  expect(container.textContent).not.toContain("Are you sure you want to delete this key?");
 
   await act(async () => { root.unmount(); });
 });

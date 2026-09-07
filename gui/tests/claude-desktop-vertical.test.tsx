@@ -28,26 +28,17 @@ function model(route: string, label: string, family: string, available = true) {
 // LANE_SEARCH_MIN = 4).
 const MODELS = [
   ...Array.from({ length: 7 }, (_, i) => model(`prov/opus-${i}`, `Opus Model ${i}`, "opus")),
-  model("prov/retired-opus", "Retired Opus", "opus", false),
   model("prov/only-sonnet", "Sonnet Model", "sonnet"),
 ];
 
-let opusDefault = "prov/opus-0";
-let retiredAvailable = false;
-let rejectNextSave = false;
-let lastPutProfile: Record<string, unknown> | null = null;
-
 function payload() {
-  const models = MODELS.map(item => item.route === "prov/retired-opus" ? { ...item, available: retiredAvailable } : item);
   return {
     profile: {
       version: 1,
-      assignments: Object.fromEntries(models.map(m => [m.route, m.assignment])),
-      defaults: { opus: opusDefault, fable: null, sonnet: "prov/only-sonnet", haiku: null },
-      appliedFingerprint: "applied-fingerprint",
-      appliedAt: "2026-08-01T00:00:00.000Z",
+      assignments: Object.fromEntries(MODELS.map(m => [m.route, m.assignment])),
+      defaults: { opus: "prov/opus-0", fable: null, sonnet: "prov/only-sonnet", haiku: null },
     },
-    models,
+    models: MODELS,
     rendered: [],
     port: 10100,
   };
@@ -55,10 +46,6 @@ function payload() {
 
 beforeEach(() => {
   clearClientResourceStoresForTests();
-  opusDefault = "prov/opus-0";
-  retiredAvailable = false;
-  rejectNextSave = false;
-  lastPutProfile = null;
   previousGlobals = Object.fromEntries(globals.map(k => [k, Reflect.get(globalThis, k)])) as typeof previousGlobals;
   testWindow = new Window({ url: "http://localhost/" });
   Object.defineProperty(testWindow.navigator, "language", { configurable: true, value: "en-US" });
@@ -72,17 +59,7 @@ beforeEach(() => {
 
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
-    value: async (url: string, init?: RequestInit) => {
-      if (init?.method === "PUT" && rejectNextSave) {
-        lastPutProfile = (JSON.parse(String(init.body)) as { profile: Record<string, unknown> }).profile;
-        rejectNextSave = false;
-        retiredAvailable = false;
-        const body = {
-          error: { code: "catalog_changed", message: "catalog changed", route: "prov/retired-opus" },
-          current: payload(),
-        };
-        return { ok: false, status: 409, text: async () => JSON.stringify(body) } as unknown as Response;
-      }
+    value: async (url: string) => {
       const body = String(url).includes("/status")
         ? { applied: true, appliedAt: null, stale: false, health: { lastRequestAt: null, requestCount: 0, errorCount: 0 } }
         : payload();
@@ -127,8 +104,6 @@ async function click(element: HTMLElement) {
 
 test("families render as a vertical stack, Opus first", async () => {
   await mount();
-  expect(container.querySelector(".claude-defaults")?.querySelectorAll("select")).toHaveLength(4);
-  expect((container.querySelector("details.claude-mapping-details") as HTMLDetailsElement).open).toBe(false);
   expect(container.querySelector(".ocx-group-stack")).not.toBeNull();
   // The old 4-column kanban container is gone.
   expect(container.querySelector(".claude-lanes")).toBeNull();
@@ -197,84 +172,6 @@ test("the header count ignores the search", async () => {
   });
 
   expect(opusSection.querySelector(".ocx-group-count")?.textContent).toContain("7");
-});
-
-test("unavailable mappings stay saved but leave the active count and picker", async () => {
-  await mount();
-  await click(familyToggle("Opus"));
-  const opusSection = Array.from(container.querySelectorAll("section.ocx-group"))
-    .find(section => (section.querySelector(".ocx-group-name")?.textContent ?? "") === "Opus")!;
-
-  expect(opusSection.querySelector(".ocx-group-count")?.textContent).toContain("7");
-  expect(Array.from(opusSection.querySelectorAll("article.claude-model-card"))
-    .some(card => card.textContent?.includes("Retired Opus"))).toBe(false);
-  const unavailable = opusSection.querySelector("details.claude-lane-empty") as HTMLDetailsElement;
-  expect(unavailable.open).toBe(false);
-  expect(unavailable.querySelector("summary")?.textContent).toContain("Unavailable (1)");
-  expect(unavailable.textContent).toContain("prov/retired-opus");
-});
-
-test("an unavailable saved default requires an explicit available replacement before apply", async () => {
-  opusDefault = "prov/retired-opus";
-  await mount();
-
-  const apply = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
-    .find(button => button.textContent?.includes("Save & apply"))!;
-  expect(apply.disabled).toBe(true);
-  expect(container.textContent).toContain("Choose a default");
-
-  const opusSelect = Array.from(container.querySelectorAll<HTMLElement>("label.claude-default-select"))
-    .find(label => label.querySelector("span")?.textContent === "Opus")!
-    .querySelector("select") as HTMLSelectElement;
-  await act(async () => {
-    opusSelect.value = "prov/opus-0";
-    opusSelect.dispatchEvent(new testWindow.Event("change", { bubbles: true }) as never);
-  });
-  expect(apply.disabled).toBe(false);
-});
-
-test("a catalog conflict reverts only the unavailable route and preserves other draft moves", async () => {
-  retiredAvailable = true;
-  rejectNextSave = true;
-  await mount();
-
-  await click(container.querySelector("details.claude-mapping-details > summary") as HTMLElement);
-  await click(familyToggle("Opus"));
-  await click(Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
-    .find(button => button.textContent?.includes("Show "))!);
-  const retired = Array.from(container.querySelectorAll<HTMLElement>("article.claude-model-card"))
-    .find(card => card.textContent?.includes("Retired Opus"))!;
-  await click(retired.querySelector("button.claude-model-summary") as HTMLButtonElement);
-  const retiredSelect = retired.querySelector("select") as HTMLSelectElement;
-  await act(async () => {
-    retiredSelect.value = "fable";
-    retiredSelect.dispatchEvent(new testWindow.Event("change", { bubbles: true }) as never);
-  });
-  await click(Array.from(retired.querySelectorAll<HTMLButtonElement>("button")).find(button => button.textContent?.trim() === "Move")!);
-
-  await click(familyToggle("Sonnet"));
-  const sonnet = Array.from(container.querySelectorAll<HTMLElement>("article.claude-model-card"))
-    .find(card => card.textContent?.includes("Sonnet Model"))!;
-  const sonnetSelect = sonnet.querySelector("select") as HTMLSelectElement;
-  await act(async () => {
-    sonnetSelect.value = "haiku";
-    sonnetSelect.dispatchEvent(new testWindow.Event("change", { bubbles: true }) as never);
-  });
-  await click(Array.from(sonnet.querySelectorAll<HTMLButtonElement>("button")).find(button => button.textContent?.trim() === "Move")!);
-
-  const save = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
-    .find(button => button.textContent?.trim() === "Save")!;
-  await click(save);
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
-
-  expect(container.textContent).toContain("The model catalog changed while you were editing.");
-  expect(lastPutProfile?.appliedFingerprint).toBe("applied-fingerprint");
-  expect(lastPutProfile?.appliedAt).toBe("2026-08-01T00:00:00.000Z");
-  expect(container.textContent).toContain("Unsaved changes");
-  expect(familyToggle("Haiku").textContent).toContain("1");
-  const opusSection = Array.from(container.querySelectorAll("section.ocx-group"))
-    .find(section => (section.querySelector(".ocx-group-name")?.textContent ?? "") === "Opus")!;
-  expect(opusSection.querySelector("details")?.textContent).toContain("prov/retired-opus");
 });
 
 // Regression for the WP1 focused audit: an earlier design derived collapse from the

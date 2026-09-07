@@ -74,6 +74,8 @@ export interface ProviderFetchOptions {
   onCodexWsQuota?: CodexWsQuotaObserver;
   /** Synchronous admission at actual credential dispatch, after pacing/backoff. */
   beforeDispatch?: (headers: Headers) => void;
+  /** Revalidate/rebuild a queued request at its physical send boundary, after pacing. */
+  dispatchOverride?: (input: Parameters<typeof globalThis.fetch>[0], init: RequestInit, execute: typeof globalThis.fetch) => Promise<Response>;
 }
 
 export function providerFetch(
@@ -81,7 +83,11 @@ export function providerFetch(
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
   options: ProviderFetchOptions = {},
 ): ProviderFetch {
-  const base = options.fetch ?? testProviderFetch(provider) ?? runtimeProviderFetch(provider, options.providerName) ?? globalThis.fetch;
+  const base = options.fetch
+    ?? testProviderFetch(provider)
+    ?? runtimeProviderFetch(provider, options.providerName)
+    ?? (provider as OcxProviderConfig & { fetch?: typeof globalThis.fetch }).fetch
+    ?? globalThis.fetch;
   const preconnect = (...args: Parameters<typeof globalThis.fetch.preconnect>): void => {
     base.preconnect?.(...args);
   };
@@ -91,7 +97,10 @@ export function providerFetch(
   const httpFetch = Object.assign(
     async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
       options.beforeDispatch?.(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)));
-      return transport(input, { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 });
+      const dispatchInit = { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 };
+      return options.dispatchOverride
+        ? options.dispatchOverride(input, dispatchInit, transport)
+        : transport(input, dispatchInit);
     },
     { preconnect },
   ) as typeof globalThis.fetch;
@@ -209,7 +218,7 @@ export async function fetchWithHeaderTimeout(
       headers,
       // Upstream URLs are configuration, not navigation. Refuse every redirect
       // so POST bodies and provider headers are never replayed to another hop.
-      redirect: "manual",
+      redirect: "manual" as const,
       signal: AbortSignal.any([abortSignal, timeout.signal]),
       timeout: 0,
     });

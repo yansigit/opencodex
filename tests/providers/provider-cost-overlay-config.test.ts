@@ -179,11 +179,14 @@ describe("modelCosts config persistence and registry refresh", () => {
     const reloaded = loadConfig();
     expect(reloaded.providers.blsc.modelCosts).toEqual(VALID_COSTS);
     expect(activeUserCostOverlays()).toHaveLength(2);
-    // Removing the overlay clears the registry rows.
-    expect(mutatePersistedConfig(persisted => {
-      delete persisted.providers.blsc.modelCosts;
+    // Existing provider fields are changed through the field-scoped atomic
+    // mutation boundary, so a stale whole-config projection cannot replace the
+    // provider registry while removing the overlay.
+    const outcome = mutatePersistedConfig(current => {
+      delete current.providers.blsc!.modelCosts;
       return { changed: true, value: undefined };
-    }).status).toBe("committed");
+    });
+    expect(outcome.status).toBe("committed");
     expect(activeUserCostOverlays()).toHaveLength(0);
   });
 

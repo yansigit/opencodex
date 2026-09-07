@@ -74,9 +74,6 @@ const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   "claude.fastOff",
   "claude.fastOn",
   // Dash / logs short labels, units, and surface badges
-  "logs.filter.speed.slow",
-  "logs.filter.speed.medium",
-  "logs.filter.speed.fast",
   "dash.col.baseUrl",
   "dash.mem.arrayBuffers",
   "dash.mem.external",
@@ -147,8 +144,6 @@ const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   "routing.analyticsP99",
   // Format template with placeholder only; other locales (zh/ja/ko) keep it identical to en
   "models.shadowCallOriginal",
-  "models.contextTooltipStale",
-  "models.contextTooltipSource",
   // A one-glyph marker plus the model id, sitting inside a narrow table column. The glyph is
   // an icon-shaped affordance rather than a word, and its meaning is carried by the tooltip
   // (`logs.badge.interceptedHelperTitle`), which IS translated. Localizing the glyph per

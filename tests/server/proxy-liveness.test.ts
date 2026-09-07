@@ -106,7 +106,7 @@ describe("proxyIdentityAt", () => {
       attempts: 3,
       timeoutMs: 50,
       sleepFn: async (ms) => { sleeps.push(ms); },
-      fetchFn: (async (url: string | URL | Request) => {
+      fetchFn: (async () => {
         calls += 1;
         // Fallback per attempt means each failed attempt costs 2 fetches (primary + fallback).
         // Succeed on the 3rd attempt's primary (5th total call).
@@ -161,7 +161,7 @@ describe("proxyIdentityAt", () => {
       }) as typeof fetch,
     });
     expect(identity).toBeNull();
-    // First attempt spends the budget — fallback must not fire when the aggregate deadline is already expired.
+    // First attempt spends the budget; remaining retries must not fire.
     expect(calls).toBe(1);
   });
 });
@@ -958,6 +958,23 @@ describe("TLS fallback (https:// on TLS-only listener)", () => {
     });
     expect(live).not.toBeNull();
     expect(urls[0]).toBe("https://127.0.0.1:10100/healthz");
+  });
+
+  test("runtime origin selects https even when current config is plain HTTP", async () => {
+    const urls: string[] = [];
+    const live = await findLiveProxy({
+      readPidFn: () => 4242,
+      readRuntimeFn: pid => pid === 4242
+        ? { pid, port: 10443, hostname: "127.0.0.1", origin: "https://proxy.example.com" }
+        : null,
+      configFn: () => ({ port: 10100 }),
+      fetchFn: (async (url: string | URL | Request) => {
+        urls.push(String(url));
+        return healthz(OURS);
+      }) as typeof fetch,
+    });
+    expect(live?.source).toBe("runtime");
+    expect(urls[0]).toBe("https://127.0.0.1:10443/healthz");
   });
 
   test("findLiveProxy falls back to http when https throws and config.tls is set", async () => {

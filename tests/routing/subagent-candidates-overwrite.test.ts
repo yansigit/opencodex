@@ -35,7 +35,7 @@ function installPoolCredential(accountId: string, now = Date.now()): void {
 
 function cfg(overrides: Partial<OcxConfig> = {}): OcxConfig {
   return {
-    port: 10100,
+    port: 18123,
     providers: {
       openai: {
         adapter: "openai-responses",

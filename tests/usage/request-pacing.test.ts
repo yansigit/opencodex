@@ -14,10 +14,6 @@ import { providerFetch } from "../../src/server/responses/fetch-helpers";
 import { fetchWithHeaderTimeout } from "../../src/server/responses/fetch-helpers";
 import { requestPacingOverloadResponse } from "../../src/server/responses/pacing-overload";
 import type { OcxProviderConfig } from "../../src/types";
-import { requestPacingConfigError } from "../../src/config";
-import { enrichProviderFromRegistry, providerConfigSeed } from "../../src/providers/derive";
-import { PROVIDER_REGISTRY } from "../../src/providers/registry";
-import { OAUTH_PROVIDERS, resolveRefreshPolicy } from "../../src/oauth";
 
 afterEach(() => resetProviderRequestPacingForTest());
 
@@ -25,7 +21,7 @@ function provider(requestPacing: OcxProviderConfig["requestPacing"]): OcxProvide
   return { adapter: "openai-chat", baseUrl: "https://example.test/v1", requestPacing };
 }
 
-function fakePacingClock(random = 0.5): {
+function fakePacingClock(): {
   runtime: RequestPacingRuntime;
   now: () => number;
   pendingTimerCount: () => number;
@@ -37,7 +33,6 @@ function fakePacingClock(random = 0.5): {
   return {
     runtime: {
       now: () => now,
-      random: () => random,
       setTimer: (callback, delayMs) => {
         const id = nextId++;
         timers.set(id, { at: now + delayMs, callback });
@@ -85,138 +80,6 @@ describe("requestPacingIntervalMs", () => {
     const configured = provider({ enabled: true, models: { slow: { minIntervalMs: 900 } } });
     expect(requestPacingIntervalMs(configured, "slow")).toBe(900);
     expect(requestPacingIntervalMs(configured, "other")).toBe(0);
-  });
-
-  test("validates jitter and keeps model jitter as an additional delay", async () => {
-    expect(requestPacingConfigError({ enabled: true, minIntervalMs: 100, jitterMs: 60_001 })).not.toBeNull();
-    expect(requestPacingConfigError({ enabled: true, minIntervalMs: 100, jitterMs: 25 })).toBeNull();
-    expect(requestPacingConfigError({ enabled: true, jitterMs: 25 })).toBeNull();
-    expect(requestPacingConfigError({ enabled: true, jitterMs: 0 })).toBeNull();
-    expect(requestPacingConfigError({
-      enabled: true,
-      minIntervalMs: 100,
-      models: { slow: { jitterMs: 25 } },
-    })).toBeNull();
-
-    const clock = fakePacingClock();
-    setProviderRequestPacingRuntimeForTest(clock.runtime);
-    const configured = provider({
-      enabled: true,
-      minIntervalMs: 100,
-      models: { slow: { minIntervalMs: 200, jitterMs: 50 } },
-    });
-    const first = waitForProviderRequestSlot("jitter", configured, "slow");
-    await first;
-    const second = waitForProviderRequestSlot("jitter", configured, "slow");
-    let settled = false;
-    void second.then(() => { settled = true; });
-    clock.advanceBy(224);
-    await Promise.resolve();
-    expect(settled).toBe(false);
-    clock.advanceBy(1);
-    await second;
-    expect(clock.now()).toBe(225);
-  });
-
-  test("tracks a model-only jitter lane without weakening the provider interval", async () => {
-    const clock = fakePacingClock();
-    setProviderRequestPacingRuntimeForTest(clock.runtime);
-    const configured = provider({
-      enabled: true,
-      minIntervalMs: 100,
-      models: { slow: { jitterMs: 50 } },
-    });
-    await waitForProviderRequestSlot("model-jitter", configured, "slow");
-    const second = waitForProviderRequestSlot("model-jitter", configured, "slow");
-    let settled = false;
-    void second.then(() => { settled = true; });
-    clock.advanceBy(124);
-    await Promise.resolve();
-    expect(settled).toBe(false);
-    clock.advanceBy(1);
-    await second;
-    expect(clock.now()).toBe(125);
-  });
-
-  test("applies model-only jitter without a provider interval and leaves unrelated models unpaced", async () => {
-    const clock = fakePacingClock(1);
-    setProviderRequestPacingRuntimeForTest(clock.runtime);
-    const configured = provider({ enabled: true, models: { slow: { jitterMs: 50 } } });
-    await waitForProviderRequestSlot("model-only-jitter", configured, "slow");
-    const second = waitForProviderRequestSlot("model-only-jitter", configured, "slow");
-    let secondSettled = false;
-    void second.then(() => { secondSettled = true; });
-    clock.advanceBy(49);
-    await Promise.resolve();
-    expect(secondSettled).toBe(false);
-    clock.advanceBy(1);
-    await second;
-    expect(clock.now()).toBe(50);
-    const unrelatedAt = clock.now();
-    await waitForProviderRequestSlot("model-only-jitter", configured, "other");
-    expect(clock.now()).toBe(unrelatedAt);
-  });
-
-  test.each([1, 2])("never exceeds jitterMs for injected random boundary %s", async random => {
-    const clock = fakePacingClock(random);
-    setProviderRequestPacingRuntimeForTest(clock.runtime);
-    const configured = provider({ enabled: true, minIntervalMs: 100, jitterMs: 50 });
-    await waitForProviderRequestSlot(`jitter-boundary-${random}`, configured, "model");
-    const second = waitForProviderRequestSlot(`jitter-boundary-${random}`, configured, "model");
-    clock.advanceBy(150);
-    await second;
-    expect(clock.now()).toBe(150);
-  });
-
-  test("clamps injected randomness so jitter never accelerates a slot", async () => {
-    const clock = fakePacingClock(-1);
-    setProviderRequestPacingRuntimeForTest(clock.runtime);
-    const configured = provider({ enabled: true, minIntervalMs: 100, jitterMs: 50 });
-    await waitForProviderRequestSlot("jitter-negative", configured, "model");
-    const second = waitForProviderRequestSlot("jitter-negative", configured, "model");
-    let settled = false;
-    void second.then(() => { settled = true; });
-    clock.advanceBy(99);
-    await Promise.resolve();
-    expect(settled).toBe(false);
-    clock.advanceBy(1);
-    await second;
-    expect(clock.now()).toBe(100);
-  });
-
-  test("Antigravity pacing defaults fill only absent settings", () => {
-    const entry = PROVIDER_REGISTRY.find(row => row.id === "google-antigravity")!;
-    expect(providerConfigSeed(entry).requestPacing).toEqual({
-      enabled: true,
-      requestsPerMinute: 30,
-      minIntervalMs: 2_000,
-      jitterMs: 500,
-    });
-
-    const legacy = { adapter: "google", baseUrl: entry.baseUrl } as OcxProviderConfig;
-    enrichProviderFromRegistry("google-antigravity", legacy);
-    expect(legacy.requestPacing).toEqual({
-      enabled: true,
-      requestsPerMinute: 30,
-      minIntervalMs: 2_000,
-      jitterMs: 500,
-    });
-
-    const explicit = { adapter: "google", baseUrl: entry.baseUrl, requestPacing: { enabled: false, minIntervalMs: 1 } } as OcxProviderConfig;
-    enrichProviderFromRegistry("google-antigravity", explicit);
-    expect(explicit.requestPacing).toEqual({ enabled: false, minIntervalMs: 1 });
-
-    const custom = { adapter: "google", baseUrl: entry.baseUrl, requestPacing: { enabled: true, minIntervalMs: 9_000, jitterMs: 7 } } as OcxProviderConfig;
-    enrichProviderFromRegistry("google-antigravity", custom);
-    expect(custom.requestPacing).toEqual({ enabled: true, minIntervalMs: 9_000, jitterMs: 7 });
-  });
-
-  test("Antigravity explicitly opts into lazy-only refresh", () => {
-    expect((OAUTH_PROVIDERS["google-antigravity"] as unknown as { defaultRefreshPolicy?: string }).defaultRefreshPolicy).toBe("lazy-only");
-    expect(resolveRefreshPolicy("google-antigravity", { providers: {} } as never)).toBe("lazy-only");
-    expect(resolveRefreshPolicy("google-antigravity", {
-      providers: { "google-antigravity": { refreshPolicy: "proactive" } },
-    } as never)).toBe("proactive");
   });
 });
 
@@ -438,27 +301,6 @@ describe("provider request pacing queue", () => {
     await fetchWithHeaderTimeout("https://example.test/v1/chat/completions", {}, new AbortController().signal, 50, false, executor);
     const second = await fetchWithHeaderTimeout("https://example.test/v1/chat/completions", {}, new AbortController().signal, 50, false, executor);
     expect(second.status).toBe(200);
-  });
-
-  test("shared upstream fetches refuse redirects by default without exposing Location", async () => {
-    let redirect: RequestRedirect | undefined;
-    const executor = (async (_url: string | URL | Request, init?: RequestInit) => {
-      redirect = init?.redirect;
-      return new Response(null, {
-        status: 307,
-        headers: { location: "https://attacker.example/collect?token=secret" },
-      });
-    }) as typeof fetch;
-
-    await expect(fetchWithHeaderTimeout(
-      "https://provider.example/v1/responses",
-      { method: "POST", body: "{}" },
-      new AbortController().signal,
-      500,
-      false,
-      executor,
-    )).rejects.toThrow("configure the final upstream URL directly");
-    expect(redirect).toBe("manual");
   });
 
   test("Google AI Studio providerFetch paces each attempt through waitForPacing", async () => {

@@ -34,7 +34,7 @@ export interface LivenessIo {
    * Destructive callers only ever receive pids that passed this gate.
    */
   verifyPidFn?: (candidatePid: number) => number | null;
-  readRuntimeFn?: (pid?: number) => { pid?: number; port: number; hostname?: string } | null;
+  readRuntimeFn?: (pid?: number) => { pid?: number; port: number; hostname?: string; origin?: string } | null;
   configFn?: () => { port?: number; hostname?: string; tls?: OcxConfig["tls"] };
   timeoutMs?: number;
   /**
@@ -104,13 +104,35 @@ export function isOpencodexHealthz(body: HealthzIdentity | null): boolean {
   return body.status === "ok" && typeof body.version === "string" && typeof body.uptime === "number";
 }
 
+function runtimeScheme(origin: string | undefined, fallback: "http" | "https"): "http" | "https" {
+  if (origin) {
+    try {
+      const protocol = new URL(origin).protocol;
+      if (protocol === "https:") return "https";
+      if (protocol === "http:") return "http";
+    } catch { /* validated runtime records should not reach this branch */ }
+  }
+  return fallback;
+}
+
+const defaultProbeFetch: typeof fetch = (async (input, init) => {
+  const url = input instanceof Request ? input.url : String(input);
+  if (new URL(url).protocol === "https:") {
+    // This is a fixed local liveness probe, not a remote identity check. Local operators
+    // commonly use a private CA or self-signed certificate whose trust is established by
+    // the on-disk runtime record plus the identity-checked response body.
+    return fetch(input, { ...init, tls: { rejectUnauthorized: false } });
+  }
+  return directLocalHttpFetch(input, init);
+}) as typeof fetch;
+
 /** Identity-checked /healthz probe; null when unreachable, non-OK, or not our proxy. */
 export async function proxyIdentityAt(
   port: number,
   opts: { hostname?: string; expectedPid?: number; scheme?: "http" | "https" } = {},
   io: LivenessIo = {},
 ): Promise<{ pid: number | null; version?: string } | null> {
-  const fetchFn = io.fetchFn ?? directLocalHttpFetch;
+  const fetchFn = io.fetchFn ?? defaultProbeFetch;
   const sleepFn = io.sleepFn ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
   const nowFn = io.nowFn ?? Date.now;
   const baseTimeoutMs = io.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
@@ -183,6 +205,8 @@ export async function findLiveProxy(io: LivenessIo = {}): Promise<LiveProxy | nu
   const probeIo: LivenessIo = io;
   const budgetExhausted = (): boolean =>
     deadlineAt !== undefined && nowFn() >= deadlineAt;
+  const config = configFn();
+  const defaultScheme: "http" | "https" = config.tls ? "https" : "http";
 
   // The cheap pid is discovery-only. Before it can appear in a returned (killable) result
   // it must pass the full identity check AND the verifier must echo the exact candidate —
@@ -200,8 +224,6 @@ export async function findLiveProxy(io: LivenessIo = {}): Promise<LiveProxy | nu
     return verified === reported ? verified : null;
   };
 
-  const config = configFn();
-  const defaultScheme: "http" | "https" = config.tls ? "https" : "http";
   const pid = readPidFn();
   let probedPort: number | null = null;
   if (pid) {
@@ -209,7 +231,11 @@ export async function findLiveProxy(io: LivenessIo = {}): Promise<LiveProxy | nu
     if (runtime?.port) {
       if (budgetExhausted()) return null;
       probedPort = runtime.port;
-      const identity = await proxyIdentityAt(runtime.port, { hostname: runtime.hostname, expectedPid: pid, scheme: defaultScheme }, probeIo);
+      const identity = await proxyIdentityAt(runtime.port, {
+        hostname: runtime.hostname,
+        expectedPid: pid,
+        scheme: runtimeScheme(runtime.origin, defaultScheme),
+      }, probeIo);
       if (identity) {
         // healthz confirmed the pid itself → trusted; a pidless legacy body did not,
         // so the cheap pid must pass full identity verification before it is returned.
@@ -232,7 +258,11 @@ export async function findLiveProxy(io: LivenessIo = {}): Promise<LiveProxy | nu
   if (record?.port && record.port !== probedPort) {
     if (budgetExhausted()) return null;
     const expectedPid = typeof record.pid === "number" ? record.pid : undefined;
-    const identity = await proxyIdentityAt(record.port, { hostname: record.hostname, expectedPid, scheme: defaultScheme }, probeIo);
+    const identity = await proxyIdentityAt(record.port, {
+      hostname: record.hostname,
+      expectedPid,
+      scheme: runtimeScheme(record.origin, defaultScheme),
+    }, probeIo);
     // Only the healthz-reported pid is authoritative here. The record's pid may be stale
     // (its process dead, the port reused by a pidless legacy proxy) — synthesizing it
     // would hand destructive callers (stopProxy → kill fallback) a reusable pid.
@@ -362,7 +392,7 @@ export async function probeReadiness(
   opts: { hostname?: string; expectedPid?: number; scheme?: "http" | "https" } = {},
   io: ReadinessProbeIo = {},
 ): Promise<ReadinessProbeResult | null> {
-  const fetchFn = io.fetchFn ?? directLocalHttpFetch;
+  const fetchFn = io.fetchFn ?? defaultProbeFetch;
   const primaryScheme: "http" | "https" = opts.scheme ?? "http";
   const fallbackScheme: "http" | "https" = primaryScheme === "http" ? "https" : "http";
   const tryFetch = async (scheme: "http" | "https"): Promise<ReadinessProbeResult | null> => {

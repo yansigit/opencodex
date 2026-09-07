@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../../../src/config";
-import { startServer } from "../../../src/server";
+import { isLoopbackPeerAddress, startServer } from "../../../src/server";
 import { serializeSessionBundle } from "../../../src/oauth/aistudio-session-sync";
 import { repoPath } from "../../helpers/repo-root";
 
@@ -39,6 +39,16 @@ describe("aistudio legacy routes and session ingest endpoint", () => {
     expect(source.indexOf("Proxy API key is required")).toBeLessThan(source.indexOf("await harvestSession()", source.indexOf("btnAutoSync")));
     expect(source).toContain("chrome.runtime.id");
     expect(source).toContain('"x-opencodex-api-key": proxyApiKey');
+  });
+
+  test("AI Studio credential routes recognize only literal loopback peer addresses", () => {
+    expect(isLoopbackPeerAddress("127.0.0.1")).toBe(true);
+    expect(isLoopbackPeerAddress("127.255.12.9")).toBe(true);
+    expect(isLoopbackPeerAddress("::1")).toBe(true);
+    expect(isLoopbackPeerAddress("::ffff:127.0.0.1")).toBe(true);
+    expect(isLoopbackPeerAddress("192.168.1.10")).toBe(false);
+    expect(isLoopbackPeerAddress("::ffff:192.168.1.10")).toBe(false);
+    expect(isLoopbackPeerAddress(null)).toBe(false);
   });
   test("GET /aistudio/bridge returns HTTP 410 HTML migration notice", async () => {
     const server = startServer(0);
@@ -171,6 +181,26 @@ describe("aistudio legacy routes and session ingest endpoint", () => {
         body: JSON.stringify({ token }),
       });
       expect(bearer.status).toBe(401);
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("POST /api/aistudio/session rejects missing SAPISID and malformed cookie data", async () => {
+    const server = configuredServer();
+    try {
+      const post = (cookies: unknown[]) => fetch(new URL("/api/aistudio/session", server.url), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "chrome-extension://test-extension-id",
+          "x-opencodex-api-key": "local-secret",
+        },
+        body: JSON.stringify({ selectedProject: "p", windowId: "w", cookies }),
+      });
+      expect((await post([{ name: "SSID", value: "secondary-only" }])).status).toBe(400);
+      expect((await post([{ name: "SAPISID", value: "secret\r\nInjected: yes" }])).status).toBe(400);
+      expect(existsSync(join(testDir, "aistudio-session.json"))).toBe(false);
     } finally {
       await server.stop(true);
     }

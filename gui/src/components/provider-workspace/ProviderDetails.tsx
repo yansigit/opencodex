@@ -13,6 +13,7 @@ import { ProviderIcon } from "./ProviderRail";
 import { Switch } from "../../ui";
 import { IconChevron, IconTrash } from "../../icons";
 import ProviderOverview from "./ProviderOverview";
+import type { ModelRow } from "../../pages/models-shared";
 import ProviderModels from "./ProviderModels";
 import ProviderUsage from "./ProviderUsage";
 import ProviderAuthPanel from "./ProviderAuthPanel";
@@ -20,7 +21,7 @@ import type { CodexAccountPoolController } from "../../hooks/useCodexAccountPool
 import ProviderSettings from "./ProviderSettings";
 import { UnsavedLeaveDialog } from "./ProviderDialogs";
 import type { ProviderQuotaReportView } from "../../provider-workspace/report";
-import type { AccountLoadState, ProviderModelUsageRow, ProviderAccountUsageRow, ProviderUsageTotals, OAuthAccountRow, ApiKeyRow, LoginHint, ProviderAuthHandlers, ProviderUpdatePatch, ProviderUpdateResult } from "./types";
+import type { AccountLoadState, ProviderModelUsageRow, ProviderUsageTotals, OAuthAccountRow, ApiKeyRow, LoginHint, ProviderAuthHandlers, ProviderUpdatePatch, ProviderUpdateResult } from "./types";
 
 type Tab = "overview" | "models" | "usage" | "accounts" | "settings";
 
@@ -28,11 +29,14 @@ export default function ProviderDetails({
   item,
   usageTotals,
   modelUsage,
-  accountUsage,
   quotaReport,
   availableModels,
   hasLiveModels,
   selectedModels,
+  modelRows,
+  modelRevision,
+  modelRowsReady,
+  onOpenModels,
   modelsLoading,
   modelsLoadFailed,
   onRetryModels,
@@ -61,12 +65,15 @@ export default function ProviderDetails({
   item: WorkspaceItem;
   usageTotals?: ProviderUsageTotals;
   modelUsage?: ProviderModelUsageRow[];
-  accountUsage?: ProviderAccountUsageRow[];
   quotaReport?: ProviderQuotaReportView;
   availableModels: string[];
   /** Server-reported live-catalog provenance; see filterModels(). */
   hasLiveModels: boolean;
   selectedModels: string[];
+  modelRows: ModelRow[] | null;
+  modelRevision: string;
+  modelRowsReady: boolean;
+  onOpenModels: () => void;
   modelsLoading?: boolean;
   modelsLoadFailed?: boolean;
   onRetryModels?: () => void;
@@ -295,6 +302,10 @@ export default function ProviderDetails({
             availableModels={availableModels}
             hasLiveModels={hasLiveModels}
             selectedModels={selectedModels}
+            modelRows={modelRows}
+            modelRevision={modelRevision}
+            modelRowsReady={modelRowsReady}
+            onOpenModels={onOpenModels}
             modelsLoading={modelsLoading}
             modelsLoadFailed={modelsLoadFailed}
             needsReauth={
@@ -313,8 +324,6 @@ export default function ProviderDetails({
             currentQuotaReading={currentQuotaReading}
             quotaIdentity={connectionIdentity}
             modelUsage={modelUsage}
-            accounts={accounts}
-            accountUsage={accountUsage}
             {...(onRefreshQuota ? { onRefreshQuota } : {})}
           />
         )}
@@ -324,7 +333,6 @@ export default function ProviderDetails({
             apiBase={apiBase}
             oauth={oauth}
             accounts={accounts}
-            accountUsage={accountUsage}
             keys={keys}
             accountLoadState={accountLoadState}
             switchingAccountId={switchingAccountId}

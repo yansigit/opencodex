@@ -490,8 +490,8 @@ test("a persisted runtime selection moved by another process during the await bl
  * Every case above drives `/api/sync`, which is a retained root. This one drives
  * `PATCH /api/providers` — one of the sixteen management mutations that used to
  * reach a catalog write through `refreshCodexCatalogBestEffort`, whose entire
- * error policy silently swallowed every exception. The interesting window is
- * AFTER the route has already persisted its own mutation and approved the refresh: two processes
+ * error policy silently discarded every exception. The interesting window is AFTER the route has
+ * already persisted its own mutation and approved the refresh: two processes
  * arriving there together must serialize, and neither may report `committed`
  * for bytes the other replaced.
  *
@@ -645,9 +645,8 @@ test("two processes at the post-approval management seam serialize instead of in
       continue;
     }
     // The route persisted its mutation, so it must answer 2xx no matter what the
-    // catalog attempt decided. A throw here would reproduce the old swallowed-error failure
+    // catalog attempt decided. A throw here would reproduce the old silent-catch failure
     // inverted: a persisted change reported as a 500.
-    if (parsed.status >= 300) throw new Error(JSON.stringify(parsed));
     expect(parsed.status).toBeGreaterThanOrEqual(200);
     expect(parsed.status).toBeLessThan(300);
     // Whatever happened, it is REPORTED — never swallowed into silence.

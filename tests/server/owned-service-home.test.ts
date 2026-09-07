@@ -1,13 +1,26 @@
 import { expect, test } from "bun:test";
-import { copyFileSync, mkdirSync, mkdtempSync} from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { claimOwnedServiceHome, withOwnedServiceHomePreload } from "../helpers/owned-service-home";
+import {
+  claimOwnedServiceHome,
+  windowsServiceProbeEnv,
+  withOwnedServiceHomePreload,
+} from "../helpers/owned-service-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { helperPath, repoRoot as resolveRepoRoot } from "../helpers/repo-root";
 
 const repoRoot = resolveRepoRoot();
+
+test("Windows owned-service-home fixture supplies its ACL preload module", () => {
+  const env = windowsServiceProbeEnv();
+  expect(env.OCX_TEST_SERVICE_HOME_PROBE).toBe("1");
+  const aclModuleUrl = env.OCX_TEST_WINDOWS_ACL_MODULE;
+  expect(aclModuleUrl).toBeTruthy();
+  expect(existsSync(fileURLToPath(aclModuleUrl!))).toBe(true);
+});
 
 test("Windows owned-service-home fixture masks manager queries in a real child", async () => {
   const root = mkdtempSync(join(tmpdir(), "ocx-owned-service-home-seam-"));

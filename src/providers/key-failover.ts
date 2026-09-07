@@ -8,7 +8,8 @@
  *
  * Modelled after src/codex/routing.ts cooldown logic but scoped to plain API-key pools.
  */
-import { mutatePersistedConfig } from "../config";
+import { commitProviderApiKeySelection } from "./api-key-selection";
+import type { ProviderApiKeySelection } from "../types/provider";
 import { isAzureIdentityProvider } from "../config/provider-validation";
 import { routedProviderConfig } from "../router";
 import type { OcxConfig, OcxProviderConfig, RateLimitRetryPolicy, TransientRetryPolicy } from "../types";
@@ -38,7 +39,10 @@ const DEFAULT_RATE_LIMIT_RETRY = {
   respectRetryAfter: true,
 } as const satisfies Required<RateLimitRetryPolicy>;
 
-/** Total-send budget used by a bare transient-5xx retry opt-in. */
+/**
+ * Default transient-5xx retry used when a provider opts in with a bare
+ * `transientRetryOn5xx: {}`. `attempts` is a TOTAL send budget, not extra retries.
+ */
 const DEFAULT_TRANSIENT_RETRY = {
   enabled: true,
   attempts: 3,
@@ -126,6 +130,16 @@ export function rateLimitRetryPolicyFor(
   };
 }
 
+/**
+ * Normalize a provider's `transientRetryOn5xx` policy, or return null when it is absent,
+ * explicitly disabled, not key-auth, or not the `openai-chat` adapter.
+ *
+ * The adapter gate is part of the accepted scope, not incidental: this first version covers
+ * key-auth `openai-chat` only, and without an explicit check any generic key-auth adapter
+ * could opt in. Auth mode follows the same fail-closed rule as `rateLimitRetryPolicyFor` —
+ * explicit `key` or the documented omitted default, never OAuth, forward, local, or an
+ * unknown value.
+ */
 export function transientRetryPolicyFor(
   provider: Pick<OcxProviderConfig, "transientRetryOn5xx" | "authMode" | "adapter" | "azureCredential">,
 ): Required<TransientRetryPolicy> | null {
@@ -178,28 +192,27 @@ function rotateKeyAfterFailure(
   retryAfterHeader: string | null | undefined,
   now = Date.now(),
   attemptedKey?: string,
+  attemptedSelection?: ProviderApiKeySelection,
 ): OcxProviderConfig | null {
   const provider = config.providers[providerName];
   if (!provider) return null;
   if (isAzureIdentityProvider(provider)) return null;
   if (provider.authMode === "oauth" || provider.authMode === "forward") return null;
 
-  const failedKey = attemptedKey ?? provider.apiKey;
+  const failedKey = attemptedSelection?.reference ?? attemptedKey ?? provider.apiKey;
   type Rotation =
-    | { provider: OcxProviderConfig; failedId?: string; candidateId?: string }
+    | { failedId?: string; candidateId?: string }
     | { exhaustedCount: number; failedId?: string };
-  const outcome = mutatePersistedConfig<Rotation | null>(fresh => {
-    const freshProvider = fresh.providers[providerName];
-    if (!freshProvider || isAzureIdentityProvider(freshProvider)
-      || freshProvider.authMode === "oauth" || freshProvider.authMode === "forward") {
-      return { changed: false, value: null };
-    }
+  const outcome = commitProviderApiKeySelection<Rotation | null>(config, providerName, freshProvider => {
     const pool = freshProvider.apiKeyPool;
     if (!pool || pool.length < 2) return { changed: false, value: null };
+
     // The callback can be rerun after rebasing, so identify the failed key here but
     // defer the in-memory cooldown side effect until persistence has succeeded.
-    const failedEntry = pool.find(entry => entry.key === failedKey
-      || (failedKey !== undefined && resolveProviderApiKey(entry.key) === failedKey));
+    const failedEntry = attemptedSelection?.entryId
+      ? pool.find(entry => entry.id === attemptedSelection.entryId && entry.key === failedKey)
+      : pool.find(entry => entry.key === failedKey
+        || (failedKey !== undefined && resolveProviderApiKey(entry.key) === failedKey));
 
     const activeMatchesFailure = freshProvider.apiKey === failedKey
       || (failedKey !== undefined && resolveProviderApiKey(freshProvider.apiKey) === failedKey);
@@ -208,7 +221,7 @@ function rotateKeyAfterFailure(
       if (activeEntry && !isKeyInCooldown(providerName, activeEntry.id, now)) {
         return {
           changed: false,
-          value: { provider: structuredClone(freshProvider), failedId: failedEntry?.id },
+          value: { failedId: failedEntry?.id },
         };
       }
     }
@@ -222,15 +235,20 @@ function rotateKeyAfterFailure(
       return {
         changed: true,
         value: {
-          provider: structuredClone(freshProvider),
           failedId: failedEntry?.id,
           candidateId: candidate.id,
         },
       };
     }
     return { changed: false, value: { exhaustedCount: pool.length, failedId: failedEntry?.id } };
-  });
-  if (outcome.status === "unavailable" || outcome.value === null) return null;
+  }, attemptedSelection);
+  if (outcome.status === "unavailable") return null;
+  if (outcome.status === "superseded") {
+    // A newer manual selection (including A→B→A) owns subsequent dispatch. Reusing the
+    // same failed key here would loop forever; preserve its original failure instead.
+    return outcome.provider.apiKey !== failedKey ? structuredClone(outcome.provider) : null;
+  }
+  if (outcome.value === null) return null;
   if (outcome.value.failedId) {
     // A 401 is a verdict about the credential itself, not a timing signal: the key is rejected
     // until an operator replaces it, and upstreams send no Retry-After for it. Hold it for the
@@ -246,7 +264,7 @@ function rotateKeyAfterFailure(
     return null;
   }
 
-  const committed = structuredClone(outcome.value.provider);
+  const committed = structuredClone(outcome.provider);
   config.providers[providerName] = committed;
   if (outcome.value.candidateId) {
     console.warn(
@@ -263,8 +281,9 @@ export function rotateKeyOn429(
   retryAfterHeader: string | null | undefined,
   now = Date.now(),
   attemptedKey?: string,
+  attemptedSelection?: ProviderApiKeySelection,
 ): OcxProviderConfig | null {
-  return rotateKeyAfterFailure(config, providerName, 429, retryAfterHeader, now, attemptedKey);
+  return rotateKeyAfterFailure(config, providerName, 429, retryAfterHeader, now, attemptedKey, attemptedSelection);
 }
 
 /**
@@ -280,8 +299,9 @@ export function rotateKeyOn401(
   providerName: string,
   now = Date.now(),
   attemptedKey?: string,
+  attemptedSelection?: ProviderApiKeySelection,
 ): OcxProviderConfig | null {
-  return rotateKeyAfterFailure(config, providerName, 401, null, now, attemptedKey);
+  return rotateKeyAfterFailure(config, providerName, 401, null, now, attemptedKey, attemptedSelection);
 }
 
 export function sweepExpiredApiKeyCooldowns(now = Date.now()): number {
@@ -298,6 +318,7 @@ interface RotateProviderTransportOptions {
   retryAfter?: string | null;
   now?: number;
   attemptedKey?: string;
+  attemptedSelection?: ProviderApiKeySelection;
   promptCacheKey?: string;
 }
 
@@ -319,6 +340,7 @@ export function rotateProviderTransportOn429(
     options.retryAfter,
     options.now,
     options.attemptedKey,
+    options.attemptedSelection ?? routedProvider._apiKeyAttempt,
   );
   if (!rotated) return null;
   return applyRotatedTransport(providerName, routedProvider, rotated, options.promptCacheKey);
@@ -331,7 +353,8 @@ export function rotateProviderTransportOn401(
   routedProvider: OcxProviderTransport,
   options: Omit<RotateProviderTransportOptions, "retryAfter"> = {},
 ): OcxProviderTransport | null {
-  const rotated = rotateKeyOn401(config, providerName, options.now, options.attemptedKey);
+  const rotated = rotateKeyOn401(config, providerName, options.now, options.attemptedKey,
+    options.attemptedSelection ?? routedProvider._apiKeyAttempt);
   if (!rotated) return null;
   return applyRotatedTransport(providerName, routedProvider, rotated, options.promptCacheKey);
 }
@@ -346,10 +369,6 @@ function applyRotatedTransport(
   const routedSession = routedProvider.headers?.[OPENCODE_GO_SESSION_HEADER];
   const retryProvider: OcxProviderTransport = {
     ...committedRoute,
-    ...(routedProvider.promptCacheKey !== undefined ? { promptCacheKey: routedProvider.promptCacheKey } : {}),
-    ...(routedProvider.parallelToolCalls !== undefined ? { parallelToolCalls: routedProvider.parallelToolCalls } : {}),
-    ...(routedProvider.modelContextWindows !== undefined ? { modelContextWindows: routedProvider.modelContextWindows } : {}),
-    ...(routedProvider.noTemperatureModels !== undefined ? { noTemperatureModels: routedProvider.noTemperatureModels } : {}),
     ...(routedProvider.fetch !== undefined ? { fetch: routedProvider.fetch } : {}),
     ...(routedSession !== undefined
       ? {

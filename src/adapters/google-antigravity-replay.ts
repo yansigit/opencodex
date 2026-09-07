@@ -3,7 +3,6 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from "node:f
 import { dirname, join } from "node:path";
 import { atomicWriteFileAsync, getConfigDir, type AtomicWriteAsyncTestSeam } from "../config";
 import { enforceAppOwnedMemoryBudget } from "../lib/app-owned-memory";
-import { ANTIGRAVITY_SIGNATURE_BYPASS_SENTINEL } from "./google-antigravity-wire";
 
 /**
  * Google-family thoughtSignature reasoning-replay cache.

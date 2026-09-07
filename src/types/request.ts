@@ -74,10 +74,10 @@ export interface OcxParsedRequest {
   _cursorConversationId?: string;
   /** Stable upstream client thread identity, used only to derive provider-scoped continuation ids. */
   _clientThreadId?: string;
-  /** True when promptCacheKey is a shared cache cohort rather than a conversation identity. */
+  /** True when promptCacheKey identifies a shared cache cohort rather than one conversation. */
   _promptCacheKeyIsSharedCohort?: boolean;
-  /** Provider-private Command Code session affinity id, stable across in-process request mutation. */
-  _commandCodeSessionId?: string;
+  /** Request-local Anthropic source envelope; never serialized into response state or logs. */
+  _claudeSourceEnvelope?: ClaudeSourceEnvelope;
   /** Cursor-only thread owner; may be an opaque process-local Desktop session/thread identity. */
   _cursorClientThreadId?: string;
   /** Conversation/provider/account/model-bound namespace for reasoning replay state. */
@@ -133,13 +133,11 @@ export interface OcxParsedRequest {
    */
   _compactionRequest?: boolean;
   /**
-  * True when the current request newly introduced a stored compaction summary/marker. Historical
-  * markers restored by previous_response_id expansion were already acknowledged and do not reset
-  * provider-private continuation caches again on every later turn.
-  */
+   * True when the current request newly introduced a stored compaction summary/marker. Historical
+   * markers restored by previous_response_id expansion were already acknowledged and do not reset
+   * provider-private continuation caches again on every later turn.
+   */
   _contextCompactionBoundary?: boolean;
-  /** Request-local Anthropic source envelope; never serialized into response state or logs. */
-  _claudeSourceEnvelope?: ClaudeSourceEnvelope;
 }
 
 export interface OcxContext {
@@ -352,7 +350,7 @@ export interface OcxProviderContinuationState {
 }
 
 export type AdapterEvent =
-  | { type: "heartbeat"; replayUnsafe?: true }
+  | { type: "heartbeat" }
   | { type: "text_delta"; text: string; phase?: OcxMessagePhase }
   | { type: "thinking_delta"; thinking: string }
   // Anthropic extended-thinking round-trip: signature_delta for the current thinking block, and

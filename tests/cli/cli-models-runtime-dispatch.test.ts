@@ -54,3 +54,4 @@ describe("models runtime subcommand dispatch (#3094)", () => {
     expect(new Set(MODELS_RUNTIME_SUBCOMMANDS).size).toBe(MODELS_RUNTIME_SUBCOMMANDS.length);
   });
 });
+

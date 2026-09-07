@@ -47,6 +47,6 @@ export function mapCursorServerMessage(
       return [];
     case "local_side_effect":
       // Internal retry-safety signal only; keep the bridge alive without producing protocol output.
-      return [{ type: "heartbeat", replayUnsafe: true }];
+      return [{ type: "heartbeat" }];
   }
 }

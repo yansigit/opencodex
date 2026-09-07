@@ -52,3 +52,4 @@ whole runtime eagerly.
 
 - `bun test tests/cli-models-runtime-dispatch.test.ts` focused. No repository-wide suite.
 - typecheck and the rest are CI's job, judged at the end of the train.
+

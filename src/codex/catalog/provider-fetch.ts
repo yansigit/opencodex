@@ -68,7 +68,6 @@ import {
   providerRedirectError,
 } from "../../lib/provider-outbound";
 import { redactSecretString } from "../../lib/redact";
-import { isAntigravityOAuthProvider } from "../../lib/provider-tls-profile";
 import {
   extractProviderModelItems,
   isRegistryModelDiscoveryUrl,
@@ -1420,18 +1419,12 @@ export function catalogHintsFromModelsApiItem(providerName: string, item: Provid
       item.default_context_size,
       plainRecord(item.meta)?.n_ctx_train,
     );
-  const maxInputTokens = positiveSafeInteger(
-    limits?.max_input_tokens,
-    item.max_input_tokens,
-    item.max_input_length,
-    item.max_prompt_tokens,
-  );
+  const maxInputTokens = positiveSafeInteger(limits?.max_input_tokens, item.max_input_tokens);
   const maxOutputTokens = positiveSafeInteger(
     capabilityRecord?.max_output_tokens,
     limits?.max_output_tokens,
     metadata?.max_output_tokens,
     item.max_output_tokens,
-    limits?.max_tokens,
   );
   // Some OpenAI-compatible catalogs expose the selectable ladder under
   // `reasoning_parameters.efforts` instead of the older `reasoning_efforts` key.
@@ -1520,11 +1513,14 @@ async function fetchProviderModelsWithAuth(
     && prov.googleMode === "vertex"
     && (prov.models?.length ?? 0) === 0
     && Boolean(prov.defaultModel);
-  // Ordered dedupe union: Vertex seed, then `models`, then `retainModels`. `configured` is the
+  const seedStaticDefault = prov.liveModels === false
+    && (prov.models?.length ?? 0) === 0
+    && Boolean(prov.defaultModel);
+  // Ordered dedupe union: implicit default seed, then `models`, then `retainModels`. `configured` is the
   // single seed for the static path, the degraded fallback, drop diagnostics, and provider hints,
   // so a retain-only id must enter here or it never exists to be retained (#1690).
   const configuredIds = [...new Set([
-    ...(seedVertexDefault && prov.defaultModel ? [prov.defaultModel] : []),
+    ...((seedVertexDefault || seedStaticDefault) && prov.defaultModel ? [prov.defaultModel] : []),
     ...(prov.models ?? []),
     ...(prov.retainModels ?? []),
   ])];
@@ -1564,26 +1560,21 @@ async function fetchProviderModelsWithAuth(
     clearProviderDiscoveryStatus(name);
     return observed(configured, "authoritative");
   }
-  const cloudCodeAssist = effectiveGoogleMode(name, prov) === "cloud-code-assist";
-  const antigravityOAuth = isAntigravityOAuthProvider(name, prov);
-  // The Antigravity RPC needs a paired OAuth access-token/project snapshot. Never let an
-  // ambient GEMINI_API_KEY observed during capture override that account-bound credential.
-  const auth: ModelsAuthResolution = antigravityOAuth && cloudCodeAssist
-    ? await getValidAccessTokenSnapshot(name)
-      .then(snapshot => ({
-        apiKey: snapshot.accessToken,
-        observed: false,
-        ...(snapshot.projectId ? { oauthProjectId: snapshot.projectId } : {}),
-      }))
-      .catch(() => ({ apiKey: undefined, observed: false }))
-    : captured.observedAuth ?? (resolveAuth.kind === "refreshing"
-      ? { apiKey: await resolveModelsAuthToken(name, prov), observed: false }
-      : resolveAuth.resolve(name, prov));
+  const auth: ModelsAuthResolution = captured.observedAuth ?? (resolveAuth.kind === "refreshing"
+    ? prov.authMode === "oauth" && effectiveGoogleMode(name, prov) === "cloud-code-assist"
+      ? await getValidAccessTokenSnapshot(name)
+        .then(snapshot => ({
+          apiKey: snapshot.accessToken,
+          observed: false,
+          ...(snapshot.projectId ? { oauthProjectId: snapshot.projectId } : {}),
+        }))
+        .catch(() => ({ apiKey: undefined, observed: false }))
+      : { apiKey: await resolveModelsAuthToken(name, prov), observed: false }
+    : resolveAuth.resolve(name, prov));
   const apiKey = auth.apiKey;
   // A configured default is a real callable selector and must remain discoverable when a
-  // compatible provider's live /models request fails (issue #308). Keep this separate from the
-  // explicit static list: `liveModels: false` + empty `models[]` intentionally publishes zero
-  // rows, while a failed live discovery may degrade to the default selector.
+  // compatible provider's live /models request fails (issue #308). Static providers already seed
+  // their default selector above when no explicit model list exists.
   const failedDiscoveryConfigured = configured.length > 0 || !prov.defaultModel || prov.adapter !== "anthropic"
     ? configured
     : [{
@@ -1660,14 +1651,14 @@ async function fetchProviderModelsWithAuth(
       "degraded",
     );
   }
-  if ((prov.authMode === "oauth" || antigravityOAuth) && !apiKey) {
+  if (prov.authMode === "oauth" && !apiKey) {
     // No usable token (logged out, or account marked needsReauth). Still surface the
     // configured static catalog so the GUI Models tab / rail counts are not empty —
     // matching Cursor's !apiKey → configured degradation and fetch-failure fallback.
     return observed(configured, "degraded");
   }
-  if (antigravityOAuth && !cloudCodeAssist) return observed(configured, "degraded");
-  const project = antigravityOAuth ? auth.oauthProjectId : prov.project ?? auth.oauthProjectId;
+  const cloudCodeAssist = effectiveGoogleMode(name, prov) === "cloud-code-assist";
+  const project = prov.project ?? auth.oauthProjectId;
   if (cloudCodeAssist && !project) return observed(configured, "degraded");
   const fresh = getFreshCached(name, ttlMs);
   if (fresh) {
@@ -1808,11 +1799,7 @@ async function fetchProviderModelsWithAuth(
         // CCA only exposes a numeric thinking budget. Until the adapter owns an exact Codex
         // effort-to-wire mapping for a newly discovered model, do not advertise a false ladder.
         reasoningEfforts: [],
-        ...(model.contextWindow ? {
-          contextWindow: model.contextWindow,
-          metadataSource: "live" as const,
-          metadataFieldSources: { contextWindow: "live" as const },
-        } : {}),
+        ...(model.contextWindow ? { contextWindow: model.contextWindow } : {}),
         ...(model.inputModalities ? { inputModalities: model.inputModalities } : {}),
       }, contextCap, metadataModelIdCaseFold, captured.effectiveAlias));
       const forCache = withConfiguredRetention(live, { retainComboTargets: false });

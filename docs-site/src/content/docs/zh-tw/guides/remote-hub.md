@@ -67,7 +67,7 @@ opencodex 不發布官方 Docker 映像，但儲存庫提供維護的 `Dockerfil
 建置會拒絕過期清單，並將每個 SHA-256 分別與建置上下文及複製後的檔案核對。清單會驗證 `Dockerfile`、`compose.yaml`、`.dockerignore`、所有 Git 追蹤的 Docker 權威檔案（啟動、設定與探針）、`src/`，以及必要的 `package.json`、`bun.lock` 與 `scripts/model-metadata.source.json` 是否完整。缺少或不符的檔案、清單以外的原始碼或 Docker 權威檔案，以及符號連結都會導致失敗；`scripts/` 中只納入上述模型中繼資料檔案。
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun scripts/generate-compatibility-version.ts
 docker compose build

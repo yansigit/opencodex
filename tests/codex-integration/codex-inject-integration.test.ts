@@ -34,31 +34,6 @@ function runInject(codexHome: string, ocxHome: string, configJson = "{}"): { std
   return { stdout: result.stdout?.trim() ?? "", status: result.status ?? 1 };
 }
 
-function runInjectCacheInvalidation(codexHome: string, ocxHome: string): { stdout: string; status: number } {
-  const script = `
-    const { injectCodexConfig } = require("./src/codex/inject");
-    const { collectCodexAppServerCatalogState } = require("./src/codex/app-server-processes");
-    let snapshots = [];
-    const io = {
-      listSnapshots: () => snapshots,
-      readStartMs: () => 1_000,
-      catalogMtimeMs: () => 2_000,
-    };
-    collectCodexAppServerCatalogState(io);
-    snapshots = [{ pid: 42, commandLine: "codex app-server" }];
-    injectCodexConfig(10100, {}).then(result => {
-      console.log(JSON.stringify({ result, state: collectCodexAppServerCatalogState(io).state }));
-    });
-  `;
-  const result = spawnSync(process.execPath, ["--eval", script], {
-    cwd: repoRoot,
-    env: { ...process.env, CODEX_HOME: codexHome, OPENCODEX_HOME: ocxHome },
-    encoding: "utf8",
-    timeout: SPAWN_BUDGET_MS - 5_000,
-  });
-  return { stdout: result.stdout?.trim() ?? "", status: result.status ?? 1 };
-}
-
 function runRestore(codexHome: string, ocxHome: string): { stdout: string; status: number } {
   const script = `
     const { restoreNativeCodex } = require("./src/codex/inject");
@@ -337,14 +312,6 @@ describe("injectCodexConfig integration (Design B)", () => {
       expect(restored).not.toContain("experimental_realtime_ws_base_url");
       expect(restored).toContain("fast_mode = true");
     });
-  });
-
-  test("config injection invalidates cached app-server evidence after writing", () => {
-    writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
-    const result = runInjectCacheInvalidation(codexHome, ocxHome);
-
-    expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject({ result: { success: true }, state: "stale" });
   });
 
   test.each([

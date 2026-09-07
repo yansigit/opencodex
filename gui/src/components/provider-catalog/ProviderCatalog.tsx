@@ -172,24 +172,24 @@ export default function ProviderCatalog({
       >
         {tier === candidate && <>
         {tier === "accounts" && (
-          <div className="provider-catalog-accounts-hint muted text-label">
-            {t("modal.accountsHint")}
-          </div>
+        <div className="provider-catalog-accounts-hint muted text-label">
+          {t("modal.accountsHint")}
+        </div>
         )}
 
-        <label className="text-label" htmlFor={`${catalogId}-search`}>
-          {t("modal.searchLabel")}
-        </label>
-        <input
-          id={`${catalogId}-search`}
-          type="search"
-          className="input provider-catalog-search"
-          value={query}
-          onChange={e => setQuery(e.target.value)}
-          placeholder={t("modal.search")}
-        />
+      <label className="text-label" htmlFor={`${catalogId}-search`}>
+        {t("modal.searchLabel")}
+      </label>
+      <input
+        id={`${catalogId}-search`}
+        type="search"
+        className="input provider-catalog-search"
+        value={query}
+        onChange={e => setQuery(e.target.value)}
+        placeholder={t("modal.search")}
+      />
 
-        <div className="provider-catalog-rows">
+      <div className="provider-catalog-rows">
         {presetsLoading && rows.length === 0 && (
           <div className="muted text-control provider-catalog-empty">{t("modal.catalogLoading")}</div>
         )}
@@ -309,14 +309,14 @@ export default function ProviderCatalog({
         {tier === "accounts" && accountRows.length === 0 && !presetsLoading && !presetsError && (
           <div className="muted text-control provider-catalog-empty">{t("modal.noMatch")}</div>
         )}
-        </div>
+      </div>
 
-        <div className="provider-catalog-footer">
-          <div style={{ flex: 1 }} />
-          {tier !== "accounts" && (
-            <button type="button" className="link-btn" onClick={onSelectCustom}>{t("modal.notListed")}</button>
-          )}
-        </div>
+      <div className="provider-catalog-footer">
+        <div style={{ flex: 1 }} />
+        {tier !== "accounts" && (
+          <button type="button" className="link-btn" onClick={onSelectCustom}>{t("modal.notListed")}</button>
+        )}
+      </div>
         </>}
       </div>
       ))}

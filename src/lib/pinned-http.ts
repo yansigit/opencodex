@@ -1,6 +1,5 @@
 import http, { type ClientRequest, type IncomingMessage, type RequestOptions } from "node:http";
 import https from "node:https";
-import { isIP } from "node:net";
 
 export type PinnedAddress = { address: string; family: number };
 
@@ -33,18 +32,6 @@ export interface PinnedHttpRequestOptions {
 /** @deprecated Use {@link PinnedHttpRequestOptions}. */
 export type PinnedHttpGetOptions = PinnedHttpRequestOptions;
 
-function connectionHostname(parsed: URL): string {
-  const hostname = parsed.hostname;
-  return hostname.startsWith("[") && hostname.endsWith("]")
-    ? hostname.slice(1, -1)
-    : hostname;
-}
-
-/** Test seam for the hostname used by the TCP/TLS connection and certificate identity check. */
-export function pinnedHttpHostnameForTests(url: string): string {
-  return connectionHostname(new URL(url));
-}
-
 function pinnedHttpRequest(
   url: string,
   pinned: PinnedAddress,
@@ -66,7 +53,6 @@ function pinnedHttpRequest(
   const inactivityTimeoutMs = options?.inactivityTimeoutMs ?? legacyIdleTimeoutMs;
   const legacyFirstByteDisabled = usesLegacyIdleTimeout && legacyIdleTimeoutMs === 0;
   const maxBytes = options?.maxBytes;
-  const hostname = connectionHostname(parsed);
   const headers = new Headers(options?.headers);
   headers.set("host", parsed.host);
   if (body !== undefined && !headers.has("content-length")) {
@@ -111,16 +97,14 @@ function pinnedHttpRequest(
     };
     const requestOptions: RequestOptions & { servername?: string } = {
       protocol: parsed.protocol,
-      hostname,
+      hostname: parsed.hostname,
       port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
       path: `${parsed.pathname}${parsed.search}`,
       method,
       headers: requestHeaders,
       ...(parsed.protocol === "https:"
         ? {
-          // TLS SNI is a DNS-name extension. Bun rejects an IP-valued servername outright;
-          // omitting it for literals leaves certificate identity checking on the IP hostname.
-          ...(isIP(hostname) === 0 ? { servername: hostname } : {}),
+          servername: parsed.hostname,
           rejectUnauthorized: options?.rejectUnauthorized ?? true,
         }
         : {}),
@@ -141,10 +125,6 @@ function pinnedHttpRequest(
           pinned.family as 4 | 6,
         );
       },
-      // A pooled socket is keyed by the URL hostname and port, not by the validated address.
-      // Reusing it could silently connect a later request to an earlier DNS answer without
-      // invoking the pinned lookup above, so each pinned request owns one fresh connection.
-      agent: false,
     };
 
     const onResponse = (response: IncomingMessage) => {
@@ -193,10 +173,7 @@ function pinnedHttpRequest(
               failBody(new PinnedHttpError("output_byte_limit", `${context} exceeds ${maxBytes} byte cap`));
               return;
             }
-            try {
-              controller.enqueue(buffer);
-              if ((controller.desiredSize ?? 0) <= 0) response.pause();
-            } catch { /* closed */ }
+            try { controller.enqueue(buffer); } catch { /* closed */ }
           });
           response.on("end", () => {
             if (bodySettled) return;
@@ -206,9 +183,6 @@ function pinnedHttpRequest(
           response.on("error", (error: Error) => {
             failBody(error);
           });
-        },
-        pull() {
-          response.resume();
         },
         cancel() {
           req?.destroy();

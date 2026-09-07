@@ -37,7 +37,8 @@ const SYNTHETIC_WINDOWS_PRINCIPAL = {
   exitCode: 0,
   timedOut: false,
   stdout: "S-1-5-21-1-2-3-1001\nocx-test\n",
-};
+  stderr: "",
+} as const;
 let tmp: string;
 
 // kimi refresh is a single token POST (no OAuth discovery hop), so a blanket 200 mock exercises the
@@ -55,8 +56,6 @@ function writeConfig(partial: Partial<OcxConfig>): void {
 
 beforeEach(() => {
   resetLifecycleDrainStateForTests();
-  // Credential persistence is not an ACL test. Force the Windows path while keeping both
-  // ACL and effective-user subprocesses hermetic, so teardown cannot race a real child.
   resetHardenedStateForTests();
   setPlatformForTests("win32");
   setIcaclsRunnerForTests(() => ICACLS_OK);
@@ -75,8 +74,6 @@ beforeEach(() => {
 
 afterEach(async () => {
   resetLifecycleDrainStateForTests();
-  // hardenConfigDir starts an optional async ACL flight. It owns the directory handle until
-  // settled, so drain it before restoring OPENCODEX_HOME or removing this fixture.
   await flushConfigDirHardening(join(tmp, "ocx"));
   if (origHome === undefined) delete process.env.HOME; else process.env.HOME = origHome;
   if (origOcxHome === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = origOcxHome;

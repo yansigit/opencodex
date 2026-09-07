@@ -23,7 +23,6 @@ import {
 } from "../../src/server";
 import { beginShutdownDrain, isDraining, resetLifecycleDrainStateForTests } from "../../src/server/lifecycle";
 import type { OcxConfig } from "../../src/types";
-import { watchdogMs } from "../helpers/ci-watchdog";
 import { fakeChatGptJwt } from "../helpers/fake-chatgpt-jwt";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -640,11 +639,10 @@ test("sideband GET /v1/live/{callId} relays the exact frame ceiling bidirectiona
   } as typeof WebSocket;
 
   const server = startServer(0);
-  let client: WebSocket | undefined;
   try {
     const wsUrl = new URL(`/v1/live/rtc_sideband`, server.url);
     wsUrl.protocol = "ws:";
-    client = new RealWebSocket(wsUrl.toString(), {
+    const client = new RealWebSocket(wsUrl.toString(), {
       headers: {
         authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}`,
         "chatgpt-account-id": "acct-123",
@@ -654,10 +652,7 @@ test("sideband GET /v1/live/{callId} relays the exact frame ceiling bidirectiona
     } as unknown as string[]);
 
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error("sideband timeout")),
-        watchdogMs(15_000),
-      );
+      const timer = setTimeout(() => reject(new Error("sideband timeout")), 15_000);
       let sawPing = false;
       client.addEventListener("open", () => {
         client.send("ping-sideband");
@@ -688,13 +683,13 @@ test("sideband GET /v1/live/{callId} relays the exact frame ceiling bidirectiona
         reject(new Error("client websocket error"));
       });
     });
+    client.close();
   } finally {
-    client?.close();
     globalThis.WebSocket = RealWebSocket;
     await server.stop(true);
     await upstream.stop(true);
   }
-}, { timeout: watchdogMs(20_000) + 10_000 });
+}, { timeout: 20_000 });
 
 test("standalone GET /v1/realtime?intent=quicksilver&model= upgrades and relays bidirectionally", async () => {
   const seen: { path: string; headers: Headers }[] = [];

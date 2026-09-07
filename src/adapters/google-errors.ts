@@ -4,9 +4,7 @@ import { isLocationUnsupportedMessage } from "../lib/errors";
 /** Pull the human detail out of the Google API error envelope `{error:{message,status,code}}`. */
 function googleErrorDetail(payloadText: string): { message?: string; status?: string } {
   let trimmed = payloadText.trim();
-  if (trimmed.startsWith("data:")) {
-    trimmed = trimmed.replace(/^data:\s*/, "").trim();
-  }
+  if (trimmed.startsWith("data:")) trimmed = trimmed.replace(/^data:\s*/, "").trim();
   if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) {
     return { message: trimmed || undefined };
   }
@@ -18,6 +16,8 @@ function googleErrorDetail(payloadText: string): { message?: string; status?: st
     status: safeUpstreamErrorString(err?.status),
   };
 }
+
+
 
 const GOOGLE_QUOTA_EXHAUSTED_NEEDLES = [
   "quotafailure",
@@ -59,6 +59,7 @@ export function isGoogleQuotaExhaustedText(text: string): boolean {
 export function isAntigravityGeoBlockedBody(payloadText: string): boolean {
   return isLocationUnsupportedMessage(payloadText);
 }
+
 
 function classifyGoogle(label: string, status: number | undefined, enumStatus: string | undefined, text: string): string {
   const lower = `${enumStatus ?? ""} ${text}`.toLowerCase();

@@ -1,5 +1,5 @@
 import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, posix, win32 } from "node:path";
@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import * as serviceModule from "../../src/service";
 import { saveConfig } from "../../src/config";
 import { windowsEnvIndirectBatchValue } from "../../src/lib/win-paths";
-import { assertServiceAuthEnvironment, assertServiceEnvironmentMatchesInstall, bakedServicePathsDiagnostic, confirmServiceServing, diagnoseService, launchdListenPort, systemdListenPort, buildPlist, buildUnit, buildWindowsLauncherVbs, buildWindowsSchtasksCreateArgs, buildWindowsSchtasksCreateArgsForXml, buildWindowsServiceScript, buildWindowsTaskXml as buildWindowsTaskXmlProduction, buildWindowsTaskXmlDocument, deriveWindowsServiceDiagnostic, deriveWindowsServiceDiagnosticForCurrentUser, expectedLaunchdCommand, installFreshWindowsSchedulerSafely, installServiceSafely, launchctlLoadFailed, launchdJobMatchesPlist, normalizeServiceSubcommand, parseServiceArgs, parseServiceInstallState, planServiceCommand, prepareServiceInstall, probeServiceInstallation, readWindowsSchedulerXmlState, registerFreshWindowsSchedulerTask, removeNativeWindowsServiceForScheduler, repairService, reportServiceServing, resolveServiceListenPort, runLaunchctl, selectServiceSubcommand, SERVICE_INSTALL_HEALTH_MS, SERVICE_INSTALL_HEALTH_WINDOWS_MS, serviceInstallHealthMs, serviceLogPath, serviceStartableFromTray, serviceStatusReport, serviceRetryCommand, serviceStatusSummary, stableLauncherEntry, systemdNeedsDaemonReload, systemdServiceInstallCleanupOps, uninstallSystemd, windowsListenPort, winswListenPort, startLaunchd, windowsTaskRegistrationHealthy as windowsTaskRegistrationHealthyProduction } from "../../src/service";
+import { assertServiceAuthEnvironment, assertServiceEnvironmentMatchesInstall, bakedServicePathsDiagnostic, confirmServiceServing, launchdListenPort, systemdListenPort, buildPlist, buildUnit, buildWindowsLauncherVbs, buildWindowsSchtasksCreateArgs, buildWindowsSchtasksCreateArgsForXml, buildWindowsServiceScript, buildWindowsTaskXml as buildWindowsTaskXmlProduction, buildWindowsTaskXmlDocument, deriveWindowsServiceDiagnostic, deriveWindowsServiceDiagnosticForCurrentUser, expectedLaunchdCommand, installFreshWindowsSchedulerSafely, installServiceSafely, launchctlLoadFailed, launchdJobMatchesPlist, normalizeServiceSubcommand, parseServiceArgs, parseServiceInstallState, planServiceCommand, prepareServiceInstall, probeServiceInstallation, readWindowsSchedulerXmlState, registerFreshWindowsSchedulerTask, removeNativeWindowsServiceForScheduler, repairService, reportServiceServing, resolveServiceListenPort, runLaunchctl, selectServiceSubcommand, SERVICE_INSTALL_HEALTH_MS, SERVICE_INSTALL_HEALTH_WINDOWS_MS, serviceInstallHealthMs, serviceLogPath, serviceStartableFromTray, serviceStatusReport, serviceRetryCommand, serviceStatusSummary, stableLauncherEntry, systemdNeedsDaemonReload, systemdServiceInstallCleanupOps, uninstallSystemd, windowsListenPort, winswListenPort, startLaunchd, windowsTaskRegistrationHealthy as windowsTaskRegistrationHealthyProduction } from "../../src/service";
 import type { ServiceDiagnostic } from "../../src/service";
 import { definitionCarriesCredential, resolvedProxyEnv, writeServiceDefinitionFile } from "../../src/service";
 import { buildWinswXml } from "../../src/lib/winsw";
@@ -49,7 +49,6 @@ const TEST_DIR = join(import.meta.dir, ".tmp-service-test");
 const previousOpenCodexHome = process.env.OPENCODEX_HOME;
 const previousCodexHome = process.env.CODEX_HOME;
 const previousApiAuthToken = process.env.OPENCODEX_API_AUTH_TOKEN;
-const previousAdminAuthToken = process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
 
 afterEach(() => {
   if (previousOpenCodexHome === undefined) delete process.env.OPENCODEX_HOME;
@@ -58,8 +57,6 @@ afterEach(() => {
   else process.env.CODEX_HOME = previousCodexHome;
   if (previousApiAuthToken === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
   else process.env.OPENCODEX_API_AUTH_TOKEN = previousApiAuthToken;
-  if (previousAdminAuthToken === undefined) delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
-  else process.env.OPENCODEX_ADMIN_AUTH_TOKEN = previousAdminAuthToken;
   if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
 });
 
@@ -212,14 +209,6 @@ describe("systemd service unit", () => {
     });
     expect(invalid).toMatchObject({ ok: false, message: "Unknown service option: --bogus" });
     expect(probes).toBe(0);
-
-    const unknownSubcommand = planServiceCommand(["nope"], {
-      probeInstallation: () => { throw new Error("platform probe must not run"); },
-    });
-    expect(unknownSubcommand).toEqual({
-      ok: false,
-      message: "Usage: ocx service [install|repair|restart|start|stop|status|uninstall|remove] [--native|--scheduler]",
-    });
 
     const explicitInstall = planServiceCommand(["install"], {
       probeInstallation: () => { probes += 1; return { state: "unknown" }; },
@@ -404,84 +393,34 @@ describe("systemd service unit", () => {
 });
 
 describe("service install auth preflight", () => {
-  function prepare(opts: { hostname?: string; envToken?: string; fileContent?: string; adminToken?: string } = {}) {
+  test("rejects non-loopback service install without a persisted API token", () => {
     if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
     mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
-    if (opts.envToken === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
-    else process.env.OPENCODEX_API_AUTH_TOKEN = opts.envToken;
-    if (opts.adminToken === undefined) delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
-    else process.env.OPENCODEX_ADMIN_AUTH_TOKEN = opts.adminToken;
-    if (opts.fileContent !== undefined) {
-      writeFileSync(join(TEST_DIR, "service-api-token"), opts.fileContent, { mode: 0o600 });
-    }
+    delete process.env.OPENCODEX_API_AUTH_TOKEN;
     saveConfig({
       port: 10100,
-      hostname: opts.hostname ?? "0.0.0.0",
+      hostname: "0.0.0.0",
       providers: { openai: { adapter: "openai-chat", baseUrl: "https://api.example.test/v1" } },
       defaultProvider: "openai",
     } as OcxConfig);
-  }
 
-  test("rejects non-loopback service install without a persisted API token", () => {
-    prepare();
     expect(() => assertServiceAuthEnvironment()).toThrow("OPENCODEX_API_AUTH_TOKEN");
   });
 
   test("allows non-loopback service install when the API token is in the service environment", () => {
-    prepare({ envToken: "local-secret" });
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    process.env.OPENCODEX_API_AUTH_TOKEN = "local-secret";
+    saveConfig({
+      port: 10100,
+      hostname: "0.0.0.0",
+      providers: { openai: { adapter: "openai-chat", baseUrl: "https://api.example.test/v1" } },
+      defaultProvider: "openai",
+    } as OcxConfig);
+
     expect(() => assertServiceAuthEnvironment()).not.toThrow();
-  });
-
-  test("allows non-loopback service install when the API token is persisted on disk in service-api-token", () => {
-    prepare({ fileContent: "persisted-secret\n" });
-    expect(() => assertServiceAuthEnvironment()).not.toThrow();
-    expect(process.env.OPENCODEX_API_AUTH_TOKEN).toBe("persisted-secret");
-  });
-
-  test("preserves env precedence over persisted token", () => {
-    prepare({ envToken: "env-secret", fileContent: "file-secret\n" });
-    expect(() => assertServiceAuthEnvironment()).not.toThrow();
-    expect(process.env.OPENCODEX_API_AUTH_TOKEN).toBe("env-secret");
-  });
-
-  test.each(["", "   \n", "\n"])("rejects non-loopback when persisted token file is empty/whitespace: %j", (content) => {
-    prepare({ fileContent: content });
-    expect(() => assertServiceAuthEnvironment()).toThrow("OPENCODEX_API_AUTH_TOKEN");
-    expect(process.env.OPENCODEX_API_AUTH_TOKEN ?? "").toBe("");
-  });
-
-  test("rejects unsafe persisted token reads: symlink and oversize file", () => {
-    prepare({ fileContent: "x".repeat(600) }); // >512 bytes -> hardened reader returns null
-    expect(() => assertServiceAuthEnvironment()).toThrow("OPENCODEX_API_AUTH_TOKEN");
-    if (process.platform !== "win32") {
-      if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
-      mkdirSync(TEST_DIR, { recursive: true });
-      const target = join(TEST_DIR, "real-token");
-      writeFileSync(target, "persisted-secret\n");
-      symlinkSync(target, join(TEST_DIR, "service-api-token"));
-      process.env.OPENCODEX_HOME = TEST_DIR;
-      delete process.env.OPENCODEX_API_AUTH_TOKEN;
-      delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
-      saveConfig({
-        port: 10100,
-        hostname: "0.0.0.0",
-        providers: { openai: { adapter: "openai-chat", baseUrl: "https://api.example.test/v1" } },
-        defaultProvider: "openai",
-      } as OcxConfig);
-      expect(() => assertServiceAuthEnvironment()).toThrow("OPENCODEX_API_AUTH_TOKEN");
-    }
-  });
-
-  test.each(["0.0.0.0", "127.0.0.1"])("rejects persisted admin token collision before loopback short-circuit (%s)", (hostname) => {
-    prepare({ hostname, fileContent: "ocx_admin_" + "a".repeat(43) + "\n" });
-    expect(() => assertServiceAuthEnvironment()).toThrow("OPENCODEX_API_AUTH_TOKEN holds a management");
-  });
-
-  test("rejects persisted token that equals configured admin token", () => {
-    const colliding = "data-plane-but-equals-admin-123";
-    prepare({ fileContent: colliding + "\n", adminToken: colliding });
-    expect(() => assertServiceAuthEnvironment()).toThrow("OPENCODEX_API_AUTH_TOKEN holds a management");
   });
 
   test("hub-mode launchd and systemd installs reuse the protected data-token file", () => {
@@ -507,6 +446,7 @@ describe("service install auth preflight", () => {
       expect(definition).not.toContain("phase5-data-secret");
     }
   });
+
   test("rejects restore operations from a different CODEX_HOME than service install", () => {
     if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
     mkdirSync(TEST_DIR, { recursive: true });
@@ -551,6 +491,7 @@ describe("Windows service task", () => {
     expect(xml).toContain("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>");
     expect(xml).toContain("<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>");
     expect(xml).toContain("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>");
+    expect(xml).toContain("<Priority>4</Priority>");
     expect(xml).toContain("<RestartOnFailure>");
     expect(xml).toContain("<Interval>PT1M</Interval>");
     expect(xml).toContain("<Count>3</Count>");
@@ -2490,14 +2431,8 @@ describe("service diagnostics", () => {
 
   test("status summary exposes the service log path", () => {
     const summary = serviceStatusSummary();
-    const diagnostic = diagnoseService();
 
-    if (diagnostic.supported) {
-      expectTextToContainPath(summary, serviceLogPath());
-    } else {
-      expect(summary).toContain("unsupported");
-      expect(summary).not.toContain(serviceLogPath());
-    }
+    expectTextToContainPath(summary, serviceLogPath());
   });
 
   test("flags stale baked service paths recorded at install time", () => {
@@ -2665,6 +2600,37 @@ describe("service repair", () => {
     });
     // Re-registration happens after the assets exist and before the task is started.
     expect(calls).toEqual(["env", "auth", "stop", "assets", "reregister", "start", "state"]);
+  });
+
+  test.each(["7", "omitted", "4", "1"])("repair migrates only the background scheduler priority (%s)", async priority => {
+    const calls: string[] = [];
+    const previousXml = buildWindowsTaskXml().replace(/<Priority>\d<\/Priority>/,
+      priority === "omitted" ? "" : `<Priority>${priority}</Priority>`);
+    const shouldUpgrade = priority === "7" || priority === "omitted";
+    let attemptNonce = "";
+    await repairService({
+      platform: "win32",
+      diagnose: () => baseDiag,
+      assertEnv: () => {},
+      assertAuth: () => {},
+      resolveExpectedUserId: () => TEST_WINDOWS_TASK_SID,
+      stopScheduler: () => { calls.push("stop"); },
+      writeSchedulerAssets: () => { calls.push("assets"); },
+      readSchedulerXml: () => attemptNonce
+        ? buildWindowsTaskXml(undefined, undefined, attemptNonce)
+        : previousXml,
+      reregisterScheduler: async (nonce, registeredXml) => {
+        expect(registeredXml).toBe(previousXml);
+        expect(buildWindowsTaskXmlDocument()).toContain("<Priority>4</Priority>");
+        calls.push("reregister");
+        attemptNonce = nonce;
+      },
+      startScheduler: () => { calls.push("start"); },
+      writeSchedulerState: () => { calls.push("state"); },
+    });
+    expect(calls).toEqual(shouldUpgrade
+      ? ["stop", "assets", "reregister", "start", "state"]
+      : ["stop", "assets", "start", "state"]);
   });
 
   test("repair migrates an exact legacy account name to the preferred SID", async () => {
@@ -3584,24 +3550,6 @@ describe("service serving confirmation", () => {
       });
       expect(seen).toEqual([18999]);
     });
-    test("passes TLS-aware scheme to injected probe", async () => {
-      let seenScheme: string | undefined;
-      const out = await confirmServiceServing({
-        port: 18999,
-        configFn: () => ({
-          hostname: "127.0.0.1",
-          tls: { certFile: "cert.pem", keyFile: "key.pem", publicOrigin: "https://localhost:18999" },
-        }),
-        probe: async (p, _h, scheme) => {
-          seenScheme = scheme;
-          return p === 18999;
-        },
-        sleep: async () => {},
-        now: () => 0,
-      });
-      expect(out).toEqual({ ok: true, port: 18999 });
-      expect(seenScheme).toBe("https");
-    });
   });
 
   /**
@@ -3857,16 +3805,5 @@ describe("credential-bearing definitions harden the Windows ACL strictly", () =>
 
   test("a definition with no proxy env at all carries no credential", () => {
     expect(definitionCarriesCredential(buildUnit(resolvedProxyEnv({})))).toBe(false);
-  });
-
-  test("SERVICE_INSTALL_HEALTH_MS defaults to at least 30s and respects timeoutMs override", async () => {
-    expect(serviceModule.SERVICE_INSTALL_HEALTH_MS).toBeGreaterThanOrEqual(30_000);
-    const result = await confirmServiceServing({
-      port: 19999,
-      probe: async () => false,
-      timeoutMs: 50,
-      sleep: async () => {},
-    });
-    expect(result.ok).toBe(false);
   });
 });

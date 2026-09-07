@@ -32,3 +32,4 @@ test("card actions wrap instead of pushing past the card", () => {
   expect(actions).toContain("flex-wrap: wrap");
   expect(actions).toContain("min-width: 0");
 });
+

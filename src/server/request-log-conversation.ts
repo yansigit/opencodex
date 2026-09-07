@@ -62,18 +62,6 @@ export function sessionIdHeaderFromRequest(headers: Headers): string | null {
 }
 
 /**
- * Codex thread identity from inbound Responses headers when the parent-thread header is absent.
- * Priority: x-codex-parent-thread-id > thread-id > session_id / session-id.
- */
-export function inboundClientThreadIdFromRequest(headers: Headers): string | undefined {
-  return firstSanitizedConversationId(
-    headers.get("x-codex-parent-thread-id"),
-    headers.get("thread-id"),
-    sessionIdHeaderFromRequest(headers),
-  );
-}
-
-/**
  * Fixed-size logical turn lane (#820).
  *
  * A lane must be as SPECIFIC as the identity available, which is the opposite of what

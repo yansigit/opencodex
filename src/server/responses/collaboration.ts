@@ -7,6 +7,7 @@ import {
   resolveEnvValue,
 } from "../../config";
 import { parseRequest } from "../../responses/parser";
+import { externalTaskInputContent } from "../../responses/task-input";
 import { buildCompactV1Output, COMPACT_PROMPT, decodeCompactionSummary, extractCompactUserMessages } from "../../responses/compaction";
 import { FORWARD_HEADERS, sanitizeReasoningInputContent } from "../../adapters/openai-responses";
 import { expandPreviousResponseInput, previousResponseProviderState, rememberResponseState } from "../../responses/state";
@@ -29,7 +30,7 @@ import {
 import { isInjectionDebugEnabled } from "../../lib/debug-settings";
 import { injectionDebugLog } from "../../lib/injection-debug-log";
 import { dottedToolName, modelInList, namespacedToolName, toolChoiceToolPredicate } from "../../types";
-import type { AdapterEvent, OcxConfig, OcxParsedRequest, OcxProviderConfig, OcxProviderContinuationState, OcxSubagentRole, OcxUsage } from "../../types";
+import type { AdapterEvent, OcxConfig, OcxParsedRequest, OcxProviderConfig, OcxProviderContinuationState, OcxUsage } from "../../types";
 import {
   forceRefreshOAuthAccessSnapshot,
   getOAuthCredentialApiBaseUrl,
@@ -64,7 +65,6 @@ import { listOpenAiForwardSidecarCandidates, resolveFirstUsableOpenAiSidecar, ty
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { slugsEquivalent } from "../../providers/slug-codec";
 import { subagentFallbackGuidanceText } from "../../codex/subagent-model-fallback";
-import { compactRolesCatalog, enabledSubagentRoles } from "../../codex/agent-roles";
 import { applyOpenAiVirtualModel, resolveOpenAiCompactModel } from "../../providers/openai-virtual-models";
 import { isUsageDebugEnabled } from "../../usage/debug";
 import { readJsonRequestBody, DecompressedBodyTooLargeError, UnsupportedContentEncodingError } from "../request-decompress";
@@ -281,7 +281,6 @@ export interface MultiAgentGuidanceOptions {
   subagentModels?: string[];
   subagentModelFallback?: string[];
   injectionPrompt?: string;
-  subagentRoles?: OcxSubagentRole[];
   nativeDefaultState?: NativeDefaultState;
   syncCodexSubagentDefaults?: boolean;
 }
@@ -380,7 +379,6 @@ export async function multiAgentGuidanceText(
     subagentModels,
     subagentModelFallback,
     injectionPrompt,
-    subagentRoles,
     nativeDefaultState: configuredNativeDefaultState,
     syncCodexSubagentDefaults,
   } = options;
@@ -478,28 +476,16 @@ export async function multiAgentGuidanceText(
         .join(", ")}`);
     }
     const fallbackGuidance = subagentFallbackGuidanceText({ subagentModelFallback } as OcxConfig);
-    const visibleRoles = enabledSubagentRoles(subagentRoles).filter((role) => {
-      const match = effective.candidates.find(candidate =>
-        slugsEquivalent(candidate.model, role.model) || candidate.model === role.model,
-      );
-      if (!match) return false;
-      const matchesPreferred = Boolean(injectionModel)
-        && (slugsEquivalent(match.model, injectionModel!) || match.model === injectionModel);
-      if (!withinCandidateWindow(match) || (!allowedForCurrentRoute(match) && !matchesPreferred)) return false;
-      if (role.effort && !match.efforts.includes(role.effort)) return false;
-      return true;
-    });
-    const customRolesText = compactRolesCatalog(visibleRoles, V2_GUIDANCE_CHAR_BUDGET);
-    if (!injectionModel && roster === "" && fallbackGuidance === "" && customRolesText === "") return null;
+    if (!injectionModel && roster === "" && fallbackGuidance === "") return null;
     if (injectionPrompt) {
       // Bare ids must resolve to a unique/current-route candidate. Preserve the legacy raw
       // fallback only for explicit routed/account-qualified ids.
       const promptModel = preferred?.model
         ?? (injectionModel?.includes("/") ? injectionModel : undefined);
-      return `<multi_agent_mode>${applyInjectionPlaceholders(injectionPrompt, promptModel, injectionEffort, roster, fallbackGuidance, customRolesText, nativeDefaultState)}</multi_agent_mode>`;
+      return `<multi_agent_mode>${applyInjectionPlaceholders(injectionPrompt, promptModel, injectionEffort, roster, fallbackGuidance, nativeDefaultState)}</multi_agent_mode>`;
     }
-    if (!preferred && roster === "" && fallbackGuidance === "" && customRolesText === "") return null;
-    const preamble = "When the active spawn_agent tool supports optional \"model\" or \"reasoning_effort\" overrides, "
+    if (!preferred && roster === "" && fallbackGuidance === "") return null;
+    let text = "When the active spawn_agent tool supports optional \"model\" or \"reasoning_effort\" overrides, "
       + "use only models listed for this collaboration surface. "
       + "When setting either override, set fork_turns to \"none\" "
       + "(or a positive turn count such as \"3\"; full-history forks reject overrides) "
@@ -507,29 +493,17 @@ export async function multiAgentGuidanceText(
       + "When specifying model overrides, preserve any caller-provided agent_type; do not replace it with \"worker\". "
       + "Subagent exec runs in a pure V8 isolate without require('fs'); "
       + "escape nested template literals in tools.apply_patch to prevent JavaScript syntax errors (e.g., write \\` and \\\${var}).";
-    let preferredText = "";
     if (preferred) {
-      preferredText = ` Preferred sub-agent: model "${preferred.model}"`
+      text += ` Preferred sub-agent: model "${preferred.model}"`
         + (injectionEffort ? `, reasoning_effort "${injectionEffort}"` : "")
         + `; nativeDefaultState: ${nativeDefaultState}.`
         + " — use it unless the user names another. Confirm a different listed model for one spawn only; do not persist the exception.";
     }
-    const specialist = (catalog: string): string =>
-      catalog ? ` When spawning, use a named specialist: ${catalog}.` : "";
-    const rolesBudget = (withRoster: boolean): number => {
-      const wrapper = specialist("x").length - 1;
-      return V2_GUIDANCE_CHAR_BUDGET
-        - preamble.length
-        - preferredText.length
-        - fallbackGuidance.length
-        - (withRoster ? roster.length : 0)
-        - wrapper;
-    };
-    let rolesText = compactRolesCatalog(visibleRoles, Math.max(0, rolesBudget(true)));
-    let text = preamble + preferredText + fallbackGuidance + specialist(rolesText) + roster;
+    text += fallbackGuidance;
+    text += roster;
     if (text.length > V2_GUIDANCE_CHAR_BUDGET) {
-      rolesText = compactRolesCatalog(visibleRoles, Math.max(0, rolesBudget(false)));
-      text = preamble + preferredText + fallbackGuidance + specialist(rolesText);
+      // Roster is the only unbounded part — drop it before breaking the budget.
+      text = text.slice(0, text.length - roster.length);
     }
     return `<multi_agent_mode>${text}</multi_agent_mode>`;
   }
@@ -545,13 +519,12 @@ export async function multiAgentGuidanceText(
 
 export const V2_GUIDANCE_CHAR_BUDGET = 1200;
 
-export function applyInjectionPlaceholders(prompt: string, model?: string, effort?: string, roster?: string, fallback?: string, roles?: string, nativeDefaultState?: NativeDefaultState): string {
+export function applyInjectionPlaceholders(prompt: string, model?: string, effort?: string, roster?: string, fallback?: string, nativeDefaultState?: NativeDefaultState): string {
   return prompt
     .replaceAll("{{model}}", model ?? "")
     .replaceAll("{{effort}}", effort ?? "")
     .replaceAll("{{roster}}", roster ?? "")
     .replaceAll("{{fallback}}", fallback ?? "")
-    .replaceAll("{{roles}}", roles ?? "")
     .replaceAll("{{nativeDefaultState}}", nativeDefaultState ?? "");
 }
 
@@ -605,7 +578,7 @@ function leadingDeveloperPrefixLength(items: readonly unknown[]): number {
 
 function isConversationalItem(item: unknown): boolean {
   if (!isRecord(item)) return false;
-  if (item.type === "agent_message") return true;
+  if (item.type === "agent_message" || externalTaskInputContent(item) !== undefined) return true;
   const type = item.type ?? (typeof item.role === "string" ? "message" : undefined);
   return type === "message" && (item.role === "user" || item.role === "assistant");
 }

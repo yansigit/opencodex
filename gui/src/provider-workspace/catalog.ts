@@ -47,13 +47,11 @@ export interface WorkspaceProvider {
   disabled?: boolean;
   note?: string;
   allowPrivateNetwork?: boolean;
-  replayTransientFailures?: boolean;
   requestPacing?: {
     enabled?: boolean;
     requestsPerMinute?: number;
     minIntervalMs?: number;
-    jitterMs?: number;
-    models?: Record<string, { requestsPerMinute?: number; minIntervalMs?: number; jitterMs?: number }>;
+    models?: Record<string, { requestsPerMinute?: number; minIntervalMs?: number }>;
   };
   tlsProfile?: "antigravity-browser";
   tlsProfileStatus?: "disabled" | "active" | "fallback";
@@ -80,8 +78,6 @@ export interface WorkspaceItem extends WorkspaceProvider {
   tier?: ProviderTier;
   /** Set by `applyActiveAccountReauth` when live auth health overrides config readiness. */
   activeNeedsReauth?: boolean;
-  hasAiStudioSession?: boolean;
-  aiStudioAuthState?: "connected" | "checking" | "needs_reauth" | "unsupported";
 }
 
 /** The three sections rendered in the Providers workspace. */

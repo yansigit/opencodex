@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { externalToolContinuationText, CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT } from "../../../src/adapters/cursor/protobuf-request";
 import {
   createCursorAdapter as createCursorAdapterProduction,
   cursorExecDeniedMessage,
@@ -44,31 +43,6 @@ async function collect(gen: AsyncGenerator<AdapterEvent>): Promise<AdapterEvent[
 }
 
 describe("Cursor adapter live transport", () => {
-  test("validateRequest rejects both structured output formats", () => {
-    const adapter = createCursorAdapter(provider);
-    const validateRequest = (adapter as ProviderAdapter & {
-      validateRequest: (request: OcxParsedRequest) => void;
-    }).validateRequest;
-
-    for (const type of ["json_object", "json_schema"] as const) {
-      expect(() => validateRequest({
-        ...parsed,
-        options: { textFormat: { type } },
-      })).toThrow("Cursor does not support structured output");
-    }
-  });
-
-  test("validateRequest rejects the internal structured-output flag", () => {
-    const adapter = createCursorAdapter(provider);
-    const validateRequest = (adapter as ProviderAdapter & {
-      validateRequest: (request: OcxParsedRequest) => void;
-    }).validateRequest;
-
-    expect(() => validateRequest({ ...parsed, _structuredOutput: true })).toThrow(
-      "Cursor does not support structured output",
-    );
-  });
-
   test("runTurn emits a missing-token error before live network", async () => {
     const adapter = createCursorAdapter(provider);
     const events: AdapterEvent[] = [];
@@ -320,26 +294,6 @@ describe("Cursor adapter live transport", () => {
   test("legacy mock exec message names the unavailable case", () => {
     expect(cursorExecDeniedMessage("shellArgs")).toContain("shellArgs");
     expect(cursorExecDeniedMessage("shellArgs")).toContain("legacy mock transport cannot execute");
-  });
-
-  test("externalToolContinuationText adds directional clarity after empty discovery calls", () => {
-    const textEmptyList = externalToolContinuationText([
-      { role: "user", content: "hi", timestamp: 1 },
-      { role: "toolResult", toolName: "collaboration__list_agents", content: "[]", toolCallId: "c1", timestamp: 2 },
-    ]);
-    expect(textEmptyList).toContain("no sub-agents currently active");
-
-    const textNormal = externalToolContinuationText([
-      { role: "user", content: "hi", timestamp: 1 },
-      { role: "toolResult", toolName: "exec", content: "output from command", toolCallId: "c2", timestamp: 2 },
-    ]);
-    expect(textNormal).toBe(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT);
-
-    const withShortInstructions = externalToolContinuationText(undefined, ["Reply exactly FINAL."]);
-    expect(withShortInstructions).toContain("Active instructions:\nReply exactly FINAL.");
-
-    const withOversizedInstructions = externalToolContinuationText(undefined, ["x".repeat(2_049)]);
-    expect(withOversizedInstructions).toBe(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT);
   });
 
   test("does not retry external tool-result invalid_argument with a fresh conversation id", async () => {
@@ -864,7 +818,6 @@ describe("Cursor adapter live transport", () => {
     clearCursorCheckpointsForTests();
   });
 });
-
 const LARGE_OVERFLOW_CONTENT = "word ".repeat(100_000);
 
 function bareOverflowError(): Error {

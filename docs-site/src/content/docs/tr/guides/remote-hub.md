@@ -67,7 +67,7 @@ Host üzerinde Git ve Bun gereklidir. Her imaj derlemesinden önce Git tarafınd
 Manifest; `Dockerfile`, `compose.yaml`, `.dockerignore`, Git tarafından izlenen tüm `docker/` yetki dosyaları, `src/`, `package.json`, `bun.lock` ve `scripts/model-metadata.source.json` dosyalarını doğrular. Derleme her SHA-256 değerini önce bağlamdaki, ardından kopyalanan dosyalardaki baytlarla karşılaştırır; eksik veya uyuşmayan dosyaları, sembolik bağlantıları ve manifestte bulunmayan ek `src/` ya da `docker/` yetki dosyalarını reddeder.
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun scripts/generate-compatibility-version.ts
 docker compose build

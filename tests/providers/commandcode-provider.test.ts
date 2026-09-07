@@ -177,15 +177,18 @@ describe("Command Code provider", () => {
     expect(body).not.toHaveProperty("parallel_tool_calls");
   });
 
-  test("forwards prompt_cache_key to chat completions", () => {
-    const route = routeModel(commandcodeConfig(), "commandcode/deepseek/deepseek-v4-flash");
+  test("forwards the enabled prompt cache key to chat completions", () => {
+    const route = routeModel(
+      commandcodeConfig(),
+      "commandcode/deepseek/deepseek-v4-flash",
+    );
     const request = createOpenAIChatAdapter(route.provider).buildRequest({
       modelId: route.modelId,
       context: { messages: [{ role: "user", content: "ping", timestamp: 0 }] },
       stream: true,
-      options: { promptCacheKey: "cmd-session-cache" },
+      options: { promptCacheKey: "command-code-session-cache" },
     });
-    expect(JSON.parse(String(request.body)).prompt_cache_key).toBe("cmd-session-cache");
+    expect(JSON.parse(String(request.body)).prompt_cache_key).toBe("command-code-session-cache");
   });
 
   test("discovers the live catalog with context windows and preserves slash ids", async () => {

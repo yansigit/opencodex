@@ -12,13 +12,6 @@ import { antigravityUserAgent } from "./client-fingerprint";
 export const ANTIGRAVITY_REQUEST_UA = antigravityUserAgent();
 
 /**
- * Bypass sentinel for Google Cloud Code Assist (Antigravity).
- * When a historical functionCall part lacks a thought_signature, Antigravity rejects
- * the request with HTTP 400 unless this sentinel is provided.
- */
-export const ANTIGRAVITY_SIGNATURE_BYPASS_SENTINEL = "skip_thought_signature_validator";
-
-/**
  * Whether a stored `OcxToolCall.thoughtSignature` is a REAL upstream Gemini signature versus a
  * foreign id that must not be forwarded to Gemini/Antigravity.
  *
@@ -40,7 +33,7 @@ export function isLikelyRealThoughtSignature(sig: string | undefined): boolean {
   // signature exists. It is alphanumeric with underscores, so it would otherwise satisfy every
   // check below and be re-ingested as genuine — cached, replayed, and eventually treated as
   // evidence that a turn was signed. It is never a real signature.
-  if (sig === ANTIGRAVITY_SIGNATURE_BYPASS_SENTINEL) return false;
+  if (sig === "skip_thought_signature_validator") return false;
   // Reject synthetic Responses/tool-call ids and Anthropic tool-use ids (`_` or `-` separators).
   if (/^(fc|ctc|tsc|call|msg|rs|resp|reasoning|item|ws|toolu|tool|func|function)[-_]/i.test(sig)) return false;
   // Real Gemini thought signatures are opaque base64/base64url blobs: only [A-Za-z0-9+/_=-].

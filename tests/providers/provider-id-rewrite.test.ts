@@ -14,8 +14,6 @@ test("rewrites every routed-string site", () => {
     subagentModels: [`${FROM}/qwen3.7-max`],
     subagentModelFallback: [`${FROM}/qwen3.6-flash`],
     injectionModel: `${FROM}/qwen3.7-plus`,
-    v2NativeParentOverride: { enabled: false, model: `${FROM}/qwen3.7-plus` },
-    subagentRoles: [{ id: "reviewer", description: "PR review", model: `${FROM}/qwen3.7-max`, developerInstructions: "Review." }],
     shadowCallIntercept: { model: `${FROM}/qwen3.6-flash` },
     webSearchSidecar: { model: `${FROM}/qwen3.7-max` },
     visionSidecar: { model: `${FROM}/qwen3.7-max` },
@@ -29,10 +27,10 @@ test("rewrites every routed-string site", () => {
     },
   } as unknown as OcxConfig;
 
-  // 15 sites: defaultProvider, one of two disabledModels, subagentModels,
-  // subagentModelFallback, injectionModel, subagentRoles[].model, shadowCallIntercept.model,
-  // webSearchSidecar.model, v2NativeParentOverride.model, and the six claudeCode entries.
-  expect(rewriteProviderReferences(config, FROM, TO)).toEqual({ changed: 16, collisions: [] });
+  // 14 sites: defaultProvider, one of two disabledModels, subagentModels,
+  // subagentModelFallback, injectionModel, shadowCallIntercept.model,
+  // webSearchSidecar.model, visionSidecar.model, and the six claudeCode entries.
+  expect(rewriteProviderReferences(config, FROM, TO)).toEqual({ changed: 14, collisions: [] });
   expect(JSON.stringify(config)).not.toContain(`"${FROM}/`);
   expect(config.disabledModels).toContain("anthropic/claude-sonnet-5");
 });
@@ -210,4 +208,25 @@ test("removal leaves the custom-model ownership marker untouched", () => {
     version: 1,
     legacyOwnedSlugs: ["agnes-ai/agnes-2.5-flash", "huggingface/DeepSeek-V4-Flash-0731"],
   });
+});
+
+ test("moves remembered provider caps without activating them", () => {
+  const config = { providerContextCapValues: { [FROM]: 128_000 } } as unknown as OcxConfig;
+  expect(rewriteProviderReferences(config, FROM, TO)).toEqual({ changed: 1, collisions: [] });
+  expect(config.providerContextCapValues).toEqual({ [TO]: 128_000 });
+  expect(providerContextCap(config, TO)).toBeUndefined();
+});
+
+test("a remembered cap rename collision preserves both disabled selections", () => {
+  const config = {
+    providerContextCapValues: { [FROM]: 128_000, [TO]: 256_000 },
+  } as unknown as OcxConfig;
+  const before = structuredClone(config);
+  expect(rewriteProviderReferences(config, FROM, TO)).toEqual({
+    changed: 0,
+    collisions: [`providerContextCapValues.${TO}`],
+  });
+  expect(config).toEqual(before);
+  expect(providerContextCap(config, FROM)).toBeUndefined();
+  expect(providerContextCap(config, TO)).toBeUndefined();
 });
