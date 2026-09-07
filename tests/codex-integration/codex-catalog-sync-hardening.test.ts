@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "../../src/codex/catalog/native-models";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
 
 const repoRoot = dirname(fileURLToPath(new URL("../../package.json", import.meta.url)));
 
@@ -497,7 +498,7 @@ describe("Codex catalog sync hardening", () => {
     }
     expect(output.unchanged).toBe(true);
     expect(output.deleted.models.some((row: { slug: string }) => row.slug === "openai/gpt-6-astra")).toBe(false);
-  });
+  }, SPAWN_BUDGET_MS);
 
   test("explicit Codex-forward Daybreak survives sync with Sol metadata while account picker is off", () => {
     const catalogPath = join(codexHome, "catalog.json");
