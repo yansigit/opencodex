@@ -65,10 +65,18 @@ test("overview resource retains data across a failed poll and recovers on retry"
     return Response.json({});
   }) as typeof fetch;
 
-  const probe: { current: ReturnType<typeof useClientResource<Awaited<ReturnType<typeof fetchDashboardOverview>>>> | null } = { current: null };
   function Probe() {
-    probe.current = useClientResource("dashboard-resilience-test", signal => fetchDashboardOverview(API_BASE, signal));
-    return null;
+    const resource = useClientResource("dashboard-resilience-test", signal => fetchDashboardOverview(API_BASE, signal));
+    return (
+      <button
+        type="button"
+        hidden
+        data-testid="overview-resource-probe"
+        data-version={resource.data?.health?.version ?? ""}
+        data-error={String(resource.error !== undefined)}
+        onClick={() => { void resource.refresh(); }}
+      />
+    );
   }
   const container = win.document.createElement("div");
   win.document.body.append(container);
@@ -77,18 +85,19 @@ test("overview resource retains data across a failed poll and recovers on retry"
     root = createRoot(container);
     root.render(<Probe />);
   });
-  await waitFor(() => probe.current?.data !== undefined);
-  expect(probe.current?.data?.health?.version).toBe("1");
+  const probe = container.querySelector<HTMLButtonElement>('[data-testid="overview-resource-probe"]')!;
+  await waitFor(() => probe.dataset.version !== "");
+  expect(probe.dataset.version).toBe("1");
 
   attempt = 1;
-  await act(async () => { probe.current?.refresh(); });
-  await waitFor(() => probe.current?.error !== undefined);
-  expect(probe.current?.data?.health.version).toBe("1");
+  await act(async () => { probe.click(); });
+  await waitFor(() => probe.dataset.error === "true");
+  expect(probe.dataset.version).toBe("1");
 
   attempt = 2;
-  await act(async () => { probe.current?.refresh(); });
-  await waitFor(() => probe.current?.data?.health.version === "2");
-  expect(probe.current?.error).toBeUndefined();
+  await act(async () => { probe.click(); });
+  await waitFor(() => probe.dataset.version === "2");
+  expect(probe.dataset.error).toBe("false");
 });
 
 test("Providers exposes an inline retry when config cold-start fails", async () => {
@@ -166,14 +175,10 @@ test("Providers ignores an older config failure after a newer retry succeeds", a
     if (String(input).endsWith("/api/config")) return configRequest++ === 0 ? first : second;
     return Response.json({ providers: [] });
   }) as typeof fetch;
-  const state: { config: unknown; failed: boolean } = { config: null, failed: false };
-  const probe: { current: ReturnType<typeof useProvidersFetch> | null } = { current: null };
   function Probe() {
     const [config, setConfig] = useState<import("../src/pages/providers-shared").ProvidersConfig | null>(null);
     const [failed, setFailed] = useState(false);
-    state.config = config;
-    state.failed = failed;
-    probe.current = useProvidersFetch({
+    const { fetchConfig } = useProvidersFetch({
       apiBase: API_BASE,
       setConfig,
       setOauthProviders: () => {},
@@ -181,7 +186,16 @@ test("Providers ignores an older config failure after a newer retry succeeds", a
       invalidateProviderQuotas: () => {},
       setConfigLoadFailed: setFailed,
     });
-    return null;
+    return (
+      <button
+        type="button"
+        hidden
+        data-testid="providers-fetch-probe"
+        data-config={config === null ? "empty" : "loaded"}
+        data-failed={String(failed)}
+        onClick={() => { void fetchConfig(); }}
+      />
+    );
   }
   const container = win.document.createElement("div");
   win.document.body.append(container);
@@ -190,15 +204,22 @@ test("Providers ignores an older config failure after a newer retry succeeds", a
     root = createRoot(container);
     root.render(<Probe />);
   });
-  const one = probe.current!.fetchConfig();
-  const two = probe.current!.fetchConfig();
-  resolveSecond(Response.json({ port: 1, defaultProvider: "openai", providers: {} }));
-  await act(async () => { await two; });
-  await waitFor(() => state.config !== null && state.failed === false);
-  resolveFirst(new Response("offline", { status: 503 }));
-  await act(async () => { await one; });
+  const probe = container.querySelector<HTMLButtonElement>('[data-testid="providers-fetch-probe"]')!;
+  await act(async () => {
+    probe.click();
+    probe.click();
+  });
+  await act(async () => {
+    resolveSecond(Response.json({ port: 1, defaultProvider: "openai", providers: {} }));
+    await second;
+  });
+  await waitFor(() => probe.dataset.config === "loaded" && probe.dataset.failed === "false");
+  await act(async () => {
+    resolveFirst(new Response("offline", { status: 503 }));
+    await first;
+  });
   await act(async () => { await Promise.resolve(); });
-  expect(state.failed).toBe(false);
+  expect(probe.dataset.failed).toBe("false");
 });
 
 test("Dashboard retains rendered overview content through failure and clears reconnecting after recovery", async () => {
@@ -221,10 +242,19 @@ test("Dashboard retains rendered overview content through failure and clears rec
     if (url.endsWith("/api/models")) return Response.json([]);
     return Response.json({});
   }) as typeof fetch;
-  const bridge: { current: ReturnType<typeof useDashboardData> | null } = { current: null };
   function Harness() {
-    bridge.current = useDashboardData(API_BASE);
-    return <Dashboard apiBase={API_BASE} />;
+    const { retryOverview } = useDashboardData(API_BASE);
+    return (
+      <>
+        <button
+          type="button"
+          hidden
+          data-testid="dashboard-overview-retry"
+          onClick={() => { void retryOverview(); }}
+        />
+        <Dashboard apiBase={API_BASE} />
+      </>
+    );
   }
   const container = win.document.createElement("div");
   win.document.body.append(container);
@@ -233,15 +263,16 @@ test("Dashboard retains rendered overview content through failure and clears rec
     root = createRoot(container);
     root.render(<LanguageProvider><Harness /></LanguageProvider>);
   });
+  const retryOverview = container.querySelector<HTMLButtonElement>('[data-testid="dashboard-overview-retry"]')!;
   await waitFor(() => container.textContent?.includes("Online") === true && container.textContent?.includes("1") === true);
   failed = true;
-  await act(async () => { bridge.current?.retryOverview(); });
+  await act(async () => { retryOverview.click(); });
   await waitFor(() => container.textContent?.includes("Connection interrupted") === true);
   expect(container.textContent).toContain("Version1");
   expect(container.textContent).toContain("1");
   failed = false;
   version = "2";
-  await act(async () => { bridge.current?.retryOverview(); });
+  await act(async () => { retryOverview.click(); });
   await waitFor(() => container.textContent?.includes("2") === true && !container.textContent?.includes("Connection interrupted"));
 });
 

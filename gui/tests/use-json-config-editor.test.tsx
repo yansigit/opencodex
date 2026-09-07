@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
-import { act } from "react";
+import { act, useEffect } from "react";
 import type { Root } from "react-dom/client";
 import { useJsonConfigEditor, type Config } from "../src/hooks/useJsonConfigEditor";
 
@@ -49,8 +49,8 @@ let savedCallbacks: number;
 let addedProviderNames: string[];
 let notifications: Array<{ message: string; ok?: boolean }>;
 
-function Harness() {
-  editor = useJsonConfigEditor({
+function Harness({ onEditor }: { onEditor: (value: Editor) => void }) {
+  const currentEditor = useJsonConfigEditor({
     apiBase: "/editor",
     config,
     notify: (message, ok) => { notifications.push({ message, ok }); },
@@ -59,14 +59,21 @@ function Harness() {
     onSaved: added => { savedCallbacks += 1; addedProviderNames = added; },
     t: key => key,
   });
+  useEffect(() => {
+    onEditor(currentEditor);
+  }, [currentEditor, onEditor]);
   return null;
+}
+
+function captureEditor(value: Editor): void {
+  editor = value;
 }
 
 async function mountHook(): Promise<void> {
   const { createRoot } = await import("react-dom/client");
   await act(async () => {
     root = createRoot(host);
-    root.render(<Harness />);
+    root.render(<Harness onEditor={captureEditor} />);
   });
 }
 

@@ -1826,7 +1826,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
         <dialog
           ref={contextDialogRef}
           className="modal-overlay"
-          role="dialog"
           aria-label={t("models.contextSettings")}
           aria-labelledby="models-context-dialog-title"
           onCancel={event => {

@@ -223,7 +223,7 @@ test("Models page combines final visibility, atomic actions, discovery status, a
     expect(container.textContent).not.toContain("Not selected");
 
     await act(async () => buttonText("Custom windows").click());
-    const contextDialog = container.querySelector<HTMLElement>('[role="dialog"][aria-label="Custom windows"]')!;
+    const contextDialog = container.querySelector<HTMLDialogElement>('dialog[aria-label="Custom windows"]')!;
     const contextInputs = contextDialog.querySelectorAll<HTMLInputElement>("input");
     expect([...contextInputs].map(input => input.value)).toEqual(["256000", "64000"]);
     const setValue = Object.getOwnPropertyDescriptor(
@@ -276,10 +276,10 @@ test("Models page combines final visibility, atomic actions, discovery status, a
       contextWindow: 350_000,
       modelContextWindows: { "claude-opus": 100_000, "claude-sonnet": 80_000 },
     });
-    expect(container.querySelector('[role="dialog"][aria-label="Custom windows"]')).toBeNull();
+    expect(container.querySelector('dialog[aria-label="Custom windows"]')).toBeNull();
 
     await act(async () => buttonText("Custom windows").click());
-    const refreshFailureDialog = container.querySelector<HTMLElement>('[role="dialog"][aria-label="Custom windows"]')!;
+    const refreshFailureDialog = container.querySelector<HTMLDialogElement>('dialog[aria-label="Custom windows"]')!;
     failCatalog = true;
     // Make an actual edit. Apply now compares against the values the modal opened with, so a
     // reopened-and-untouched dialog sends nothing — which would leave this case asserting the
@@ -297,7 +297,7 @@ test("Models page combines final visibility, atomic actions, discovery status, a
     });
     expect(contextBodies).toHaveLength(2);
     expect(contextBodies.at(-1)).toEqual({ contextWindow: 360_000 });
-    expect(container.querySelector('[role="dialog"][aria-label="Custom windows"]')).toBeNull();
+    expect(container.querySelector('dialog[aria-label="Custom windows"]')).toBeNull();
     expect(container.textContent).toContain("Context windows updated");
     failCatalog = false;
 
@@ -305,7 +305,7 @@ test("Models page combines final visibility, atomic actions, discovery status, a
     // same number in a different shape. Comparing raw text instead of parsed values would
     // treat "64,000" as an edit and stamp a stale number over whatever else moved.
     await act(async () => buttonText("Custom windows").click());
-    const revertDialog = container.querySelector<HTMLElement>('[role="dialog"][aria-label="Custom windows"]')!;
+    const revertDialog = container.querySelector<HTMLDialogElement>('dialog[aria-label="Custom windows"]')!;
     const revertInput = revertDialog.querySelectorAll<HTMLInputElement>("input.input")[0]!;
     const openingValue = revertInput.value;
     await act(async () => {
@@ -321,10 +321,10 @@ test("Models page combines final visibility, atomic actions, discovery status, a
       await new Promise(resolve => testWindow.setTimeout(resolve, 0));
     });
     expect(contextBodies).toHaveLength(2);
-    expect(container.querySelector('[role="dialog"][aria-label="Custom windows"]')).toBeNull();
+    expect(container.querySelector('dialog[aria-label="Custom windows"]')).toBeNull();
 
     await act(async () => buttonText("Custom windows").click());
-    const reformatDialog = container.querySelector<HTMLElement>('[role="dialog"][aria-label="Custom windows"]')!;
+    const reformatDialog = container.querySelector<HTMLDialogElement>('dialog[aria-label="Custom windows"]')!;
     const reformatInput = reformatDialog.querySelectorAll<HTMLInputElement>("input.input")[0]!;
     const commaFormatted = reformatInput.value.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
     await act(async () => {
@@ -355,7 +355,7 @@ test("Models page combines final visibility, atomic actions, discovery status, a
     // opening values, and then comparing drafts against LIVE state — the defect — would look
     // identical to comparing against the snapshot.
     await act(async () => buttonText("Custom windows").click());
-    const concurrentDialog = container.querySelector<HTMLElement>('[role="dialog"][aria-label="Custom windows"]')!;
+    const concurrentDialog = container.querySelector<HTMLDialogElement>('dialog[aria-label="Custom windows"]')!;
     providerContextWindow = 300_000;
     providerModelContextWindows = { ...providerModelContextWindows, "claude-opus": 96_000 };
     await act(async () => { poll(); await new Promise(resolve => testWindow.setTimeout(resolve, 0)); });
@@ -381,7 +381,7 @@ test("Models page combines final visibility, atomic actions, discovery status, a
     // in each of them the user's value genuinely differs from both. This one does — the user
     // touches a field and puts it back, while the server moves underneath.
     await act(async () => buttonText("Custom windows").click());
-    const staleDialog = container.querySelector<HTMLElement>('[role="dialog"][aria-label="Custom windows"]')!;
+    const staleDialog = container.querySelector<HTMLDialogElement>('dialog[aria-label="Custom windows"]')!;
     const staleDefaultInput = staleDialog.querySelectorAll<HTMLInputElement>("input.input")[0]!;
     const staleOpeningDefault = staleDefaultInput.value;
     await act(async () => {
@@ -421,7 +421,7 @@ test("Models page combines final visibility, atomic actions, discovery status, a
     providerContextWindow = 1e100;
     await act(async () => { poll(); await new Promise(resolve => testWindow.setTimeout(resolve, 0)); });
     await act(async () => buttonText("Custom windows").click());
-    const unsafeDefaultDialog = container.querySelector<HTMLElement>('[role="dialog"][aria-label="Custom windows"]')!;
+    const unsafeDefaultDialog = container.querySelector<HTMLDialogElement>('dialog[aria-label="Custom windows"]')!;
     await pickContextModel("claude-sonnet", unsafeDefaultDialog);
     const unsafeSiblingInput = unsafeDefaultDialog.querySelectorAll<HTMLInputElement>("input.input")[1]!;
     await act(async () => {
@@ -440,7 +440,7 @@ test("Models page combines final visibility, atomic actions, discovery status, a
     // would turn a typo into a round-trip error instead of inline feedback.
     const patchesBeforeUnsafe = contextBodies.length;
     await act(async () => buttonText("Custom windows").click());
-    const unsafeDialog = container.querySelector<HTMLElement>('[role="dialog"][aria-label="Custom windows"]')!;
+    const unsafeDialog = container.querySelector<HTMLDialogElement>('dialog[aria-label="Custom windows"]')!;
     const unsafeInput = unsafeDialog.querySelectorAll<HTMLInputElement>("input.input")[0]!;
     await act(async () => {
       setValue.call(unsafeInput, "1e100");
@@ -455,7 +455,7 @@ test("Models page combines final visibility, atomic actions, discovery status, a
     // Relative, not absolute: an absolute count silently re-targets whenever a case is added
     // above, and the property under test is "this Apply wrote nothing".
     expect(contextBodies).toHaveLength(patchesBeforeUnsafe);
-    expect(container.querySelector('[role="dialog"][aria-label="Custom windows"]')).not.toBeNull();
+    expect(container.querySelector('dialog[aria-label="Custom windows"]')).not.toBeNull();
     // The modal staying open is not the point — the user has to be TOLD why. Without this the
     // test passes on a silent no-op that looks identical to a hang.
     expect(unsafeDialog.textContent).toContain("Context windows must be positive whole numbers");
