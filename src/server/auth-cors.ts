@@ -15,20 +15,19 @@ import {
   apiKeyTransportConfigError,
   azureCredentialConfigError,
   booleanRecordConfigError,
-  maxWsFrameBytesConfigError,
   modelAdapterRecordConfigError,
   modelDisplayNamesConfigError,
   nonBlankStringArrayConfigError,
   positiveIntegerConfigError,
   positiveIntegerRecordConfigError,
   providerBaseUrlConfigError,
-  providerEmptyToolOutputConfigError,
   providerHeadersConfigError,
+  providerEmptyToolOutputConfigError,
   reasoningSummaryDeliveryRecordConfigError,
+  maxWsFrameBytesConfigError,
   upstreamHttpVersionConfigError,
   wsUpstreamConfigError,
 } from "../config/provider-validation";
-import { antigravityOAuthDestinationConfigError, providerTlsProfileConfigError } from "../lib/provider-tls-profile";
 import { providerDestinationConfigError } from "../lib/destination-policy";
 import { assertServerTlsFiles, serverTlsConfigError } from "../lib/server-tls";
 import { redactSecretString } from "../lib/redact";
@@ -41,6 +40,7 @@ import { vercelGatewayRoutingConfigError } from "../providers/vercel-gateway-rou
 import { googleVertexLocationConfigError } from "../providers/google-vertex-location";
 import { xaiResponsesOptInState } from "../providers/xai-responses-opt-in";
 import { resolveAiStudioCredentials } from "../oauth/aistudio-credentials";
+import { antigravityOAuthDestinationConfigError, providerTlsProfileConfigError } from "../lib/provider-tls-profile";
 
 let _corsOrigin = "http://localhost:10100";
 export function setCorsOrigin(port: number): void { _corsOrigin = `http://localhost:${port}`; }
@@ -548,6 +548,7 @@ export function requireResponsesApiAuth(req: Request, config: RequestPolicyView)
 const FORBIDDEN_PROVIDER_RUNTIME_FIELDS = [
   "virtualModels", "codexAuthContext", "selectedForwardHeaders",
   "sidecarOutcomeRecorder", "_codexAccountOverride", "_codexAccountRequired",
+  "_apiKeyAttempt",
 ] as const;
 
 function sameCanonicalProviderSeed(actual: Record<string, unknown>, expected: OcxProviderConfig): boolean {
@@ -644,12 +645,6 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     return `provider ${name} must not include codexAccountMode`;
   }
   const typed = provider as unknown as OcxProviderConfig;
-  const tlsProfileError = providerTlsProfileConfigError(name, typed);
-  if (tlsProfileError) {
-    return `provider ${JSON.stringify(redactSecretString(name))} ${tlsProfileError}`;
-  }
-  const antigravityError = antigravityOAuthDestinationConfigError(name, typed);
-  if (antigravityError) return `provider ${name} ${antigravityError}`;
   const baseUrlError = providerBaseUrlConfigError(typed.baseUrl);
   if (baseUrlError) return `provider ${name} ${baseUrlError}`;
   if (effectiveGoogleMode(name, typed) === "vertex" && typed.location !== undefined) {
@@ -658,6 +653,10 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   }
   const destinationError = providerDestinationConfigError(name, typed);
   if (destinationError) return `provider ${name} ${destinationError}`;
+  const tlsProfileError = providerTlsProfileConfigError(name, typed);
+  if (tlsProfileError) return `provider ${JSON.stringify(redactSecretString(name))} ${tlsProfileError}`;
+  const antigravityError = antigravityOAuthDestinationConfigError(name, typed);
+  if (antigravityError) return `provider ${JSON.stringify(redactSecretString(name))} ${antigravityError}`;
   const headersError = providerHeadersConfigError(typed.headers);
   if (headersError) return `provider ${name} ${headersError}`;
   const retryOn429Error = retryOn429PolicyConfigError(raw.retryOn429);
@@ -840,9 +839,10 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   disabled: "editor",
   codexAccountMode: "editor",
   apiKey: "redacted",
-  azureCredential: "redacted",
   apiKeyTransport: "editor",
   apiKeyPool: "redacted",
+  apiKeySelectionRevision: "runtime",
+  _apiKeyAttempt: "runtime",
   defaultModel: "editor",
   models: "editor",
   liveModels: "editor",
@@ -921,6 +921,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   unsafeAllowNativeLocalExec: "editor",
   nativeLocalExec: "editor",
   tlsProfile: "editor",
+  azureCredential: "redacted",
 } as const satisfies Record<keyof OcxProviderConfig, ProviderConfigFieldPolicy>;
 
 type ProviderFieldWithPolicy<Policy extends ProviderConfigFieldPolicy> = {

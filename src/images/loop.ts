@@ -35,7 +35,6 @@ import { submitVideoJob } from "./xai-video-client";
 import { downloadVideoToArtifact, createImageBudget, pruneArtifacts } from "./artifacts";
 import { IMAGE_GEN_TOOL_NAME, VIDEO_GEN_TOOL_NAME } from "./synthetic-tool";
 import type { ImageBridgePlan, VideoBridgePlan } from "./types";
-import { OcxRequestValidationError } from "../lib/errors";
 
 const SSE_HEADERS = {
   "Content-Type": "text/event-stream",
@@ -210,14 +209,8 @@ function extractIterationThinking(events: AdapterEvent[]): OcxThinkingContent[] 
   return parts;
 }
 
-function jsonError(status: number, message: string, errorType = "upstream_error", code: string | null = null): Response {
-  return new Response(JSON.stringify({
-    error: {
-      message,
-      type: errorType,
-      code,
-    },
-  }), {
+function jsonError(status: number, message: string): Response {
+  return new Response(JSON.stringify({ error: { message, type: "upstream_error", code: null } }), {
     status,
     headers: { "Content-Type": "application/json" },
   });
@@ -226,12 +219,7 @@ function jsonError(status: number, message: string, errorType = "upstream_error"
 /** Hard provider/parse failure inside an iteration. The eager first iteration converts it to a
  *  non-2xx jsonError; later (already-streaming) iterations surface it as an in-stream error event. */
 class LoopError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-    readonly errorType?: string,
-    readonly code?: string,
-  ) {
+  constructor(readonly status: number, message: string) {
     super(message);
     this.name = "LoopError";
   }
@@ -249,8 +237,6 @@ export interface ImageBridgeDeps {
   videoPlan?: VideoBridgePlan;
   /** Per-video generation timeout (ms) including polling. */
   videoTimeoutMs?: number;
-  /** OAuth account identity forwarded to AdapterFetchContext for provider-local cooldown bookkeeping. */
-  accountId?: string;
   /** Headers forwarded from the original request (e.g. Codex auth). Cloned per iteration. */
   forwardHeaders?: Headers;
   /** Called before each routed-model dispatch in the bridge loop, for attempt telemetry. Same-target 429 replays pass the `rate-limit-429` recovery kind. */
@@ -269,6 +255,8 @@ export interface ImageBridgeDeps {
   stallTimeoutSec?: number;
   /** Provider-specific fetch (e.g. xAI transport wrapper). Falls back to global fetch. */
   fetchImpl?: typeof globalThis.fetch;
+  /** Bind physical dispatch to this iteration's built request; pacing remains owned by the loop. */
+  fetchForRequest?: (request: AdapterRequest, parsed: OcxParsedRequest) => typeof globalThis.fetch;
   /** Reserve the routed provider's next request-start slot before each adapter dispatch. */
   waitForRequestSlot?: (signal?: AbortSignal) => Promise<void>;
   /** Raw adapter usage at the terminal event, pre wire-normalization (see bridgeToResponsesSSE onUsage). */
@@ -518,6 +506,7 @@ export async function runWithImageBridge(deps: ImageBridgeDeps): Promise<Respons
           cachedRequest = request;
           cachedAdapter = requestAdapter;
         }
+        const requestFetch = deps.fetchForRequest?.(request, iterParsed) ?? fetchImpl;
         let response: Response;
         try {
           if (requestAdapter.fetchResponse) {
@@ -528,8 +517,7 @@ export async function runWithImageBridge(deps: ImageBridgeDeps): Promise<Respons
               timeoutMs: connectTimeoutMs,
               returnRawErrors: true,
               stream: true,
-              executor: fetchImpl,
-              ...(deps.accountId ? { accountId: deps.accountId } : {}),
+              executor: requestFetch,
             });
           } else {
             response = await fetchWithResetRetry(
@@ -544,7 +532,7 @@ export async function runWithImageBridge(deps: ImageBridgeDeps): Promise<Respons
                 // Same reset-recovery parity as the web-search loop: the replay needs
                 // `keepalive: false` to abandon the pooled socket, because Bun has ignored the
                 // hop-by-hop header alone (oven-sh/bun#20492).
-                return fetchImpl(request.url, applyUpstreamRecoveryInit({
+                return requestFetch(request.url, applyUpstreamRecoveryInit({
                   method: request.method,
                   headers: h,
                   body: request.body,
@@ -630,9 +618,6 @@ export async function runWithImageBridge(deps: ImageBridgeDeps): Promise<Respons
       return prepared;
     } catch (error) {
       if (isTranslatorBudgetExceededError(error)) throw error;
-      if (error instanceof OcxRequestValidationError) {
-        throw new LoopError(error.status, error.message, "invalid_request_error", "invalid_request_error");
-      }
       if (headerDeadline.didExpire()) {
         throw new LoopError(504, `Provider response-header timeout after ${connectTimeoutMs}ms during image-bridge`);
       }
@@ -702,7 +687,7 @@ export async function runWithImageBridge(deps: ImageBridgeDeps): Promise<Respons
       firstPrepared = await prepareIterationDrained(maxRounds <= 0);
     } catch (e) {
       if (abortSignal) abortSignal.removeEventListener("abort", linkAbort);
-      if (e instanceof LoopError) return jsonError(e.status, e.message, e.errorType, e.code ?? null);
+      if (e instanceof LoopError) return jsonError(e.status, e.message);
       throw e;
     }
   }
@@ -948,13 +933,7 @@ export async function runWithImageBridge(deps: ImageBridgeDeps): Promise<Respons
             yield {
               type: "error",
               message: e instanceof LoopError ? e.message : (e instanceof Error ? e.message : String(e)),
-              ...(e instanceof LoopError ? {
-                status: e.status,
-                ...(e.errorType !== undefined || e.status === 400
-                  ? { errorType: e.errorType ?? "upstream_error" }
-                  : {}),
-                ...(e.code !== undefined ? { code: e.code } : {}),
-              } : {}),
+              ...(e instanceof LoopError ? { status: e.status } : {}),
               ...(hiddenUsage ? { usage: hiddenUsage } : {}),
             };
           }

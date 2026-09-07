@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { fixturePath } from "../helpers/repo-root";
 
 // Regression: canonical Command Code OAuth discovery must survive Clash /
 // Surge / Mihomo fake-IP DNS (198.18.0.0/15) WITHOUT proxy env.
@@ -39,7 +38,7 @@ const { clearModelCache, clearProviderDiscoveryStatus, getProviderDiscoveryStatu
 const { withStubbedProviderFetch } = await import("../helpers/catalog-provider-fetch");
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 
-const FIXTURE = readFileSync(fixturePath("commandcode-models.json"), "utf8");
+const FIXTURE = readFileSync(join(import.meta.dir, "../fixtures/commandcode-models.json"), "utf8");
 
 const proxyKeys = PROXY_ENV_KEYS.flatMap(key => [key, key.toLowerCase()]);
 const originalProxyEnv = Object.fromEntries(proxyKeys.map(key => [key, process.env[key]]));

@@ -10,6 +10,13 @@ export type RefreshPolicy = "proactive" | "lazy-only" | "disabled";
 
 export type ProviderTlsProfile = "antigravity-browser";
 
+/** Request-owned identity of the configured key, before env/keychain resolution. */
+export interface ProviderApiKeySelection {
+  entryId?: string;
+  reference?: string;
+  revision?: string;
+}
+
 export interface OpenRouterProviderRouting {
   /** OpenRouter provider slugs to try first, in priority order. */
   order?: string[];
@@ -226,12 +233,7 @@ export interface OcxProviderConfig {
    * version here instead of waiting for a code change. Absent uses the adapter's current default.
    */
   commandCodeVersion?: string;
-  /**
-   * Command Code OAuth `/alpha/generate` project-context envelope. When `"on"`, the adapter
-   * fills `memory`, `taste`, and `skills` from bounded files under `process.cwd()`. Absent or
-   * `"off"` keeps the empty envelope (`memory: ""`, `taste: null`, `skills: null`). Does not
-   * enable taste learning (`x-taste-learning` stays `"false"`).
-   */
+  /** Include bounded repository context in Command Code envelopes. */
   projectContext?: "off" | "on";
   /**
    * Responses upstream that stores nothing server-side (DeepSeek documents "the API
@@ -295,17 +297,11 @@ export interface OcxProviderConfig {
    */
   allowPrivateNetwork?: boolean;
   /**
-   * ChatGPT Codex backend WebSocket upstream transport.
-   * Defaults to false (routes streaming turns over standard HTTP/SSE).
-   * Set `true` to opt into the faster responses_websockets transport.
-   * `OCX_CODEX_WS_UPSTREAM=true` or `1` also enables it when this is omitted;
-   * `false` and `0` disable it. Invalid or absent values default to HTTP/SSE.
+   * ChatGPT Codex backend WebSocket upstream transport. Defaults to false (HTTP/SSE).
+   * The OCX_CODEX_WS_UPSTREAM environment value applies only when this is omitted.
    */
   wsUpstream?: boolean;
-  /**
-   * Maximum WebSocket request frame size in bytes before routing over standard HTTP/SSE.
-   * Defaults to CODEX_WS_CREATE_FRAME_LIMIT_BYTES (~16 MiB minus margin).
-   */
+  /** Maximum request frame size before falling back to HTTP/SSE. */
   maxWsFrameBytes?: number;
   /**
    * Pin the HTTP version used for upstream provider requests. Bun's fetch negotiates
@@ -360,6 +356,10 @@ export interface OcxProviderConfig {
    * `apiKey` seeds a one-entry pool on first management touch.
    */
   apiKeyPool?: Array<{ id: string; key: string; label?: string; addedAt?: number }>;
+  /** Changes on manual selection (including re-selection) and committed automatic allocation. */
+  apiKeySelectionRevision?: string;
+  /** Runtime only. Never expose in management responses or persist a routed provider. */
+  _apiKeyAttempt?: ProviderApiKeySelection;
   defaultModel?: string;
   models?: string[];
   /**
@@ -468,12 +468,13 @@ export interface OcxProviderConfig {
    */
   authMode?: "key" | "forward" | "oauth" | "local";
   /**
-   * Per-provider override for generic OAuth account selection and recovery (#2568, #695).
+   * Per-provider override for the generic OAuth PROACTIVE account preference (#2568, #695).
    *
-   * When absent, two or more eligible accounts enable reactive 429 rotation by default. An
-   * explicit `false` refuses both that replay and the pre-dispatch preference that steers a
-   * healthy request toward the account with more known headroom. This narrower setting beats
-   * the global `oauthAccountFailover` in either direction.
+   * When this setting and the global setting are omitted, 2+ eligible accounts enable reactive
+   * 429 rotation by presence. An explicit provider `false` disables both proactive preference
+   * and reactive replay under another identity; an explicit `true` enables them. This overrides
+   * global `oauthAccountFailover` in either direction. A healthy selected account retains
+   * priority during proactive selection.
    */
   oauthAccountFailover?: {
     enabled?: boolean;
@@ -689,7 +690,7 @@ export interface OcxProviderConfig {
    * before any response bytes are relayed, so the replay is lossless.
    */
   retryOn429?: RateLimitRetryPolicy;
-  /** Opt in to replaying transient upstream 5xx responses (at most three total sends). */
+  /** Opt in to replaying transient upstream failures within one bounded request budget. */
   replayTransientFailures?: boolean;
   /**
    * Opt-in retry for pre-stream transient upstream statuses
@@ -740,9 +741,8 @@ export interface OcxProviderConfig {
    * Google adapter mode. "ai-studio" (default) = Generative Language API + x-goog-api-key.
    * "vertex" = Vertex AI project/location endpoints with GCP ADC (or x-goog-api-key).
    * "cloud-code-assist" = Google Antigravity (Cloud Code Assist) OAuth + CCA envelope.
-   * "ai-studio-web" = browser-relayed AI Studio Playground/Build session.
    */
-  googleMode?: "ai-studio" | "vertex" | "cloud-code-assist" | "ai-studio-web";
+  googleMode?: "ai-studio" | "ai-studio-web" | "vertex" | "cloud-code-assist";
   /** Vertex AI GCP project id (or GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT env). */
   project?: string;
   /** Vertex AI location, e.g. "us-central1" or "global" (or GOOGLE_CLOUD_LOCATION env). */

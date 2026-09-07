@@ -6,3 +6,4 @@ Reviewer: grok-4.6 subagent (Poincare). Verdict near-pass; all findings adopted:
 - Logs: host:port only, userinfo stripped; doctor already never prints values.
 - Tests inject the reader; CI never spawns `reg.exe`.
 - Schema: passthrough, JSDoc only; an enum would start backing up configs.
+

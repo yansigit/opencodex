@@ -6,3 +6,4 @@ the process-boundary conclusion. Verified in this tree: `collectCodexEnvKeyReadi
 (`src/cli/doctor.ts:473`) and its action line; `src/codex/shim.ts:726` is the only reader that
 exports the token into a Codex process; `src/cli/index.ts:241` exports it for `ocx` itself.
 Verdict: pass for a docs-only closure; nothing in the plan changes runtime behavior.
+

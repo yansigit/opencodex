@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { join } from "node:path";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { checkAccountIdCollision } from "../../src/codex/auth-api";
 import { saveConfig } from "../../src/config";
@@ -10,8 +10,8 @@ import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-let TEST_DIR = "";
-let TEST_CODEX_HOME = "";
+let testDir = "";
+let testCodexHome = "";
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
 const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
@@ -21,10 +21,10 @@ beforeEach(() => {
   previousCodexHome = process.env.CODEX_HOME;
   setIcaclsRunnerForTests(() => ICACLS_OK);
   setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-  TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-codex-auth-collision-"));
-  TEST_CODEX_HOME = mkdtempSync(join(tmpdir(), "ocx-codex-auth-collision-codex-"));
-  process.env.OPENCODEX_HOME = TEST_DIR;
-  process.env.CODEX_HOME = TEST_CODEX_HOME;
+  testDir = mkdtempSync(join(tmpdir(), "ocx-codex-auth-collision-"));
+  testCodexHome = mkdtempSync(join(tmpdir(), "ocx-codex-auth-collision-codex-"));
+  process.env.OPENCODEX_HOME = testDir;
+  process.env.CODEX_HOME = testCodexHome;
 });
 
 afterEach(async () => {
@@ -35,10 +35,8 @@ afterEach(async () => {
   else process.env.OPENCODEX_HOME = previousOpencodexHome;
   if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = previousCodexHome;
-  removeTreeWithRetry(TEST_DIR);
-  removeTreeWithRetry(TEST_CODEX_HOME);
-  TEST_DIR = "";
-  TEST_CODEX_HOME = "";
+  if (testDir) removeTreeWithRetry(testDir);
+  if (testCodexHome) removeTreeWithRetry(testCodexHome);
 });
 
 function seedAccount(id: string, email: string, chatgptAccountId: string, plan?: string): OcxConfig {
@@ -111,7 +109,7 @@ describe("codex auth account collision", () => {
   });
 
   test("allows pool registration matching the main Codex login account id", async () => {
-    writeFileSync(join(TEST_CODEX_HOME, "auth.json"), JSON.stringify({
+    writeFileSync(join(testCodexHome, "auth.json"), JSON.stringify({
       tokens: {
         access_token: "not-a-jwt",
         account_id: "main-chatgpt-account",

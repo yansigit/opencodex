@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,8 +8,10 @@ import {
   getValidAccessTokenForAccount,
   OAUTH_PROVIDERS,
 } from "../../../src/oauth";
+import { flushConfigDirHardeningForTests } from "../../../src/config/paths";
 import type { OAuthCredentials } from "../../../src/oauth/types";
 import { getAccountCredential, getAccountSet, saveCredential } from "../../../src/oauth/store";
+import { removeTreeWithRetry } from "../../helpers/remove-tree";
 
 setDefaultTimeout(30_000);
 
@@ -20,19 +22,19 @@ const origCursorRefresh = OAUTH_PROVIDERS.cursor!.refresh;
 let tmp = "";
 
 beforeEach(() => {
-  tmp = join(tmpdir(), `cursor-auth-gate-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-  mkdirSync(tmp, { recursive: true });
+  tmp = mkdtempSync(join(tmpdir(), "cursor-auth-gate-"));
   process.env.HOME = tmp;
   process.env.OPENCODEX_HOME = join(tmp, "ocx");
 });
 
-afterEach(() => {
+afterEach(async () => {
   OAUTH_PROVIDERS.cursor!.refresh = origCursorRefresh;
+  await flushConfigDirHardeningForTests();
   if (origHome === undefined) delete process.env.HOME;
   else process.env.HOME = origHome;
   if (origOcxHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = origOcxHome;
-  rmSync(tmp, { recursive: true, force: true });
+  removeTreeWithRetry(tmp);
 });
 
 async function seedNearExpiryCursor(): Promise<string> {

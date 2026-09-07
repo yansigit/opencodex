@@ -19,9 +19,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getConfigPath, loadConfig, replacePersistedConfig, saveConfig } from "../../src/config";
 import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import * as configStore from "../../src/config";
 import * as stateStores from "../../src/lib/state-store-registrations";
-import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { OAUTH_PROVIDERS, reconcileOAuthProviders } from "../../src/oauth";
 import { runModelRenameStartupMigration } from "../../src/providers/model-rename-startup";
 import { startServer } from "../../src/server";
@@ -52,7 +52,6 @@ function canBindLoopback(): boolean {
 }
 
 const CAN_BIND = canBindLoopback();
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 test.skipIf(!CAN_BIND)("startServer persists the Astra-first legacy roster upgrade", async () => {
   saveConfig({
@@ -134,6 +133,7 @@ test.skipIf(!CAN_BIND)("preset reconciliation cannot undo an in-memory Grok migr
 let testDir = "";
 let previousHome: string | undefined;
 let isolatedCodexHome: IsolatedCodexHome | null = null;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 /** A saved config that reconciliation genuinely rewrites, so the persistence path is reached. */
 function staleConfig(): OcxConfig {
@@ -166,17 +166,14 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  try {
-    await flushConfigDirHardeningForTests();
-  } finally {
-    setIcaclsRunnerForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
-    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
-    else process.env.OPENCODEX_HOME = previousHome;
-    isolatedCodexHome?.restore();
-    isolatedCodexHome = null;
-    if (testDir) removeTreeWithRetry(testDir);
-  }
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+  if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = previousHome;
+  isolatedCodexHome?.restore();
+  isolatedCodexHome = null;
+  if (testDir) removeTreeWithRetry(testDir);
 });
 
 test("a config removed between loadConfig() and reconcile does not throw on the boot path", () => {

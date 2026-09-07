@@ -23,7 +23,6 @@ import {
   commitCursorCheckpoint,
   CURSOR_CHECKPOINT_TTL_MS,
   cursorCheckpointStoreMetricsForTests,
-  getCursorCheckpointForPrefix,
   installCursorCheckpointClockForTests,
   invalidateCursorCheckpoint,
 } from "../../../src/adapters/cursor/checkpoint-store";
@@ -675,37 +674,6 @@ describe("Cursor blob handshake", () => {
 
   });
 
-  test("external tool continuations repeat bounded active instructions in the action text", () => {
-    const rawMessages = [
-      { role: "user" as const, content: "Run lookup.", timestamp: 1 },
-      {
-        role: "assistant" as const,
-        content: [{ type: "toolCall" as const, id: "call_1", name: "lookup", arguments: { q: "x" } }],
-        timestamp: 2,
-      },
-      {
-        role: "toolResult" as const,
-        toolCallId: "call_1",
-        toolName: "lookup",
-        content: "VALUE=x",
-        isError: false,
-        timestamp: 3,
-      },
-    ];
-    const request = {
-      modelId: "cursor-grok-4.6-xhigh",
-      conversationId: "c-instruction-reminder",
-      messages: [{ role: "tool" as const, content: "VALUE=x" }],
-      rawMessages,
-    };
-
-    const bounded = encodeCursorRunRequest({ ...request, system: ["Reply exactly FINAL=x."] });
-    expect(actionText(bounded)).toContain("Active instructions:\nReply exactly FINAL=x.");
-
-    const oversized = encodeCursorRunRequest({ ...request, system: ["x".repeat(2_049)] });
-    expect(actionText(oversized)).not.toContain("Active instructions:");
-  });
-
   test("keeps exec_command guidance in the system prompt without mutating the user request", () => {
     const prompt = "Run: echo OCX via your shell tool, report stdout.";
     const bytes = encodeCursorRunRequest({
@@ -869,7 +837,7 @@ describe("Cursor blob handshake", () => {
     }
     expect(run?.action?.action.case).toBe("userMessageAction");
     const value = run?.action?.action.case === "userMessageAction" ? run.action.action.value : undefined;
-    expect(value?.userMessage?.text).toBe(`${CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT}\n\nActive instructions:\nYou are helpful.`);
+    expect(value?.userMessage?.text).toBe(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT);
   });
 
   test("native protobuf replay leaves an opaque escape lookalike byte-identical", () => {
@@ -933,26 +901,6 @@ describe("Cursor blob handshake", () => {
     expect(run?.action?.action.case).toBe("userMessageAction");
     const roots = decodeRootMessages(bytes) as Array<{ role?: string; content?: unknown }>;
     expect(JSON.stringify(roots)).toContain("hidden reasoning");
-  });
-
-  test("composer-2.5 hybrid replay collapses repeated roots and adds a strategy-change note", () => {
-    const bytes = encodeCursorRunRequest({
-      modelId: "composer-2.5",
-      conversationId: "c-composer-repetition",
-      system: ["You are helpful."],
-      messages: [{ role: "user", content: "continue" }],
-      rawMessages: [
-        { role: "user", content: "work through it", timestamp: 1 },
-        { role: "assistant", content: [{ type: "text", text: "Still working on it." }], timestamp: 2 },
-        { role: "assistant", content: [{ type: "text", text: "Still working on it." }], timestamp: 3 },
-        { role: "assistant", content: [{ type: "text", text: "Still working on it." }], timestamp: 4 },
-        { role: "user", content: "continue", timestamp: 5 },
-      ],
-    });
-    const serialized = JSON.stringify(decodeRootMessages(bytes));
-    expect(serialized.match(/Still working on it\./g)).toHaveLength(1);
-    expect(serialized).toContain("this exact output was produced 3 times in a row");
-    expect(serialized).toContain("Take a DIFFERENT action now");
   });
 
   test("external Cursor replay uses text history instead of native tool/thinking structures", () => {
@@ -1077,7 +1025,7 @@ describe("Cursor blob handshake", () => {
 
     expect(run?.action?.action.case).toBe("userMessageAction");
     const value = run?.action?.action.case === "userMessageAction" ? run.action.action.value : undefined;
-    expect(value?.userMessage?.text).toBe(`${CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT}\n\nActive instructions:\nYou are helpful.`);
+    expect(value?.userMessage?.text).toBe(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT);
     const roots = decodeRootMessages(bytes) as Array<{ role?: string }>;
     expect(JSON.stringify(roots)).toContain("contents");
   });
@@ -1106,7 +1054,7 @@ describe("Cursor blob handshake", () => {
 
     expect(run?.action?.action.case).toBe("userMessageAction");
     const value = run?.action?.action.case === "userMessageAction" ? run.action.action.value : undefined;
-    expect(value?.userMessage?.text).toBe(`${CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT}\n\nActive instructions:\nYou are helpful.`);
+    expect(value?.userMessage?.text).toBe(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT);
     // Tool results are still replayed via history blobs.
     const roots = decodeRootMessages(bytes) as Array<{ role?: string }>;
     expect(JSON.stringify(roots)).toContain("contents");
@@ -1754,6 +1702,87 @@ describe("Cursor bounded blob store", () => {
     resetCursorBlobStateForTests();
     expect(cursorBlobMetrics()).toMatchObject({ count: 0, totalBytes: 0, localBytes: 0, pinnedBytes: 0 });
   });
+
+  test("fresh blob inserts accumulate class bytes across remote and local entries", () => {
+    const originalNow = Date.now;
+    let now = 1_000;
+    Date.now = () => now;
+    try {
+      setCursorBlobLimitsForTests({ ttlMs: 50, maxEntryBytes: 8, maxTotalBytes: 64 });
+      const remoteId = sha256(bytes("rem"));
+      setBlobReply(remoteId, bytes("rem"));
+      expect(cursorBlobMetrics()).toMatchObject({
+        count: 1,
+        totalBytes: 3,
+        keyBytes: 66,
+        localBytes: 0,
+        pinnedBytes: 3 + 66,
+        oldestAt: null,
+      });
+      expect(cursorBlobRetainedStoreSnapshot()).toMatchObject({
+        count: 1,
+        bytes: 3 + 66,
+        evictableBytes: 0,
+        pinnedBytes: 3 + 66,
+        oldestAt: null,
+      });
+      now = 1_001;
+      const localId = storeCursorBlob(bytes("loc"));
+      expect(cursorBlobMetrics()).toMatchObject({
+        count: 2,
+        totalBytes: 6,
+        keyBytes: 132,
+        localBytes: 3,
+        pinnedBytes: 3 + 66,
+        oldestAt: 1_001,
+      });
+      expect(cursorBlobRetainedStoreSnapshot()).toMatchObject({
+        count: 2,
+        bytes: 6 + 132,
+        evictableBytes: 3 + 66,
+        pinnedBytes: 3 + 66,
+        oldestAt: 1_001,
+      });
+      expectBlobHit(remoteId, bytes("rem"));
+      expectBlobHit(localId, bytes("loc"));
+      expect(cursorBlobStoreDebugSnapshotForTests().map(row => row.provenance).sort()).toEqual([
+        "local-regenerated",
+        "remote-setBlobArgs",
+      ]);
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  test("releasing an expired pin still TTL-purges that row on the next write", () => {
+    const originalNow = Date.now;
+    let now = 100;
+    Date.now = () => now;
+    try {
+      setCursorBlobLimitsForTests({ ttlMs: 10, maxEntryBytes: 8, maxTotalBytes: 64, maxEntries: 8 });
+      const scope = createCursorBlobRequestScope();
+      const pinnedId = sha256(bytes("pin"));
+      setBlobReply(pinnedId, bytes("pin"), 1, scope);
+      sealCursorBlobRequestScope(scope);
+      now = 105;
+      const liveId = sha256(bytes("live"));
+      setBlobReply(liveId, bytes("live"));
+      now = 111;
+      releaseCursorBlobRequestScope(scope);
+      const laterId = sha256(bytes("new"));
+      setBlobReply(laterId, bytes("new"));
+      // Observe before getBlob can lazily delete an expired entry itself.
+      expect(cursorBlobMetrics()).toMatchObject({ count: 2, totalBytes: 7, keyBytes: 132 });
+      expect(cursorBlobRetainedStoreSnapshot()).toMatchObject({
+        count: 2, bytes: 7 + 132, pinnedBytes: 7 + 132, evictableBytes: 0,
+      });
+      expectBlobMiss(pinnedId);
+      expectBlobHit(liveId, bytes("live"));
+      expectBlobHit(laterId, bytes("new"));
+    } finally {
+      Date.now = originalNow;
+    }
+  });
 });
 
 describe("Cursor blob ID key channel bounds", () => {
@@ -1864,30 +1893,6 @@ describe("Cursor blob ID key channel bounds", () => {
 });
 
 describe("Cursor checkpoint request construction", () => {
-  test("duplicate prefix identities select the newest checkpoint", () => {
-    clearCursorCheckpointsForTests();
-    let clock = 1_000;
-    installCursorCheckpointClockForTests({ now: () => clock });
-    const checkpointBytes = toBinary(ConversationStateStructureSchema, create(ConversationStateStructureSchema, { selfSummaryCount: 1 }));
-    const common = {
-      conversationId: "cursor_duplicate",
-      identityScope: "acct",
-      modelId: "grok-4.6",
-      checkpointBytes,
-      coveredMessageCount: 2,
-      prefixDigest: "prefix",
-      systemDigest: "system",
-    };
-    const first = commitCursorCheckpoint(common);
-    clock += 1;
-    const second = commitCursorCheckpoint(common);
-    expect(first).toBeDefined();
-    expect(second).toBeDefined();
-    expect(second).not.toBe(first);
-    expect(getCursorCheckpointForPrefix(common)?.ref).toBe(second);
-    clearCursorCheckpointsForTests();
-  });
-
   test("uses decoded ConversationStateStructure and skips historical root replay", () => {
     const checkpoint = create(ConversationStateStructureSchema, {
       rootPromptMessagesJson: [new Uint8Array(32).fill(7)],

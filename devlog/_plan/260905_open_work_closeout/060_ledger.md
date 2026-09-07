@@ -23,3 +23,4 @@ original-closure link (or an explicit keep-open rider: #3522, #3462); every DEFE
 has a closure or comment link; `bun run privacy:scan` exit 0 on the closeout commit; then the
 unit moves to `devlog/_fin/`. The ledger header above is the single schema (010 §7 was aligned
 to it in audit round 2).
+

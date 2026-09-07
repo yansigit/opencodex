@@ -14,6 +14,10 @@ describe("Compatibility Lab generated implementation identity", () => {
     expect(manifest.bunRuntimeVersion).toBe(Bun.version);
     for (const path of REQUIRED_COMPATIBILITY_FILES) expect(paths).toContain(path);
     expect(paths).toContain("src/routing/compatibility/version.ts");
+    expect(paths).toContain("gui/src/main.tsx");
+    expect(paths).toContain("gui/vite.config.ts");
+    expect(paths).toContain("gui/public/logo.png");
+    expect(paths.some(path => path.startsWith("gui/tests/"))).toBe(true);
     expect(paths).not.toContain("src/generated/compatibility-version.json");
     expect(new Set(paths).size).toBe(paths.length);
     expect(paths).toEqual([...paths].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b))));

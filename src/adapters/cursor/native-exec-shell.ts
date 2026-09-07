@@ -1,4 +1,4 @@
-import { execFileSync, spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { resolve } from "node:path";
 import { create } from "@bufbuild/protobuf";
 import {
@@ -19,9 +19,6 @@ import {
   type ExecServerMessage,
 } from "./gen/agent_pb";
 import { errorText, execBytes, execStreamCloseBytes } from "./native-exec-common";
-import { resolveTrustedWindowsTaskkillExe } from "../../lib/windows-elevation";
-import { nativeShellDisabledMessage, type CursorNativeExecPolicyContext } from "./native-exec-policy";
-export { nativeShellDisabledMessage, type CursorNativeExecPolicyContext };
 import {
   createAdmissionGate,
   type AdmissionLease,
@@ -35,7 +32,6 @@ export const CURSOR_BACKGROUND_SHELL_TERM_GRACE_MS = 2_000;
 
 type BackgroundShellTerminationReason = "session_close" | "idle" | "absolute" | "shutdown";
 type BackgroundShellTimer = ReturnType<typeof setTimeout>;
-type ProcessGroupLiveness = "alive" | "gone" | "unknown";
 
 export interface BackgroundShellTerminationReport {
   attempted: number;
@@ -46,14 +42,10 @@ export interface BackgroundShellTerminationReport {
 
 export interface BackgroundShellRuntime {
   spawn: typeof spawn;
-  platform: NodeJS.Platform;
   now(): number;
   setTimer(callback: () => void, delayMs: number): BackgroundShellTimer;
   clearTimer(timer: BackgroundShellTimer): void;
   kill(child: ChildProcessWithoutNullStreams, signal?: NodeJS.Signals): boolean;
-  killProcessGroup(pid: number, signal?: NodeJS.Signals): boolean;
-  isProcessGroupAlive(pid: number): ProcessGroupLiveness;
-  killTree(child: ChildProcessWithoutNullStreams): boolean;
 }
 
 interface BackgroundShellEntry {
@@ -73,30 +65,10 @@ interface BackgroundShellEntry {
 
 const defaultBackgroundShellRuntime: BackgroundShellRuntime = {
   spawn,
-  platform: process.platform,
   now: () => Date.now(),
   setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
   clearTimer: timer => clearTimeout(timer),
   kill: (child, signal) => child.kill(signal),
-  killProcessGroup: (pid, signal) => {
-    process.kill(-pid, signal);
-    return true;
-  },
-  isProcessGroupAlive: pid => {
-    try {
-      process.kill(-pid, 0);
-      return "alive";
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code === "ESRCH" ? "gone" : "unknown";
-    }
-  },
-  killTree: child => {
-    execFileSync(resolveTrustedWindowsTaskkillExe(), ["/PID", String(child.pid), "/T", "/F"], {
-      stdio: "pipe",
-      windowsHide: true,
-    });
-    return true;
-  },
 };
 
 let backgroundShellRuntime = defaultBackgroundShellRuntime;
@@ -109,7 +81,24 @@ let absoluteTerminations = 0;
 let unresolvedKills = 0;
 let killFailures = 0;
 
-function rejectedShellResult(command: string, cwd: string, started: number, opts: CursorNativeExecPolicyContext = {}) {
+/** Rejection text when Cursor-native shell is denied by policy (issue #604). */
+export function nativeShellDisabledMessage(): string {
+  // Do not insist on "the same command" — that steers models into replaying bash/CMD
+  // idioms through the Codex bridge on Windows PowerShell 5.1 and looping (#604).
+  // Keep this host-shell-neutral: OpenCodex may run on a different OS than the Codex
+  // client that executes the bridge (LAN/SSH remote-proxy).
+  // Silent-redirect framing (devlog 260826 gap-8): no "blocked/denied/disabled" words —
+  // models narrate those as a surface switch ("Shell이 차단되어 전환합니다") and burn turns.
+  return (
+    "Re-issue this command NOW through the catalog shell tool (`shell_command` or `exec_command`; the long `mcp_opencodex-responses_*` display name is the same tool). "
+    + "Adapt the command for the Codex client host shell before calling the bridge "
+    + "(Windows PowerShell 5.1: no CMD `cd /d`, no bash heredocs; `&&`/`||` are unsupported parser errors — prefer the bridge working-directory argument for directory changes, and use `if ($?) { ... }` for success-gated follow-up steps; do not treat `;` as a substitute for `&&`). "
+    + "Make at most one corrected bridge attempt after a failure, then report the error and stop — do not repeat equivalent failing commands. "
+    + "Do NOT narrate this redirect, do NOT comment on tool availability, and do NOT re-announce the task — just make the bridge call."
+  );
+}
+
+function rejectedShellResult(command: string, cwd: string, started: number) {
   return create(ShellResultSchema, {
     result: {
       case: "failure",
@@ -119,7 +108,7 @@ function rejectedShellResult(command: string, cwd: string, started: number, opts
         exitCode: 1,
         signal: "",
         stdout: "",
-        stderr: nativeShellDisabledMessage(opts),
+        stderr: nativeShellDisabledMessage(),
         executionTime: Date.now() - started,
         aborted: true,
       }),
@@ -127,10 +116,10 @@ function rejectedShellResult(command: string, cwd: string, started: number, opts
   });
 }
 
-export function rejectShellExecForPolicy(execMsg: ExecServerMessage, opts: CursorNativeExecPolicyContext = {}): Uint8Array {
+export function rejectShellExecForPolicy(execMsg: ExecServerMessage): Uint8Array {
   if (execMsg.message.case !== "shellArgs") throw new Error("invalid shell exec");
   const args = execMsg.message.value;
-  return execBytes(execMsg, "shellResult", rejectedShellResult(args.command, resolve(args.workingDirectory || process.cwd()), Date.now(), opts));
+  return execBytes(execMsg, "shellResult", rejectedShellResult(args.command, resolve(args.workingDirectory || process.cwd()), Date.now()));
 }
 
 export function shellExec(execMsg: ExecServerMessage): Uint8Array {
@@ -168,7 +157,7 @@ export function shellExec(execMsg: ExecServerMessage): Uint8Array {
   }));
 }
 
-export function rejectShellStreamExecForPolicy(execMsg: ExecServerMessage, opts: CursorNativeExecPolicyContext = {}): Uint8Array[] {
+export function rejectShellStreamExecForPolicy(execMsg: ExecServerMessage): Uint8Array[] {
   if (execMsg.message.case !== "shellStreamArgs") throw new Error("invalid shell stream exec");
   const args = execMsg.message.value;
   const cwd = resolve(args.workingDirectory || process.cwd());
@@ -178,20 +167,17 @@ export function rejectShellStreamExecForPolicy(execMsg: ExecServerMessage, opts:
       event: { case: "start", value: create(ShellStreamStartSchema, { sandboxPolicy: args.requestedSandboxPolicy }) },
     })),
     execBytes(execMsg, "shellStream", create(ShellStreamSchema, {
-      event: { case: "stderr", value: create(ShellStreamStderrSchema, { data: nativeShellDisabledMessage(opts) }) },
+      event: { case: "stderr", value: create(ShellStreamStderrSchema, { data: nativeShellDisabledMessage() }) },
     })),
     execBytes(execMsg, "shellStream", create(ShellStreamSchema, {
       event: { case: "exit", value: create(ShellStreamExitSchema, { code: 1, cwd, aborted: true }) },
     })),
-    execBytes(execMsg, "shellResult", rejectedShellResult(args.command, cwd, started, opts)),
+    execBytes(execMsg, "shellResult", rejectedShellResult(args.command, cwd, started)),
     execStreamCloseBytes(execMsg),
   ];
 }
 
-export async function shellStreamExec(
-  execMsg: ExecServerMessage,
-  spawnProcess: typeof spawn = spawn,
-): Promise<Uint8Array[]> {
+export async function shellStreamExec(execMsg: ExecServerMessage): Promise<Uint8Array[]> {
   if (execMsg.message.case !== "shellStreamArgs") throw new Error("invalid shell stream exec");
   const args = execMsg.message.value;
   const cwd = resolve(args.workingDirectory || process.cwd());
@@ -202,55 +188,27 @@ export async function shellStreamExec(
     })),
   ];
   const result = await new Promise<{ stdout: string; stderr: string; code: number; aborted: boolean }>(resolvePromise => {
-    const child = spawnProcess(args.command, { cwd, shell: true });
+    const child = spawn(args.command, { cwd, shell: true });
     let stdout = "";
     let stderr = "";
     let aborted = false;
-    let exited = false;
-    let stdoutEnded = false;
-    let stderrEnded = false;
-    let settled = false;
-    let exitCode: number | null = null;
     const timeout = setTimeout(() => {
       aborted = true;
       child.kill();
     }, args.hardTimeout || 120_000);
-
-    const finish = (code: number, error?: Error): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      resolvePromise({ stdout, stderr: stderr + (error ? errorText(error) : ""), code, aborted });
-    };
-    const finishAfterExitAndPipes = (): void => {
-      if (exited && stdoutEnded && stderrEnded) finish(exitCode ?? 1);
-    };
     child.stdout.on("data", chunk => {
       stdout += String(chunk);
     });
     child.stderr.on("data", chunk => {
       stderr += String(chunk);
     });
-    child.stdout.once("end", () => {
-      stdoutEnded = true;
-      finishAfterExitAndPipes();
+    child.on("close", code => {
+      clearTimeout(timeout);
+      resolvePromise({ stdout, stderr, code: code ?? 1, aborted });
     });
-    child.stderr.once("end", () => {
-      stderrEnded = true;
-      finishAfterExitAndPipes();
-    });
-    child.once("exit", code => {
-      exited = true;
-      exitCode = code;
-      finishAfterExitAndPipes();
-    });
-    // Node documents `close` as following process exit and stdio closure. Keep it as
-    // the compatibility fallback for runtimes that do not surface one of those events.
-    child.once("close", code => finish(code ?? exitCode ?? 1));
-    child.stdout.once("error", error => finish(1, error));
-    child.stderr.once("error", error => finish(1, error));
-    child.once("error", err => {
-      finish(1, err);
+    child.on("error", err => {
+      clearTimeout(timeout);
+      resolvePromise({ stdout, stderr: stderr + errorText(err), code: 1, aborted });
     });
   });
   if (result.stdout) {
@@ -305,12 +263,12 @@ export async function shellStreamExec(
   return replies;
 }
 
-export function rejectBackgroundShellSpawnExecForPolicy(execMsg: ExecServerMessage, opts: CursorNativeExecPolicyContext = {}): Uint8Array {
+export function rejectBackgroundShellSpawnExecForPolicy(execMsg: ExecServerMessage): Uint8Array {
   if (execMsg.message.case !== "backgroundShellSpawnArgs") throw new Error("invalid background shell exec");
   const args = execMsg.message.value;
   const cwd = resolve(args.workingDirectory || process.cwd());
   return execBytes(execMsg, "backgroundShellSpawnResult", create(BackgroundShellSpawnResultSchema, {
-    result: { case: "error", value: create(BackgroundShellSpawnErrorSchema, { command: args.command, workingDirectory: cwd, error: nativeShellDisabledMessage(opts) }) },
+    result: { case: "error", value: create(BackgroundShellSpawnErrorSchema, { command: args.command, workingDirectory: cwd, error: nativeShellDisabledMessage() }) },
   }));
 }
 
@@ -400,46 +358,11 @@ function waitForBackgroundShellClose(entry: BackgroundShellEntry): Promise<boole
   });
 }
 
-function waitForBackgroundShellGrace(): Promise<void> {
-  return new Promise(resolveWait => {
-    const timer = backgroundShellRuntime.setTimer(resolveWait, CURSOR_BACKGROUND_SHELL_TERM_GRACE_MS);
-    void timer;
-  });
-}
-
 function tryKillBackgroundShell(entry: BackgroundShellEntry, signal?: NodeJS.Signals): boolean {
   try {
     return backgroundShellRuntime.kill(entry.child, signal);
   } catch {
     return false;
-  }
-}
-
-function tryKillBackgroundShellProcessGroup(entry: BackgroundShellEntry, signal?: NodeJS.Signals): boolean {
-  const pid = entry.child.pid;
-  if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) return false;
-  try {
-    return backgroundShellRuntime.killProcessGroup(pid, signal);
-  } catch {
-    return false;
-  }
-}
-
-function tryKillBackgroundShellTree(entry: BackgroundShellEntry): boolean {
-  try {
-    return backgroundShellRuntime.killTree(entry.child);
-  } catch {
-    return false;
-  }
-}
-
-function isBackgroundShellProcessGroupAlive(entry: BackgroundShellEntry): ProcessGroupLiveness {
-  const pid = entry.child.pid;
-  if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) return "unknown";
-  try {
-    return backgroundShellRuntime.isProcessGroupAlive(pid);
-  } catch {
-    return "unknown";
   }
 }
 
@@ -460,45 +383,11 @@ async function terminateBackgroundShell(
     try { entry.child.stderr.resume(); } catch { /* keep draining when supported */ }
 
     let attemptKillFailures = 0;
-    let treeTerminationStarted = false;
-    let processGroupTerminationStarted = false;
-    let processGroupGone = false;
-    let processGroupTerminationAttempted = false;
-    let treeTerminationFailed = false;
-    if (backgroundShellRuntime.platform === "win32") {
-      treeTerminationStarted = tryKillBackgroundShellTree(entry);
-      if (!treeTerminationStarted) {
-        treeTerminationFailed = true;
-        attemptKillFailures += 1;
-        if (!tryKillBackgroundShell(entry)) attemptKillFailures += 1;
-      }
-    } else {
-      processGroupTerminationAttempted = true;
-      if (tryKillBackgroundShellProcessGroup(entry, "SIGTERM")) {
-        processGroupTerminationStarted = true;
-        processGroupGone = isBackgroundShellProcessGroupAlive(entry) === "gone";
-      } else {
-        attemptKillFailures += 1;
-        if (!tryKillBackgroundShell(entry)) attemptKillFailures += 1;
-      }
-    }
-    let closed = processGroupTerminationStarted ? processGroupGone : await waitForBackgroundShellClose(entry);
+    if (!tryKillBackgroundShell(entry)) attemptKillFailures += 1;
+    let closed = await waitForBackgroundShellClose(entry);
     if (!closed && backgroundShells.get(entry.shellId) !== entry) closed = true;
-    if (processGroupTerminationStarted && !processGroupGone) {
-      await waitForBackgroundShellGrace();
-      if (isBackgroundShellProcessGroupAlive(entry) !== "gone" && !tryKillBackgroundShellProcessGroup(entry, "SIGKILL")) {
-        attemptKillFailures += 1;
-      }
-      closed = backgroundShells.get(entry.shellId) !== entry;
-    }
-    if ((!closed || treeTerminationFailed || processGroupTerminationAttempted && !processGroupTerminationStarted)
-      && !treeTerminationStarted && !processGroupTerminationStarted) {
-      if (backgroundShellRuntime.platform === "win32") {
-        if (!tryKillBackgroundShell(entry, "SIGKILL")) attemptKillFailures += 1;
-      } else if (!tryKillBackgroundShellProcessGroup(entry, "SIGKILL")) {
-        attemptKillFailures += 1;
-        if (!closed && !tryKillBackgroundShell(entry, "SIGKILL")) attemptKillFailures += 1;
-      }
+    if (!closed) {
+      if (!tryKillBackgroundShell(entry, "SIGKILL")) attemptKillFailures += 1;
       closed = await waitForBackgroundShellClose(entry);
       if (!closed && backgroundShells.get(entry.shellId) !== entry) closed = true;
     }
@@ -585,11 +474,7 @@ export function backgroundShellSpawnExec(execMsg: ExecServerMessage, sessionId: 
   if (!admissionLease) return backgroundShellSpawnError(execMsg, args.command, cwd, "background shell limit reached");
   let child: ChildProcessWithoutNullStreams;
   try {
-    child = backgroundShellRuntime.spawn(args.command, {
-      cwd,
-      shell: true,
-      ...(backgroundShellRuntime.platform === "win32" ? {} : { detached: true }),
-    });
+    child = backgroundShellRuntime.spawn(args.command, { cwd, shell: true });
   } catch (err) {
     admissionLease.release();
     return backgroundShellSpawnError(execMsg, args.command, cwd, errorText(err));
@@ -635,10 +520,10 @@ export function backgroundShellSpawnExec(execMsg: ExecServerMessage, sessionId: 
   }
 }
 
-export function rejectWriteShellStdinExecForPolicy(execMsg: ExecServerMessage, opts: CursorNativeExecPolicyContext = {}): Uint8Array {
+export function rejectWriteShellStdinExecForPolicy(execMsg: ExecServerMessage): Uint8Array {
   if (execMsg.message.case !== "writeShellStdinArgs") throw new Error("invalid shell stdin exec");
   return execBytes(execMsg, "writeShellStdinResult", create(WriteShellStdinResultSchema, {
-    result: { case: "error", value: create(WriteShellStdinErrorSchema, { error: nativeShellDisabledMessage(opts) }) },
+    result: { case: "error", value: create(WriteShellStdinErrorSchema, { error: nativeShellDisabledMessage() }) },
   }));
 }
 

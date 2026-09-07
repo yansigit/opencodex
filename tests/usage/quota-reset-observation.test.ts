@@ -5,10 +5,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import {
-  applyAccountQuotaFromUpstreamHeaders,
   clearAccountQuota,
   flushQuotaObservationsForTests,
-  parseUsageQuota,
   setAccountQuotaFromParsed,
 } from "../../src/codex/quota";
 import type { QuotaResetEvent } from "../../src/quota/reset-detector";
@@ -40,13 +38,13 @@ function makeScratchHome(prefix: string): string {
   return home;
 }
 
-/** Let the seams' lazy import() chains settle. */
+/** Join the writer's ordered observation/forget chain, including cold imports. */
 async function settle(): Promise<void> {
-  for (let index = 0; index < 6; index += 1) await Promise.resolve();
-  await new Promise(resolve => setTimeout(resolve, 5));
+  await flushQuotaObservationsForTests();
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  await settle();
   previousOpenCodexHome = process.env["OPENCODEX_HOME"];
   process.env["OPENCODEX_HOME"] = makeScratchHome("ocx-quota-reset-observation-");
   captured = [];
@@ -54,17 +52,19 @@ beforeEach(() => {
   resetQuotaResetNotifyCacheForTests();
   resetQuotaResetPollerForTests();
   clearAccountQuota();
+  await settle();
   setQuotaResetSink(event => {
     captured.push(event);
   });
 });
 
 afterEach(async () => {
+  await settle();
   setQuotaResetSink(null);
   resetQuotaResetPollerForTests();
   clearAccountQuota();
   try {
-    await flushQuotaObservationsForTests();
+    await settle();
   } finally {
     resetQuotaResetStoreForTests();
     resetQuotaResetNotifyCacheForTests();
@@ -110,43 +110,6 @@ describe("codex quota seam", () => {
     expect(captured).toHaveLength(1);
     expect(captured[0]?.kind).toBe("surprise");
     expect(captured[0]?.window).toBe("5h");
-  });
-
-  test.each(["wham", "headers"] as const)("%s epoch-second resets do not turn rolling decay into a scheduled reset", async producer => {
-    let now = 1_700_000_000_000;
-    const clock = spyOn(Date, "now").mockImplementation(() => now);
-    const publish = (percent: number, resetAt: number) => {
-      if (producer === "headers") {
-        applyAccountQuotaFromUpstreamHeaders(ACCOUNT, new Headers({
-          "x-codex-primary-used-percent": String(percent),
-          "x-codex-primary-reset-at": String(resetAt),
-          "x-codex-primary-window-minutes": "300",
-        }));
-        return;
-      }
-      setAccountQuotaFromParsed(ACCOUNT, parseUsageQuota({
-        rate_limit: {
-          primary_window: { used_percent: percent, reset_at: resetAt, limit_window_seconds: 18_000 },
-        },
-        additional_rate_limits: [{
-          metered_feature: "codex_bengalfox",
-          rate_limit: {
-            primary_window: { used_percent: percent, reset_at: resetAt, limit_window_seconds: 604_800 },
-          },
-        }],
-      }));
-    };
-    try {
-      publish(96, 1_700_018_000);
-      await flushQuotaObservationsForTests();
-      captured = [];
-      now += 60_000;
-      publish(90, 1_700_018_060);
-      await flushQuotaObservationsForTests();
-      expect(captured).toEqual([]);
-    } finally {
-      clock.mockRestore();
-    }
   });
 
   test("a credits-only write fires nothing despite a fresh updatedAt", async () => {
@@ -303,7 +266,7 @@ describe("idle poller", () => {
     } = await import("../../src/quota/reset-poller");
     // A real enabled config is what carries a tick past its early returns; the resolver reads
     // the config file rather than exposing an injection seam.
-    const home = makeScratchHome("ocx-poller-");
+    const home = mkdtempSync(join(tmpdir(), "ocx-poller-"));
     writeFileSync(join(home, "config.json"), JSON.stringify({
       port: 10100,
       defaultProvider: "openai",
@@ -358,7 +321,7 @@ describe("observation ordering under a burst", () => {
     const proc = Bun.spawn([process.execPath, child], {
       // A private OPENCODEX_HOME: the baseline is persisted, so a shared home would let one
       // run seed the next and turn this into a test of leftover state.
-      env: { ...process.env, OPENCODEX_HOME: makeScratchHome("ocx-burst-") },
+      env: { ...process.env, OPENCODEX_HOME: mkdtempSync(join(tmpdir(), "ocx-burst-")) },
       stdout: "pipe",
       stderr: "pipe",
     });

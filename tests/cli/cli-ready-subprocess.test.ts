@@ -183,10 +183,7 @@ describe("ocx ready real subprocess", () => {
         10_000,
       );
 
-      // Discovery may retry /healthz when a request reaches the fixture but its
-      // response misses the bounded IO deadline under host contention. The
-      // contract here is that terminal /readyz failure does not poll readiness.
-      expect(healthzHits).toBeGreaterThanOrEqual(1);
+      expect(healthzHits).toBe(1);
       expect(readyzHits).toBe(1);
       expect(result.timedOut).toBe(false);
       expect(result.exitCode).toBe(1);
@@ -254,5 +251,4 @@ describe("ocx ready real subprocess", () => {
       removeTreeWithRetry(homes.root);
     }
   });
-
 });

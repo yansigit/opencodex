@@ -335,7 +335,7 @@ describe("atomic provider editor batch", () => {
 
     const concurrent = configModule.mutatePersistedConfig(fresh => {
       fresh.providers.alpha!.defaultModel = "concurrent-write";
-      return { changed: true, value: null };
+      return { changed: true, value: undefined };
     });
     expect(concurrent.status).toBe("committed");
     const concurrentBytes = readFileSync(getConfigPath(), "utf8");

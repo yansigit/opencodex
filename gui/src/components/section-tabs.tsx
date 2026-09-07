@@ -5,7 +5,7 @@
  * existed at a time and the page could not be read by scrolling. Every section is rendered
  * here; the strip scrolls to one and stays pinned to the top so it is always reachable.
  *
- * The active link follows the scroll position, so the strip reports where you are rather
+ * The active tab follows the scroll position, so the strip reports where you are rather
  * than only where you last clicked.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -110,15 +110,19 @@ export function SectionTabs({
   };
 
   return (
-    <nav
+    <div
       className="page-tabs section-tabs"
+      role="tablist"
       aria-label={ariaLabel}
     >
       {items.map(item => (
         <button
           key={item.id}
           type="button"
-          aria-current={active === item.id ? "location" : undefined}
+          role="tab"
+          aria-selected={active === item.id}
+          aria-controls={sectionAnchorId(scope, item.id)}
+          tabIndex={active === item.id ? 0 : -1}
           className={`page-tab${active === item.id ? " page-tab--active" : ""}`}
           onClick={() => go(item.id)}
         >
@@ -126,6 +130,6 @@ export function SectionTabs({
           {item.meta ? <span className="section-tab-meta">{item.meta}</span> : null}
         </button>
       ))}
-    </nav>
+    </div>
   );
 }

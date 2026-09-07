@@ -106,6 +106,9 @@ export default function App() {
   const { locale, setLocale } = useI18n();
   const t = useT();
   const [targets, setTargets] = useState<ApiTargets>(INITIAL_TARGETS);
+  // Standalone starts settled: there is nothing to discover, so nothing to wait for.
+  // Gating the page on discovery made a plain install show remote-hub loading copy before
+  // its own dashboard, for a feature the operator never enabled.
   const [targetsSettled, setTargetsSettled] = useState(() => !isConnectedRuntime());
   const [targetError, setTargetError] = useState(false);
   const [sharedSessionReady, setSharedSessionReady] = useState(() => hasApiSession("shared"));
@@ -123,9 +126,7 @@ export default function App() {
             signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]),
           });
           if (response.ok) installApiSessionFromHtml("shared", await response.text());
-        } catch {
-          // Pairing form remains available when the shared-session bootstrap is unavailable.
-        }
+        } catch { /* pairing form remains available */ }
       }
       if (controller.signal.aborted) return;
       setSharedSessionReady(hasApiSession("shared"));
@@ -298,7 +299,7 @@ export default function App() {
     >
       <span className="brand-logo" role="img" aria-label={t("app.logoAria")} />
       <span className="name">opencodex</span>
-      <span className="ver">v{displayedVersion}</span>
+      <span className="ver" title={displayedVersion}>v{displayedVersion}</span>
     </button>
   );
 
@@ -399,8 +400,8 @@ export default function App() {
               )}
               <button type="button" className="sidebar-orb sidebar-orb--danger"
                 onClick={handleStop} disabled={stopping}
-                aria-label={stopping ? t("dash.stopping") : t("dash.stop")}
-                title={stopping ? t("dash.stopping") : t("dash.stop")}>
+                aria-label={stopping ? t("dash.stopping") : t(targets.connected ? "connection.disconnect" : "dash.stop")}
+                title={stopping ? t("dash.stopping") : t(targets.connected ? "connection.disconnect" : "dash.stop")}>
                 <IconPower />
               </button>
               <button type="button" className="sidebar-orb"
@@ -444,28 +445,34 @@ export default function App() {
             onReload={() => window.location.reload()}
           >
             <Suspense fallback={<div className="route-loading" aria-busy="true"><span className="spin" aria-hidden="true" />{t("common.loading")}</div>}>
-              {!targetsSettled ? (
-                <div className="alert">{t("connection.discovering")}</div>
-              ) : (
-                <>
-                  {targetError && (
-                    <div className="alert alert-err" role="alert">{t("connection.machineUnavailable")}</div>
-                  )}
-                  {targets.connected && !sharedSessionReady && (
-                    <ConnectPairingForm target={targets.shared} onConnected={() => setSharedSessionReady(true)} />
-                  )}
-                  {page === "dashboard" && <Dashboard apiBase={sharedBase} />}
-                  {page === "startup" && <Startup apiBase={sharedBase} machineApiBase={machineBase} connected={targets.connected} />}
-                  {page === "providers" && <Providers apiBase={sharedBase} />}
-                  {page === "models" && <Models key={sharedBase} apiBase={sharedBase} restartEpoch={codexRestartEpoch} />}
-                  {page === "subagents" && <Subagents key={sharedBase} apiBase={sharedBase} />}
-                  {page === "logs" && <Logs apiBase={sharedBase} />}
-                  {page === "usage" && <Usage apiBase={sharedBase} connected={targets.connected} apiKeyId={targets.apiKeyId} />}
-                  {page === "storage" && <Storage apiBase={sharedBase} />}
-                  {page === "codex-set" && <CodexSet apiBase={sharedBase} />}
-                  {page === "integrations" && <Integrations apiBase={sharedBase} machineApiBase={machineBase} connected={targets.connected} />}
-                </>
-              )}
+            {!targetsSettled ? (
+              <div className="alert">{t("connection.discovering")}</div>
+            ) : (
+              <>
+                {/*
+                  A failed discovery is a banner, not a replacement. It used to take over the
+                  whole body, so a slow or restarting proxy cost a standalone user their
+                  dashboard over a plane they never turned on. The requests that actually
+                  need the machine plane report their own errors.
+                */}
+                {targetError && (
+                  <div className="alert alert-err" role="alert">{t("connection.machineUnavailable")}</div>
+                )}
+                {targets.connected && !sharedSessionReady && (
+                  <ConnectPairingForm target={targets.shared} onConnected={() => setSharedSessionReady(true)} />
+                )}
+                {page === "dashboard" && <Dashboard apiBase={sharedBase} />}
+                {page === "startup" && <Startup apiBase={sharedBase} machineApiBase={machineBase} connected={targets.connected} />}
+                {page === "providers" && <Providers apiBase={sharedBase} />}
+                {page === "models" && <Models key={sharedBase} apiBase={sharedBase} restartEpoch={codexRestartEpoch} />}
+                {page === "subagents" && <Subagents key={sharedBase} apiBase={sharedBase} />}
+                {page === "logs" && <Logs apiBase={sharedBase} />}
+                {page === "usage" && <Usage apiBase={sharedBase} connected={targets.connected} apiKeyId={targets.apiKeyId} />}
+                {page === "storage" && <Storage apiBase={sharedBase} />}
+                {page === "codex-set" && <CodexSet apiBase={sharedBase} />}
+                {page === "integrations" && <Integrations apiBase={sharedBase} machineApiBase={machineBase} connected={targets.connected} />}
+              </>
+            )}
             </Suspense>
           </ErrorBoundary>
         </div>

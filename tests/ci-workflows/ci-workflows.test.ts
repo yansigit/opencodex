@@ -145,7 +145,7 @@ describe("GitHub Actions hardening", () => {
     expect(ci.jobs?.["macos-control"]).toBeUndefined();
     // Higher than the Linux shards on purpose: at 15 the Windows leg cancelled a
     // shard mid-suite, which reports as neither pass nor fail (#2152).
-    expect(ci.jobs?.["platform-windows"]?.["timeout-minutes"]).toBe(25);
+    expect(ci.jobs?.["platform-windows"]?.["timeout-minutes"]).toBe(30);
     expect(ci.jobs?.["keyring-smoke"]?.["timeout-minutes"]).toBe(8);
     // Eight minutes repeatedly cancelled the Windows global-install smoke during
     // dependency installation. Retain upstream's corrected budget while keeping
@@ -5851,10 +5851,21 @@ describe("gui exhaustive-deps suppression stays scoped and effective", () => {
     expect(config.blocking).toBe("warning");
   });
 
-  test("the Models effect tracks its stable loader dependencies", async () => {
+  test("the Models effects track their stable loader dependencies independently", async () => {
     const models = await readText("gui/src/pages/Models.tsx");
-    const effectEnd = models.indexOf("}, [catalogActive, loadModelDiscovery, loadPresets, loadShadowCall, loadV2, reloadAliases]);");
-    expect(effectEnd).toBeGreaterThan(-1);
+    const catalogStart = models.indexOf("// Shadow/v2 controls must not wait on the models catalog");
+    const catalogEnd = models.indexOf("\n\n  const groups", catalogStart);
+    const catalogEffect = models.slice(catalogStart, catalogEnd);
+    expect(catalogEffect).toContain("}, [catalogActive, loadModelDiscovery, loadPresets, loadShadowCall, loadV2]);");
+    expect(catalogEffect).not.toContain("reloadAliases");
+
+    // Aliases are independent of the catalog tab. Their own abortable mount effect avoids both
+    // hiding aliases until that tab is active and coupling an alias reload to the catalog poll.
+    const aliasesStart = models.indexOf("const reloadAliases = useCallback");
+    const aliasesEnd = models.indexOf("\n\n  const saveProviderAlias", aliasesStart);
+    const aliasesEffect = models.slice(aliasesStart, aliasesEnd);
+    expect(aliasesEffect).toContain("}, [reloadAliases]);");
+    expect(aliasesEffect).toContain("controller.abort();");
     expect(models).not.toContain("react-doctor-disable-next-line");
   });
 });

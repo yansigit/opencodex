@@ -48,12 +48,6 @@ function window(
   };
 }
 
-/** Codex stores upstream reset clocks in either epoch seconds or epoch milliseconds. */
-function codexResetAtMs(resetAt: number | undefined): number | undefined {
-  if (typeof resetAt !== "number" || !Number.isFinite(resetAt) || resetAt <= 0) return resetAt;
-  return resetAt < 10_000_000_000 ? resetAt * 1000 : resetAt;
-}
-
 /**
  * Nominal lengths for the fixed labels, in seconds.
  *
@@ -72,13 +66,12 @@ const NOMINAL_WINDOW_SECONDS: Readonly<Record<string, number>> = {
 
 function customWindows(
   entries: ReadonlyArray<{ label: string; percent: number; resetAt?: number }> | undefined,
-  normalizeResetAt: (resetAt: number | undefined) => number | undefined = resetAt => resetAt,
 ): QuotaWindowObservation[] {
   if (!entries) return [];
   const out: QuotaWindowObservation[] = [];
   for (const entry of entries) {
     if (typeof entry?.label !== "string") continue;
-    const mapped = window(`custom:${entry.label}`, entry.percent, normalizeResetAt(entry.resetAt));
+    const mapped = window(`custom:${entry.label}`, entry.percent, entry.resetAt);
     if (mapped) out.push(mapped);
   }
   return out;
@@ -89,13 +82,13 @@ export function codexWindowObservations(quota: CodexLikeQuota): QuotaWindowObser
   const out: QuotaWindowObservation[] = [];
   for (const mapped of [
     // Prefer the length upstream states for the short window; fall back to the nominal 5h.
-    window("5h", quota.shortPercent, codexResetAtMs(quota.shortResetAt), quota.shortWindowSeconds ?? NOMINAL_WINDOW_SECONDS["5h"]),
-    window("weekly", quota.weeklyPercent, codexResetAtMs(quota.weeklyResetAt), NOMINAL_WINDOW_SECONDS["weekly"]),
-    window("monthly", quota.monthlyPercent, codexResetAtMs(quota.monthlyResetAt), NOMINAL_WINDOW_SECONDS["monthly"]),
+    window("5h", quota.shortPercent, quota.shortResetAt, quota.shortWindowSeconds ?? NOMINAL_WINDOW_SECONDS["5h"]),
+    window("weekly", quota.weeklyPercent, quota.weeklyResetAt, NOMINAL_WINDOW_SECONDS["weekly"]),
+    window("monthly", quota.monthlyPercent, quota.monthlyResetAt, NOMINAL_WINDOW_SECONDS["monthly"]),
   ]) {
     if (mapped) out.push(mapped);
   }
-  out.push(...customWindows(quota.customWindows, codexResetAtMs));
+  out.push(...customWindows(quota.customWindows));
   return out;
 }
 

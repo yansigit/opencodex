@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useI18n, LOCALES, type TFn } from "../i18n/shared";
 import { formatProviderDisplayName } from "../provider-icons";
@@ -12,6 +12,17 @@ import { useDataSurface } from "../data-surface";
 import { DataSurfaceSkeleton } from "../components/data-surface";
 import { EmptyState, Notice } from "../ui";
 import Debug from "./Debug";
+import { LogsFilterBar } from "./logs-filter-bar";
+import { logsClockAnchor, logsClockNow, type LogsClockAnchor } from "./logs-clock";
+import {
+  DEFAULT_LOG_FILTER_STATE,
+  extractLogFilterOptions,
+  filterLogs,
+  hasActiveLogFilters,
+  normalizedAgentKind,
+  type LogFilterState,
+  type PersistedAgentKind,
+} from "./logs-filter";
 
 import type { LogsTab } from "./logs-tab-keydown";
 import { logsTabKeyDown, readTabFromHash, selectLogsTab } from "./logs-tab-keydown";
@@ -20,15 +31,6 @@ import { speedLabel } from "./logs-speed-label";
 import { formatEstimatedUsd, formatEstimatedUsdValue, summarizeEstimatedCosts } from "./logs-cost-format";
 import { cacheSplit, isCursorUsageProvider, tokensTitle } from "./logs-token-title";
 import type { LogSurface } from "./logs-surface-filter";
-import { normalizedAgentKind, type PersistedAgentKind } from "./logs-filter";
-import { LogsFilterBar } from "./logs-filter-bar";
-import {
-  DEFAULT_LOG_FILTER_STATE,
-  extractLogFilterOptions,
-  filterLogs,
-  hasActiveFilters,
-  type LogFilterState,
-} from "./logs-filter";
 import {
   sanitizeLogEntryRouteDecision,
   validCachedRouteDecision,
@@ -37,6 +39,8 @@ import {
 function logsCacheKey(apiBase: string): string {
   return `ocx.logs.list.v1:${apiBase}`;
 }
+
+const EMPTY_LOGS: LogEntry[] = [];
 
 interface UsageBreakdown {
   inputTokens: number;
@@ -189,8 +193,6 @@ export interface LogEntry {
   };
 }
 
-const EMPTY_LOGS: LogEntry[] = [];
-
 function agentKindLabelKey(kind: LogEntry["agentKind"]): "logs.agent.main" | "logs.agent.subagent" | "logs.agent.internal" | "logs.agent.unknown" {
   const keys = {
     main: "logs.agent.main",
@@ -284,6 +286,10 @@ function formatTokPerSecond(result: TokPerSecondResult | undefined, localeTag?: 
 }
 
 const LOGS_POLL_INTERVAL_MS = 2000;
+// Relative time filters must advance even when the polled snapshot is unchanged. Keep the
+// refresh independent from the network poll so an active 15m/1h/24h window expires rows while
+// the proxy is idle.
+const LOGS_FILTER_CLOCK_INTERVAL_MS = 30_000;
 const LOGS_POLL_BACKOFF_MAX_EXPONENT = 4;
 /** Consecutive failed polls before a stale table is called out. */
 const STALE_POLL_FAILURE_LIMIT = 3;
@@ -408,6 +414,22 @@ export default function Logs({ apiBase }: { apiBase: string }) {
   );
   const [detail, setDetail] = useState<LogEntry | null>(null);
   const [filters, setFilters] = useState<LogFilterState>(DEFAULT_LOG_FILTER_STATE);
+  const [filterClockNow, setFilterClockNow] = useState(() => Date.now());
+  const filterClockRef = useRef<{
+    key: string; anchor?: LogsClockAnchor; active: boolean; request: number;
+  }>({ key: resourceKey, active: false, request: 0 });
+  // Invalidate the old resource at commit, before passive resource-loader effects.
+  // A late body read must not mutate this page's clock, cache or retry state.
+  useLayoutEffect(() => {
+    const clock = { key: resourceKey, active: true, request: 0 };
+    filterClockRef.current = clock;
+    setFilterClockNow(Date.now());
+    return () => { clock.active = false; };
+  }, [resourceKey]);
+  const readFilterClockNow = useCallback(() => {
+    const clock = filterClockRef.current;
+    return logsClockNow(clock.key === resourceKey ? clock.anchor : undefined, performance.now(), Date.now());
+  }, [resourceKey]);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const logRetryRef = useRef<{ key: string; failures: number; nextAttemptAt: number; error: unknown }>(
     { key: resourceKey, failures: 0, nextAttemptAt: 0, error: null },
@@ -460,6 +482,13 @@ export default function Logs({ apiBase }: { apiBase: string }) {
   const selectTab = selectLogsTab;
 
   const loadLogs = useCallback(async (signal: AbortSignal): Promise<LogEntry[]> => {
+    const clock = filterClockRef.current;
+    if (signal.aborted || !clock.active || clock.key !== resourceKey) {
+      throw signal.reason ?? new DOMException("Obsolete log request", "AbortError");
+    }
+    const request = ++clock.request;
+    const isCurrent = () => !signal.aborted && clock.active
+      && filterClockRef.current === clock && clock.request === request;
     let retry = logRetryRef.current;
     if (retry.key !== resourceKey) {
       retry = { key: resourceKey, failures: 0, nextAttemptAt: 0, error: null };
@@ -469,14 +498,33 @@ export default function Logs({ apiBase }: { apiBase: string }) {
     try {
       const res = await fetch(`${apiBase}/api/logs?limit=2000`, { signal });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
-      const body = await res.json() as LogEntry[] | { logs?: LogEntry[] };
+      const body = await res.json() as LogEntry[] | { logs?: LogEntry[]; generatedAt?: unknown };
+      const receivedAt = performance.now();
       const raw = Array.isArray(body) ? body : (body.logs ?? []);
       const next = raw.map(sanitizeLogEntryRouteDecision);
+      // The resource-store generation guard runs only after this loader returns.
+      // Guard these local side effects here as fetch/body readers may ignore abort.
+      if (!isCurrent()) throw signal.reason ?? new DOMException("Obsolete log request", "AbortError");
+      // Reconcile the selected provider when the accepted snapshot changes, using the
+      // latest user state rather than filters captured when the request started. The model
+      // value is an intentional free-text query and must survive ring rollover.
+      const options = extractLogFilterOptions(next);
+      setFilters(previous => {
+        const provider = previous.provider.trim().toLowerCase();
+        const nextProvider = provider
+          ? options.providers.find(option => option.trim().toLowerCase() === provider) ?? ""
+          : "";
+        if (previous.provider === nextProvider) return previous;
+        return { ...previous, provider: nextProvider };
+      });
+      const sample = logsClockAnchor(Array.isArray(body) ? undefined : body.generatedAt, receivedAt);
+      if (sample) clock.anchor = sample;
+      setFilterClockNow(logsClockNow(clock.anchor, receivedAt, Date.now()));
       logRetryRef.current = { key: resourceKey, failures: 0, nextAttemptAt: 0, error: null };
       writeSessionListCache(resourceKey, next);
       return next;
     } catch (error) {
-      if (signal.aborted) throw error;
+      if (!isCurrent()) throw error;
       const normalized = error ?? new Error("log request failed");
       const failures = retry.failures + 1;
       const backoffMs = LOGS_POLL_INTERVAL_MS * (2 ** Math.min(
@@ -532,26 +580,27 @@ export default function Logs({ apiBase }: { apiBase: string }) {
   const conversationQuery = filters.conversationId.trim();
 
   useEffect(() => {
+    if (filters.timeWindow === "all" || tab !== "logs") return;
+    setFilterClockNow(readFilterClockNow());
+    const timer = window.setInterval(() => setFilterClockNow(readFilterClockNow()), LOGS_FILTER_CLOCK_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [filters.timeWindow, tab, readFilterClockNow]);
+
+  useEffect(() => {
     let cancelled = false;
     if (!conversationQuery) {
-      setFilters(prev => (prev.conversationQueryHash === undefined
-        ? prev
-        : { ...prev, conversationQueryHash: undefined }));
+      setFilters(prev => prev.conversationQueryHash === undefined ? prev : { ...prev, conversationQueryHash: undefined });
       return;
     }
     void hashLogConversationQuery(conversationQuery).then(hash => {
-      if (!cancelled) {
-        setFilters(prev => (prev.conversationQueryHash === hash
-          ? prev
-          : { ...prev, conversationQueryHash: hash }));
-      }
+      if (!cancelled) setFilters(prev => prev.conversationQueryHash === hash ? prev : { ...prev, conversationQueryHash: hash });
     });
     return () => { cancelled = true; };
   }, [conversationQuery]);
 
   const filterOptions = useMemo(() => extractLogFilterOptions(logs), [logs]);
-  const activeFilters = hasActiveFilters(filters);
-  const filteredLogs = useMemo(() => filterLogs(logs, filters), [logs, filters]);
+  const activeFilters = hasActiveLogFilters(filters);
+  const filteredLogs = useMemo(() => filterLogs(logs, filters, filterClockNow), [logs, filters, filterClockNow]);
   const conversationTotals = conversationQuery ? summarizeFilteredLogs(filteredLogs) : null;
 
   // TanStack Virtual returns unstable function identities; React Compiler skips this call.
@@ -698,7 +747,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
       {logsState.kind === "failed-cold" ? null : logsState.showSkeleton && logs.length === 0 ? (
         <DataSurfaceSkeleton label={t("common.loading")} rows={6} />
       ) : filteredLogs.length === 0 ? (
-        <EmptyState title={t("logs.noRequests")} />
+        <EmptyState title={logs.length > 0 && activeFilters ? t("logs.noMatchingRequests") : t("logs.noRequests")} />
       ) : (
         <>
         <div ref={scrollContainerRef} className="tbl-wrap logs-table-wrap">

@@ -6,7 +6,9 @@ import {
   getValidAccessTokenForAccount,
   OAuthLoginRequiredError,
   OAUTH_PROVIDERS,
+  publicOAuthAuthenticationErrorMessage,
 } from "../../src/oauth";
+import { AntigravityTokenRequestError } from "../../src/oauth/google-antigravity";
 import type { OAuthCredentials } from "../../src/oauth/types";
 import { getAccountCredential, getAccountSet, saveCredential } from "../../src/oauth/store";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -18,6 +20,7 @@ setDefaultTimeout(30_000);
 const origHome = process.env.HOME;
 const origOcxHome = process.env.OPENCODEX_HOME;
 const origKimiRefresh = OAUTH_PROVIDERS.kimi!.refresh;
+const origAntigravityRefresh = OAUTH_PROVIDERS["google-antigravity"]!.refresh;
 let tmp: string;
 
 beforeEach(() => {
@@ -29,6 +32,7 @@ beforeEach(() => {
 
 afterEach(() => {
   OAUTH_PROVIDERS.kimi!.refresh = origKimiRefresh;
+  OAUTH_PROVIDERS["google-antigravity"]!.refresh = origAntigravityRefresh;
   if (origHome === undefined) delete process.env.HOME;
   else process.env.HOME = origHome;
   if (origOcxHome === undefined) delete process.env.OPENCODEX_HOME;
@@ -58,6 +62,52 @@ function stubKimiRefresh(
 }
 
 describe("generic OAuth refresh lock + CAS", () => {
+  test("typed Antigravity invalid_grant keeps login-required identity and projects a generic public error", async () => {
+    await saveCredential("google-antigravity", {
+      access: "antigravity-old",
+      refresh: "antigravity-refresh",
+      expires: Date.now() - 1,
+      accountId: "antigravity-account",
+      projectId: "antigravity-project",
+    });
+    const accountId = getAccountSet("google-antigravity")!.activeAccountId;
+    OAUTH_PROVIDERS["google-antigravity"]!.refresh = async () => {
+      throw new AntigravityTokenRequestError(400, "invalid_grant");
+    };
+
+    let rejection: unknown;
+    try {
+      await getValidAccessTokenForAccount("google-antigravity", accountId);
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect(rejection).toBeInstanceOf(OAuthLoginRequiredError);
+    expect((rejection as Error).name).toBe("OAuthLoginRequiredError");
+    expect(publicOAuthAuthenticationErrorMessage(rejection)).toBe(
+      "OAuth authentication failed. Check the OpenCodex account status and retry.",
+    );
+    expect(getAccountSet("google-antigravity")!.accounts.find(account => account.id === accountId)?.needsReauth).toBe(true);
+  });
+
+  test("Antigravity status without an allowlisted OAuth code remains retryable", async () => {
+    await saveCredential("google-antigravity", {
+      access: "antigravity-old",
+      refresh: "antigravity-refresh",
+      expires: Date.now() - 1,
+      accountId: "antigravity-account",
+      projectId: "antigravity-project",
+    });
+    const accountId = getAccountSet("google-antigravity")!.activeAccountId;
+    OAUTH_PROVIDERS["google-antigravity"]!.refresh = async () => {
+      throw new AntigravityTokenRequestError(400);
+    };
+
+    await expect(getValidAccessTokenForAccount("google-antigravity", accountId))
+      .rejects.toBeInstanceOf(AntigravityTokenRequestError);
+    expect(getAccountSet("google-antigravity")!.accounts.find(account => account.id === accountId)?.needsReauth).not.toBe(true);
+  });
+
   test("ten concurrent generic refreshes share one IdP call and same credential", async () => {
     const accountId = await seedExpiredKimi();
     const tracker = stubKimiRefresh(async () => ({

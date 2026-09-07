@@ -10,9 +10,10 @@ import type { OcxProviderConfig } from "../types";
  *
  * `strategy` and `autoSwitchThreshold` are still a declared contract the selector does not
  * consume — that is what `inert` reports. `enabled` is NOT inert any more: an explicit
- * `false` refuses both the pre-dispatch account preference (`preferredInitialAccount`) and
- * reactive 429 rotation. When it is absent, two eligible accounts enable reactive rotation by
- * presence.
+ * `true` enables pre-dispatch exhaustion avoidance (`preferredInitialAccount`); absence is off.
+ * Healthy manual selections remain authoritative. What the switch can
+ * no longer do is refuse reactive 429 rotation, which activates on account presence and is not
+ * disableable.
  */
 export type PoolSettingsKind = "codex" | "anthropic" | "generic";
 
@@ -46,8 +47,7 @@ export interface GenericPoolSettingsDto {
    * Slice-1 marker for `strategy` and `autoSwitchThreshold` only: persisted, not yet consumed
    * by the selector.
    *
-   * It deliberately does NOT describe `enabled`, which governs the pre-dispatch preference and
-   * reactive 429 rotation.
+   * It deliberately does NOT describe `enabled`, which governs the pre-dispatch preference.
    * Widening it to the whole DTO would tell a dashboard that `enabled` changes nothing, which
    * has been false since reactive and proactive activation were split.
    */

@@ -85,6 +85,12 @@ describe("logs-filter", () => {
       model: "1.5-flash",
     });
     expect(byAttempt.map(l => l.id)).toEqual(["req_3"]);
+
+    const byPartialRequested = filterLogs(sampleLogs as any, {
+      ...DEFAULT_LOG_FILTER_STATE,
+      model: "4o",
+    });
+    expect(byPartialRequested.map(l => l.id)).toEqual(["req_2"]);
   });
 
   test("filters by provider including attempt provider", () => {

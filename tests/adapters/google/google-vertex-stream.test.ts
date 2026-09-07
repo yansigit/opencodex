@@ -214,61 +214,6 @@ describe("all Google GenerateContent modes fail closed consistently", () => {
   }
 });
 
-describe("Google prompt feedback", () => {
-  for (const [label, provider, wrap] of googleModes) {
-    test(`${label} reports a bounded prompt block reason with no candidates`, async () => {
-      const reason = "SAFETY: bearer secret=super-secret-token " + "x".repeat(600);
-      const payload = wrap({ promptFeedback: { blockReason: reason } });
-      const streamEvents = await collect(provider, [payload]);
-      const adapter = createGoogleAdapter(provider);
-      const responseEvents = await adapter.parseResponse!(
-        provider.googleMode === "cloud-code-assist"
-          ? sseResponse([payload])
-          : new Response(JSON.stringify(payload), { status: 200 }),
-      );
-      for (const events of [streamEvents, responseEvents]) {
-        expect(events.at(-1)?.type).toBe("error");
-        expect(events.some(event => event.type === "done")).toBe(false);
-        const message = (events.at(-1) as Extract<AdapterEvent, { type: "error" }>).message;
-        expect(message).toContain("SAFETY");
-        expect(message).not.toContain("super-secret-token");
-        expect(message.length).toBeLessThan(300);
-      }
-    });
-
-    test(`${label} candidate takes precedence over prompt feedback`, async () => {
-      const payload = wrap({
-        candidates: [{ content: { parts: [{ text: "answer" }] }, finishReason: "STOP" }],
-        promptFeedback: { blockReason: "SAFETY" },
-      });
-      const streamEvents = await collect(provider, [payload]);
-      const adapter = createGoogleAdapter(provider);
-      const responseEvents = await adapter.parseResponse!(
-        provider.googleMode === "cloud-code-assist"
-          ? sseResponse([payload])
-          : new Response(JSON.stringify(payload), { status: 200 }),
-      );
-      for (const events of [streamEvents, responseEvents]) {
-        expect(events.some(event => event.type === "text_delta" && event.text === "answer")).toBe(true);
-        expect(events.at(-1)?.type).toBe("done");
-        expect(events.some(event => event.type === "error")).toBe(false);
-      }
-    });
-  }
-
-  test("no candidates without feedback retains the generic stream and buffered errors", async () => {
-    const streamEvents = await collect(aiStudioProvider, [{}]);
-    const responseEvents = await createGoogleAdapter(aiStudioProvider).parseResponse!(
-      new Response(JSON.stringify({}), { status: 200 }),
-    );
-    expect(streamEvents.at(-1)).toEqual({
-      type: "error",
-      message: "upstream stream ended without a terminal signal — possible truncation",
-    });
-    expect(responseEvents).toEqual([{ type: "error", message: "google response contained no candidates" }]);
-  });
-});
-
 describe("usage status for google-vertex stays reported", () => {
   test("usageForFinalLog does not force-estimate google-vertex (but does for kiro)", async () => {
     const { usageForFinalLog, usageStatusForFinalLog } = await import("../../../src/usage/log");

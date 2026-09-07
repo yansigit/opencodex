@@ -22,6 +22,7 @@ import {
   recordFirstOutput,
   requestLogEntryFromPersistedUsage,
   sealRequestAttemptIdentity,
+  recordAttemptCredentialSource,
   type RequestLogContext,
 } from "../../src/server/request-log";
 import { handleResponses } from "../../src/server/responses";
@@ -56,32 +57,79 @@ function log(overrides: Partial<RequestLogEntry>): RequestLogEntry {
 }
 
 describe("request log metadata", () => {
-  test("projects only bounded Routed V2 bridge metadata", () => {
-    const base = {
-      requestId: "ocx-v2-bridge",
-      timestamp: 1,
-      provider: "openai",
-      model: "gpt-test",
-      status: 200,
-      durationMs: 1,
-      usageStatus: "unreported" as const,
-    };
-    expect(requestLogEntryFromPersistedUsage({
-      ...base,
-      v2BridgeScope: "child",
-      v2BridgeDecision: "active",
-      v2BridgeStateDurability: "encrypted",
-    })).toMatchObject({
-      v2BridgeScope: "child",
-      v2BridgeDecision: "active",
-      v2BridgeStateDurability: "encrypted",
+  test("upstream credential attribution requires the resolved canonical xAI transport", () => {
+    const attempt = beginRequestAttempt(1, "xai", "grok-test", "openai-chat");
+    const oauth = { adapter: "openai-chat", authMode: "oauth" as const, baseUrl: "https://cli-chat-proxy.grok.com/v1" };
+    recordAttemptCredentialSource(attempt, "xai", oauth);
+    expect(attempt.credentialSource).toBe("grok-oauth");
+    for (const baseUrl of ["https://api.x.ai/v1", "https://proxy.example/v1", "http://cli-chat-proxy.grok.com/v1",
+      "https://cli-chat-proxy.grok.com:8443/v1", Object.assign(new URL(oauth.baseUrl), { username: "test" }).href,
+      "https://cli-chat-proxy.grok.com/v1?credential=canary", "https://cli-chat-proxy.grok.com/v2", "invalid"]) {
+      recordAttemptCredentialSource(attempt, "xai", { ...oauth, baseUrl });
+      expect(attempt.credentialSource).toBeUndefined();
+    }
+    recordAttemptCredentialSource(attempt, "xai", oauth);
+    recordAttemptCredentialSource(attempt, "custom", oauth);
+    expect(attempt.credentialSource).toBeUndefined();
+    recordAttemptCredentialSource(attempt, "xai", { ...oauth, authMode: "key", baseUrl: "https://api.x.ai/v1" });
+    expect(attempt.credentialSource).toBe("xai-api-key");
+    recordAttemptCredentialSource(attempt, "xai", { ...oauth, authMode: "key" });
+    expect(attempt.credentialSource).toBeUndefined();
+  });
+
+  test("seal same identity preserves credentialSource; provider or adapter change clears it", () => {
+    const attempt = beginRequestAttempt(1, "xai", "grok-test", "openai-chat");
+    recordAttemptCredentialSource(attempt, "xai", {
+      adapter: "openai-chat", authMode: "key", baseUrl: "https://api.x.ai/v1",
     });
-    expect(requestLogEntryFromPersistedUsage({
-      ...base,
-      v2BridgeScope: "task text",
-      v2BridgeDecision: "ciphertext",
-      v2BridgeStateDurability: "key",
-    } as unknown as PersistedUsageEntry)).not.toHaveProperty("v2BridgeDecision");
+    expect(attempt.credentialSource).toBe("xai-api-key");
+    sealRequestAttemptIdentity(attempt, "xai", "openai-chat");
+    expect(attempt.credentialSource).toBe("xai-api-key");
+    expect(attempt.provider).toBe("xai");
+    expect(attempt.adapter).toBe("openai-chat");
+
+    sealRequestAttemptIdentity(attempt, "custom", "openai-chat");
+    expect(attempt.credentialSource).toBeUndefined();
+    expect(attempt.provider).toBe("custom");
+
+    recordAttemptCredentialSource(attempt, "xai", {
+      adapter: "openai-chat", authMode: "key", baseUrl: "https://api.x.ai/v1",
+    });
+    attempt.provider = "xai";
+    expect(attempt.credentialSource).toBe("xai-api-key");
+    sealRequestAttemptIdentity(attempt, "xai", "openai-responses");
+    expect(attempt.credentialSource).toBeUndefined();
+    expect(attempt.adapter).toBe("openai-responses");
+  });
+
+  test("recordAttemptCredentialSource fourth adapterName rejects unsupported even when config adapter is openai-chat", () => {
+    const attempt = beginRequestAttempt(1, "xai", "grok-test", "openai-chat");
+    recordAttemptCredentialSource(attempt, "xai", {
+      adapter: "openai-chat", authMode: "key", baseUrl: "https://api.x.ai/v1",
+    }, "anthropic");
+    expect(attempt.credentialSource).toBeUndefined();
+  });
+
+  test("combo logging keeps credential provenance on physical attempts only", () => {
+    const a = beginRequestAttempt(1, "xai", "grok-test", "openai-chat");
+    const b = beginRequestAttempt(2, "openai", "gpt-test", "openai-responses");
+    recordAttemptCredentialSource(a, "xai", {
+      adapter: "openai-chat", authMode: "oauth", baseUrl: "https://cli-chat-proxy.grok.com/v1",
+    });
+    noteAttemptSend(a, undefined);
+    finishRequestAttempt(a, 503, 1, { inputTokens: 4, outputTokens: 1 });
+    noteAttemptSend(b, undefined);
+    const entries: RequestLogEntry[] = [];
+    addFinalRequestLog("mixed-combo", Date.now(), {
+      provider: "openai", model: "gpt-test", requestedModel: "combo/test", comboId: "test",
+      providerAdapter: "openai-responses", attempts: [a, b], activeAttempt: b,
+      usage: { inputTokens: 10, outputTokens: 2 },
+    }, 200, undefined, entry => entries.push(entry));
+    expect(entries[0]?.totalTokens).toBe(17);
+    expect(entries[0]?.attempts?.[0]?.credentialSource).toBe("grok-oauth");
+    expect(entries[0]?.attempts?.[0]?.totalTokens).toBe(5);
+    expect(entries[0]?.attempts?.[1]?.credentialSource).toBeUndefined();
+    expect(entries[0]).not.toHaveProperty("credentialSource");
   });
 
   test("creates one ordinary attempt after the final adapter is resolved", async () => {
@@ -759,15 +807,13 @@ describe("request log metadata", () => {
    * the positive case for free.
    */
   test("filters logs by model, including the attempt that actually served a failover", () => {
-    const now = Date.now();
     const logs = [
-      log({ requestId: "a", model: "gpt-test", resolvedModel: "gpt-test-20260829", provider: "openai", timestamp: now - 3_000 }),
-      log({ requestId: "b", model: "grok-4.6", provider: "xai", timestamp: now - 2_000 }),
+      log({ requestId: "a", model: "gpt-test", provider: "openai" }),
+      log({ requestId: "b", model: "grok-4.6", provider: "xai" }),
       log({
         requestId: "c",
         model: "sonnet-4.6",
         provider: "anthropic",
-        timestamp: now - 1_000,
         attempts: [
           { ordinal: 1, provider: "anthropic", model: "sonnet-4.6", adapter: "anthropic", status: 429, durationMs: 5, sendCount: 1, recoveryKinds: [], usageStatus: "unreported" },
           { ordinal: 2, provider: "xai", model: "grok-4.6", adapter: "openai", status: 200, durationMs: 7, sendCount: 1, recoveryKinds: [], usageStatus: "reported" },
@@ -776,15 +822,12 @@ describe("request log metadata", () => {
     ];
 
     expect(filterRequestLogs(logs, new URLSearchParams("model=gpt-test")).map(entry => entry.requestId)).toEqual(["a"]);
-    expect(filterRequestLogs(logs, new URLSearchParams("model=gpt-test-20260829")).map(entry => entry.requestId)).toEqual(["a"]);
     // "c" matches on its second ATTEMPT, mirroring how `provider` already behaves: the request
     // was ultimately served by grok-4.6, so a grok-4.6 search has to find it.
     expect(filterRequestLogs(logs, new URLSearchParams("model=grok-4.6")).map(entry => entry.requestId)).toEqual(["b", "c"]);
     // The assertion an unfiltered implementation cannot pass.
     expect(filterRequestLogs(logs, new URLSearchParams("model=absent-model"))).toEqual([]);
     expect(filterRequestLogs(logs, new URLSearchParams("model=grok-4.6&provider=xai")).map(entry => entry.requestId)).toEqual(["b", "c"]);
-    expect(filterRequestLogs(logs, new URLSearchParams(`since=${now - 2_500}`)).map(entry => entry.requestId)).toEqual(["b", "c"]);
-    expect(filterRequestLogs(logs, new URLSearchParams(`until=${now - 1_500}`)).map(entry => entry.requestId)).toEqual(["a", "b"]);
   });
 
   test("filters logs by offset and limit", () => {

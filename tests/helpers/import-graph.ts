@@ -3,7 +3,7 @@
  *
  * Two subsystems now need the same question answered -- "can this entrypoint reach that
  * directory without anyone choosing to load it?" -- and the answer must be computed the
- * same way for both. tests/lab/core-lab-boundary.test.ts already records what happens when a
+ * same way for both. tests/core-lab-boundary.test.ts already records what happens when a
  * guard's predicate is duplicated instead of shared: its self-test re-declared its own copy
  * of the matcher, so it proved a local literal behaved rather than that the guard did. A
  * copy cannot fail when the original drifts, which is the specific way a guard rots. This
@@ -149,3 +149,4 @@ export function firstLoadTimePathTo(
   }
   return null;
 }
+

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
-import { act, useState, type ReactNode } from "react";
+import { act, useEffect, useState, type ReactNode } from "react";
 import type { Root } from "react-dom/client";
 import ProviderModelsNotice, { type ProviderModelsNoticeProps } from "../src/components/ProviderModelsNotice";
 import { LanguageProvider } from "../src/i18n/provider";
@@ -87,63 +87,74 @@ test("pending/error recovery and generic OAuth/re-login copy stay truthful", asy
 });
 
 test("notice waits for post-discovery config refresh and ignores closed/superseded operations", async () => {
-  let controller: ReturnType<typeof useProviderModelsNotice>;
+  const captured: { controller?: ReturnType<typeof useProviderModelsNotice> } = {};
   const gates: Array<() => void> = [];
   const refresh = () => new Promise<"applied">(resolve => gates.push(() => resolve("applied")));
-  function Harness() { controller = useProviderModelsNotice("/notice", refresh); return null; }
+  function Harness() {
+    const controller = useProviderModelsNotice("/notice", refresh);
+    useEffect(() => { captured.controller = controller; }, [controller]);
+    return null;
+  }
   await render(<Harness />);
-  await act(async () => { controller!.open("one", true); });
-  await act(async () => { controller!.modelsSettled(true); });
-  expect(controller!.notice?.loading).toBe(true);
+  await act(async () => { captured.controller!.open("one", true); });
+  await act(async () => { captured.controller!.modelsSettled(true); });
+  expect(captured.controller!.notice?.loading).toBe(true);
   await act(async () => { gates.shift()!(); await Promise.resolve(); });
-  expect(controller!.notice?.loading).toBe(false);
-  await act(async () => { controller!.modelsSettled(false); controller!.close(); });
+  expect(captured.controller!.notice?.loading).toBe(false);
+  await act(async () => { captured.controller!.modelsSettled(false); captured.controller!.close(); });
   await act(async () => { gates.shift()!(); await Promise.resolve(); });
-  expect(controller!.notice).toBeNull();
-  await act(async () => { controller!.open("old", true); controller!.modelsSettled(true); controller!.open("new", true); });
+  expect(captured.controller!.notice).toBeNull();
+  await act(async () => { captured.controller!.open("old", true); captured.controller!.modelsSettled(true); captured.controller!.open("new", true); });
   await act(async () => { gates.shift()!(); await Promise.resolve(); });
-  expect(controller!.notice?.context.provider).toBe("new");
-  expect(controller!.notice?.loading).toBe(true);
+  expect(captured.controller!.notice?.context.provider).toBe("new");
+  expect(captured.controller!.notice?.loading).toBe(true);
 });
 
 test("returning to an API target does not reopen its old notice", async () => {
-  let controller: ReturnType<typeof useProviderModelsNotice>;
+  const captured: { controller?: ReturnType<typeof useProviderModelsNotice> } = {};
   const refresh = async () => "applied" as const;
-  function Harness({ base }: { base: string }) { controller = useProviderModelsNotice(base, refresh); return null; }
+  function Harness({ base }: { base: string }) {
+    const controller = useProviderModelsNotice(base, refresh);
+    useEffect(() => { captured.controller = controller; }, [controller]);
+    return null;
+  }
   await render(<Harness base="/a" />);
-  await act(async () => { controller!.open("old", true); });
+  await act(async () => { captured.controller!.open("old", true); });
   await render(<Harness base="/b" />);
-  expect(controller!.notice).toBeNull();
+  expect(captured.controller!.notice).toBeNull();
   await render(<Harness base="/a" />);
-  expect(controller!.notice).toBeNull();
+  expect(captured.controller!.notice).toBeNull();
 });
 
 test("failed config refresh is not announced as successful model setup", async () => {
-  let controller: ReturnType<typeof useProviderModelsNotice>;
-  function Harness() { controller = useProviderModelsNotice("/failed", async () => "failed"); return null; }
+  const captured: { controller?: ReturnType<typeof useProviderModelsNotice> } = {};
+  function Harness() {
+    const controller = useProviderModelsNotice("/failed", async () => "failed");
+    useEffect(() => { captured.controller = controller; }, [controller]);
+    return null;
+  }
   await render(<Harness />);
-  await act(async () => { controller!.open("vendor", true); });
-  await act(async () => { controller!.modelsSettled(true); await Promise.resolve(); });
-  expect(controller!.notice?.loading).toBe(false);
-  expect(controller!.notice?.failed).toBe(true);
+  await act(async () => { captured.controller!.open("vendor", true); });
+  await act(async () => { captured.controller!.modelsSettled(true); await Promise.resolve(); });
+  expect(captured.controller!.notice?.loading).toBe(false);
+  expect(captured.controller!.notice?.failed).toBe(true);
 });
 
 test("an older pending config response cannot overwrite the newer completed snapshot", async () => {
-  let loader: ReturnType<typeof useProvidersFetch>;
-  const observed: { config: ProvidersConfig | null } = { config: null };
+  const captured: { loader?: ReturnType<typeof useProvidersFetch>; config: ProvidersConfig | null } = { config: null };
   const responses: Array<(response: Response) => void> = [];
   Object.defineProperty(globalThis, "fetch", { configurable: true, value: () => new Promise<Response>(resolve => responses.push(resolve)) });
   function Harness() {
     const [config, setConfig] = useState<ProvidersConfig | null>(null);
-    observed.config = config;
-    loader = useProvidersFetch({ apiBase: "/fresh", t: key => key, setConfig, setOauthProviders: () => {}, setOauthStatus: () => {}, notify: () => {}, invalidateProviderQuotas: () => {} });
+    const loader = useProvidersFetch({ apiBase: "/fresh", t: key => key, setConfig, setOauthProviders: () => {}, setOauthStatus: () => {}, notify: () => {}, invalidateProviderQuotas: () => {} });
+    useEffect(() => { captured.loader = loader; captured.config = config; }, [config, loader]);
     return null;
   }
   await render(<Harness />);
-  const first = loader!.fetchConfig();
-  const second = loader!.fetchConfig();
+  const first = captured.loader!.fetchConfig();
+  const second = captured.loader!.fetchConfig();
   const snapshot = (status: string) => ({ port: 0, defaultProvider: "vendor", providers: { vendor: { adapter: "openai-chat", baseUrl: "https://example.test", initialModelSelection: { status } } } });
   await act(async () => { responses[1]!(Response.json(snapshot("all-off"))); await second; });
   await act(async () => { responses[0]!(Response.json(snapshot("pending"))); await first; });
-  expect(observed.config?.providers.vendor.initialModelSelection?.status).toBe("all-off");
+  expect(captured.config?.providers.vendor.initialModelSelection?.status).toBe("all-off");
 });

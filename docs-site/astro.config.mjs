@@ -52,10 +52,10 @@ export default defineConfig({
         { tag: "meta", attrs: { name: "theme-color", media: "(prefers-color-scheme: dark)", content: "#212121" } },
       ],
       social: [
-        { icon: "github", label: "GitHub", href: "https://github.com/lidge-jun/opencodex" },
+        { icon: "github", label: "GitHub", href: "https://github.com/yansigit/opencodex" },
       ],
       editLink: {
-        baseUrl: "https://github.com/lidge-jun/opencodex/edit/main/docs-site/",
+        baseUrl: "https://github.com/yansigit/opencodex/edit/main/docs-site/",
       },
       lastUpdated: true,
       // English at the site root; French under /fr, Korean under /ko, Simplified Chinese under /zh-cn, Traditional Chinese under /zh-tw, Russian under /ru, Japanese under /ja, Turkish under /tr.

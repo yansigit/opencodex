@@ -5,7 +5,7 @@
  * memoization and the enable check runs once per pooled response — a config parse per request
  * for a feature nobody enabled.
  *
- * Keyed on the config file's filesystem identity, NOT on captureConfigGeneration. The generation
+ * Keyed on the config file's mtime and size, NOT on captureConfigGeneration. The generation
  * counter only advances when state-store reconciliation runs
  * (src/lib/state-store-sweeper.ts:149, reached from reconcileLiveStateStores on
  * account/provider changes), so editing quotaResetNotify alone would never bump it and the
@@ -13,8 +13,7 @@
  * TTL bounds the stat call so the hot path does not stat on every single write.
  */
 
-import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "../config";
 import { getConfigDir } from "../config/paths";
@@ -118,22 +117,11 @@ type Cached = {
 
 let cached: Cached | null = null;
 
-/**
- * Filesystem identity of the config file.
- *
- * `mtimeMs:size` is not sufficient: an atomic same-size replacement can preserve both, and
- * coarse timestamp filesystems can do the same for an in-place rewrite. Device/inode catches
- * replacement while the content digest is the final authority for same-inode rewrites even
- * when their timestamps are restored or rounded. This runs only once per stat TTL, not per
- * quota observation.
- */
+/** mtime + size of the config file. Cheap, and changes on any edit including an in-place one. */
 function configSignature(): string {
   try {
-    const path = join(getConfigDir(), "config.json");
-    const bytes = readFileSync(path);
-    const stat = statSync(path, { bigint: true });
-    const digest = createHash("sha256").update(bytes).digest("hex");
-    return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs, digest].join(":");
+    const stat = statSync(join(getConfigDir(), "config.json"));
+    return `${stat.mtimeMs}:${stat.size}`;
   } catch {
     return "absent";
   }

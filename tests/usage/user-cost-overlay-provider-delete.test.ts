@@ -97,17 +97,15 @@ describe("provider deletion with disk-only preservation", () => {
     expect(persisted.providers.beta?.modelCosts).toEqual({ "beta-model": OVERLAY });
     expect(resolveMatchedPrice("beta", "beta-model")?.source).toBe("user");
 
-    // This mirrors DELETE /api/providers: B owned beta, then intentionally removes it
-    // and uses the live-config save wrapper. The real route has an await import after
-    // deleting the row, so force a reconcile in that gap to prove ownership is retained
-    // until disk confirms the deletion. Preservation must still not put beta back.
+    // This mirrors the atomic provider editor: the callback starts from the latest
+    // validated disk snapshot, so removing beta is explicit deletion authority.
+    // A successful commit must clear stale preservation and converge every live owner.
     const versionBeforeDelete = userCostOverlayVersion();
-    delete liveConfigB.providers.beta;
-    expect(mutatePersistedConfig(persisted => {
-      delete persisted.providers.beta;
+    const outcome = mutatePersistedConfig(config => {
+      delete config.providers.beta;
       return { changed: true, value: undefined };
-    }).status).toBe("committed");
-    delete liveConfigC.providers.beta;
+    });
+    expect(outcome.status).toBe("committed");
     persisted = JSON.parse(readFileSync(getConfigPath(), "utf8")) as OcxConfig;
     expect(persisted.providers.beta).toBeUndefined();
     expect(activeUserCostOverlays().some(row => row.provider === "beta")).toBe(false);

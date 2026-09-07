@@ -275,6 +275,15 @@ test("config import with --yes replaces an invalid existing config", async () =>
   expect(diskConfig()).toMatchObject(imported);
 });
 
+test("config set and unset cannot replace the whole provider registry", async () => {
+  writeDiskConfig(sixProviderConfig());
+  const bytes = readFileSync(getConfigPath(), "utf8");
+
+  expect(await handleConfigCommand(["set", "providers", "{}", "--json"])).toBe(2);
+  expect(await handleConfigCommand(["unset", "providers", "--json"])).toBe(2);
+  expect(readFileSync(getConfigPath(), "utf8")).toBe(bytes);
+});
+
 test("whole saves create the default OpenAI config when no config exists", () => {
   saveConfig(getDefaultConfig());
 

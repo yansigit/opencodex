@@ -14,14 +14,17 @@
  * 401/403 credential failures should set needsReauth on the store (existing OAuth path)
  * so the account is excluded from eligibility.
  */
-import { setActiveAccount, getAccountSet, getAccountCredential } from "./store";
+import { captureOAuthAccountSelection, commitOAuthAccountSelection, credentialGeneration, getAccountSet, getAccountCredential, getAccountCredentialWithStatus } from "./store";
+import type { OAuthAccessSnapshot } from "./index";
 import { getCachedProviderAccountQuota } from "../providers/quota";
 import { fallbackCodexAccountLogLabel } from "../codex/account-label";
 import {
   normalizeAccountPoolStickyLimit,
   normalizeAccountPoolStrategy,
   notePoolRotationFailure,
+  notePoolRotationSuccess,
   pickRoundRobinAccount,
+  peekRoundRobinAccount,
   POOL_KEY_ANTHROPIC,
   seedPoolRotationAccount,
 } from "../codex/pool-rotation";
@@ -41,9 +44,7 @@ import {
   isRateLimitStickWait,
   normalizeAffinityComponent,
   recordPoolAccountCooldown,
-  resolvePoolAccount,
   touchSessionAffinity,
-  type AccountPoolPlugin,
 } from "../routing/account-pool";
 
 const PROVIDER = "anthropic";
@@ -62,28 +63,14 @@ export interface AnthropicAccountPoolConfig {
   strategy?: OcxAccountPoolRotationStrategy;
   /** Successful new-session binds retained on one round-robin selection. Default 1; range 1..100. */
   stickyLimit?: number;
-  /** Usage window for quota-based scoring. Default "five-hour". */
+  /** Usage window for quota-based scoring. Default "five-hour" (today's behaviour). */
   quotaWindow?: OcxAccountPoolQuotaWindow;
 }
 
-const anthropicPoolPlugin: AccountPoolPlugin = {
-  poolKey: POOL_KEY_ANTHROPIC,
-  sessionKeyFromRequest: buildSessionKeyFromParts,
-  listEligibleAccountIds(now) {
-    const set = getAccountSet(PROVIDER);
-    if (!set) return [];
-    return set.accounts
-      .filter(account =>
-        account.needsReauth !== true
-        && isPoolCredentialUsable(account.id, now))
-      .map(account => account.id);
-  },
-  usageScore(accountId) {
-    return fiveHourScore(accountId);
-  },
-};
-
-const TOKEN_SKEW_MS = 60_000;
+type OAuthAccountSelection = NonNullable<ReturnType<typeof captureOAuthAccountSelection>>;
+// Undefined means this runtime has not admitted a selection yet; null means consumed.
+// The startup baseline comes from the authoritative store, never a second persisted pin.
+let manualPreference: OAuthAccountSelection | null | undefined;
 
 export function anthropicAccountPoolConfig(config: OcxConfig): AnthropicAccountPoolConfig {
   const raw = config.anthropicAccountPool;
@@ -141,6 +128,7 @@ export function sweepExpiredAnthropicRoutingHealth(now = Date.now()): number {
 /** Test / logout helper. */
 export function clearAnthropicAccountPoolState(): void {
   clearAccountPoolState(POOL_KEY_ANTHROPIC);
+  manualPreference = undefined;
   quorumCache = null;
 }
 
@@ -177,15 +165,17 @@ function exhausted5h(accountId: string): boolean {
 }
 
 function hasKnownUsage(config: OcxConfig, accountId: string): boolean {
-  switch (anthropicQuotaWindow(anthropicAccountPoolConfig(config))) {
+  const window = anthropicQuotaWindow(anthropicAccountPoolConfig(config));
+  switch (window) {
     case "five-hour": return fiveHourKnown(accountId);
     case "weekly": return weeklyKnown(accountId);
     case "max-utilization": return fiveHourKnown(accountId) || weeklyKnown(accountId);
   }
 }
 
-function anthropicUsageScore(config: OcxConfig, accountId: string): number {
-  switch (anthropicQuotaWindow(anthropicAccountPoolConfig(config))) {
+function usageScore(config: OcxConfig, accountId: string): number {
+  const window = anthropicQuotaWindow(anthropicAccountPoolConfig(config));
+  switch (window) {
     case "five-hour": return fiveHourScore(accountId);
     case "weekly": return weeklyScore(accountId);
     case "max-utilization": {
@@ -197,6 +187,8 @@ function anthropicUsageScore(config: OcxConfig, accountId: string): number {
     }
   }
 }
+
+const TOKEN_SKEW_MS = 60_000;
 
 /** Background `local-cli` slots with expired access are not pool-eligible (identity adoption risk). */
 function isPoolCredentialUsable(accountId: string, now: number): boolean {
@@ -316,10 +308,15 @@ interface ScoredAccount {
   hasKnownUsage: boolean;
   score: number;
   fiveHourTieBreak: number;
+  /** True only under the opt-in weekly window; see compareScoredAccounts. */
   knownFirst: boolean;
 }
 
 function compareScoredAccounts(a: ScoredAccount, b: ScoredAccount): number {
+  // known-before-unknown belongs to the OPT-IN windows (weekly, max-utilization), not the
+  // legacy five-hour default. Applying it unconditionally changed ordering for operators who
+  // never opted in: an account measured at 100% would sort ahead of an unmeasured one purely
+  // because it had a reading. The accepted scope preserves the five-hour default exactly.
   if (a.knownFirst && b.knownFirst && a.hasKnownUsage !== b.hasKnownUsage) {
     return a.hasKnownUsage ? -1 : 1;
   }
@@ -335,13 +332,16 @@ function pickLowestUsage(config: OcxConfig, excludeId: string | undefined, now: 
   const scored: ScoredAccount[] = eligible.map(accountId => ({
     accountId,
     hasKnownUsage: hasKnownUsage(config, accountId),
-    score: anthropicUsageScore(config, accountId),
+    score: usageScore(config, accountId),
     fiveHourTieBreak: window === "five-hour" ? 0 : fiveHourScore(accountId),
+    // Every window EXCEPT the legacy five-hour default is an explicit opt-in, so
+    // known-before-unknown applies to all of them and to none of the default path.
     knownFirst: window !== "five-hour",
   }));
   let best = scored[0]!;
   for (let i = 1; i < scored.length; i++) {
     const candidate = scored[i]!;
+    // Strict `< 0` keeps the earliest eligible account on an exact tie.
     if (compareScoredAccounts(candidate, best) < 0) best = candidate;
   }
   return best.accountId;
@@ -369,6 +369,7 @@ function pickNextFillFirstAnthropicAccount(
     }
     return ordered[0] ?? null;
   }
+  // Skip successors that are also at/above threshold (known drained usage).
   let fallback: string | null = null;
   for (let step = 1; step <= stableAll.length; step++) {
     const candidate = stableAll[(startIdx + step) % stableAll.length]!;
@@ -387,7 +388,7 @@ function pickAlternateAnthropicAccount(
   const strategy = anthropicPoolStrategy(config);
   const eligible = getEligibleAnthropicAccounts(now).filter(id => id !== excludeId);
   if (strategy === "round-robin") {
-    return pickRoundRobinAccount(POOL_KEY_ANTHROPIC, eligible, stickyLimitForPool(config));
+    return peekRoundRobinAccount(POOL_KEY_ANTHROPIC, eligible, stickyLimitForPool(config));
   }
   if (strategy === "fill-first") {
     return pickNextFillFirstAnthropicAccount(config, excludeId, eligible);
@@ -402,6 +403,7 @@ export type AnthropicAccountSelectionReason =
   | "lowest-usage"
   | "only-eligible"
   | "round-robin"
+  | "manual"
   | "fill-first"
   | "none"
   | "all-cooled";
@@ -424,10 +426,15 @@ function isActiveUnderFillFirstThreshold(config: OcxConfig, accountId: string): 
   if (threshold <= 0) return true;
   const window = anthropicQuotaWindow(anthropicAccountPoolConfig(config));
   if (window === "weekly" && exhausted5h(accountId)) return false;
+  // Unknown usage must not force fill-first to abandon the active account.
   if (!hasKnownUsage(config, accountId)) return true;
-  return anthropicUsageScore(config, accountId) < threshold;
+  return usageScore(config, accountId) < threshold;
 }
 
+/**
+ * Fill-first: keep eligible active under threshold; otherwise advance to the next
+ * eligible id in stable sorted order after the current active (wrapping).
+ */
 function pickFillFirstAnthropicAccount(config: OcxConfig, now: number): string | null {
   const eligible = getEligibleAnthropicAccounts(now);
   if (eligible.length === 0) return null;
@@ -449,12 +456,73 @@ function pickFillFirstAnthropicAccount(config: OcxConfig, now: number): string |
   return pickNextFillFirstAnthropicAccount(config, active, eligible);
 }
 
-function resolveAnthropicFillFirst(
+/**
+ * Unbound new-session pick for round-robin / fill-first. Returns null to fall through
+ * to the legacy quota path (or when the strategy is quota).
+ */
+function pickUnboundStrategyAccount(
+  config: OcxConfig,
+  now: number,
+): { accountId: string; reason: "round-robin" | "fill-first" } | null {
+  const strategy = anthropicPoolStrategy(config);
+  if (strategy === "quota") return null;
+
+  if (strategy === "round-robin") {
+    const eligible = getEligibleAnthropicAccounts(now);
+    const limit = stickyLimitForPool(config);
+    const picked = peekRoundRobinAccount(POOL_KEY_ANTHROPIC, eligible, limit);
+    if (!picked) return null;
+    return { accountId: picked, reason: "round-robin" };
+  }
+
+  if (strategy === "fill-first") {
+    const picked = pickFillFirstAnthropicAccount(config, now);
+    if (!picked) return null;
+    return { accountId: picked, reason: "fill-first" };
+  }
+
+  return null;
+}
+
+/**
+ * Resolve which Anthropic OAuth account should serve this session.
+ * When the pool is disabled, always returns the store's active account.
+ */
+export function resolveAnthropicAccountForSession(
   sessionKey: string | null | undefined,
   config: OcxConfig,
-  set: NonNullable<ReturnType<typeof getAccountSet>>,
-  now: number,
+  now = Date.now(),
 ): AnthropicAccountSelection {
+  const set = getAccountSet(PROVIDER);
+  if (!set || set.accounts.length === 0) return { accountId: null, reason: "none" };
+
+  if (manualPreference === undefined) {
+    manualPreference = set.selectionRevision !== undefined
+      ? { accountId: set.activeAccountId, revision: set.selectionRevision }
+      : null;
+  }
+
+  if (!isAnthropicAccountPoolEnabled(config)) {
+    return { accountId: set.activeAccountId, reason: "pool-disabled" };
+  }
+
+  // A manual choice is a one-dispatch preference, not a lower-priority quota hint.
+  // Consume it only after admission commits, so a failed token lookup cannot spend it.
+  if (manualPreference) {
+    if (manualPreference.accountId !== set.activeAccountId || manualPreference.revision !== set.selectionRevision) {
+      manualPreference = null;
+    } else {
+      const chosen = manualPreference.accountId;
+      const quota = getCachedProviderAccountQuota(PROVIDER, chosen);
+      const exhausted = [quota?.fiveHourPercent, quota?.weeklyPercent, quota?.monthlyPercent,
+        ...(quota?.customWindows ?? []).map(window => window.percent)]
+        .some(percent => typeof percent === "number" && percent >= 100);
+      if (!exhausted && getEligibleAnthropicAccounts(now).includes(chosen)) {
+        return { accountId: chosen, reason: "manual" };
+      }
+    }
+  }
+
   const key = normalizeAffinityComponent(sessionKey);
   if (key) {
     const affined = getSessionAffinity(POOL_KEY_ANTHROPIC, key, now);
@@ -472,7 +540,11 @@ function resolveAnthropicFillFirst(
     }
   }
 
-  if (!key) {
+  const strategy = anthropicPoolStrategy(config);
+  // No session identity (Desktop turns without a sticky key): hold the current
+  // active under RR/fill-first instead of treating every turn as a new session.
+  // Round-robin only when there is a real new-session key (or active is unusable).
+  if (!key && (strategy === "round-robin" || strategy === "fill-first")) {
     const activeOk = set.accounts.some(a => a.id === set.activeAccountId && a.needsReauth !== true)
       && isAnthropicAccountEligible(set.activeAccountId, now)
       && isPoolCredentialUsable(set.activeAccountId, now);
@@ -481,54 +553,25 @@ function resolveAnthropicFillFirst(
     }
   }
 
-  const picked = pickFillFirstAnthropicAccount(config, now);
-  if (!picked) {
-    const anyCooled = set.accounts.some(a => !isAnthropicAccountEligible(a.id, now));
-    return { accountId: null, reason: anyCooled ? "all-cooled" : "none" };
-  }
-
-  if (key && normalizeAffinityComponent(picked)) {
-    bindSessionAffinity(POOL_KEY_ANTHROPIC, key, picked, now);
-  }
-  return { accountId: picked, reason: "fill-first" };
-}
-
-function resolveAnthropicQuota(
-  sessionKey: string | null | undefined,
-  config: OcxConfig,
-  set: NonNullable<ReturnType<typeof getAccountSet>>,
-  now: number,
-): AnthropicAccountSelection {
-  const key = normalizeAffinityComponent(sessionKey);
-  if (key) {
-    const affined = getSessionAffinity(POOL_KEY_ANTHROPIC, key, now);
-    if (affined) {
-      const stillThere = set.accounts.some(a => a.id === affined.accountId && a.needsReauth !== true);
-      if (
-        stillThere
-        && isAnthropicAccountEligible(affined.accountId, now)
-        && isPoolCredentialUsable(affined.accountId, now)
-      ) {
-        touchSessionAffinity(POOL_KEY_ANTHROPIC, key, now);
-        return { accountId: affined.accountId, reason: "affinity" };
-      }
-      clearSessionAffinityForAccount(POOL_KEY_ANTHROPIC, affined.accountId);
-    }
+  const strategyPick = pickUnboundStrategyAccount(config, now);
+  if (strategyPick) {
+    return { accountId: strategyPick.accountId, reason: strategyPick.reason };
   }
 
   const threshold = anthropicAutoSwitchThreshold(config);
   const activeOk = set.accounts.some(a => a.id === set.activeAccountId && a.needsReauth !== true)
     && isAnthropicAccountEligible(set.activeAccountId, now)
     && isPoolCredentialUsable(set.activeAccountId, now);
+
   let accountId: string | null = null;
   let reason: AnthropicAccountSelectionReason = "none";
 
   if (threshold > 0) {
     const window = anthropicQuotaWindow(anthropicAccountPoolConfig(config));
+    // Unknown usage must NOT force a switch away from the healthy active account.
     if (activeOk
       && !(window === "weekly" && exhausted5h(set.activeAccountId))
-      && (!hasKnownUsage(config, set.activeAccountId)
-        || anthropicUsageScore(config, set.activeAccountId) < threshold)) {
+      && (!hasKnownUsage(config, set.activeAccountId) || usageScore(config, set.activeAccountId) < threshold)) {
       accountId = set.activeAccountId;
       reason = "active";
     } else {
@@ -556,53 +599,8 @@ function resolveAnthropicQuota(
     const anyCooled = set.accounts.some(a => !isAnthropicAccountEligible(a.id, now));
     return { accountId: null, reason: anyCooled ? "all-cooled" : "none" };
   }
-  if (key && normalizeAffinityComponent(accountId)) {
-    bindSessionAffinity(POOL_KEY_ANTHROPIC, key, accountId, now);
-  }
+
   return { accountId, reason };
-}
-
-/**
- * Resolve which Anthropic OAuth account should serve this session.
- * When the pool is disabled, always returns the store's active account.
- */
-export function resolveAnthropicAccountForSession(
-  sessionKey: string | null | undefined,
-  config: OcxConfig,
-  now = Date.now(),
-): AnthropicAccountSelection {
-  const set = getAccountSet(PROVIDER);
-  if (!set || set.accounts.length === 0) return { accountId: null, reason: "none" };
-
-  if (!isAnthropicAccountPoolEnabled(config)) {
-    return { accountId: set.activeAccountId, reason: "pool-disabled" };
-  }
-
-  const strategy = anthropicPoolStrategy(config);
-  if (strategy === "fill-first") {
-    return resolveAnthropicFillFirst(sessionKey, config, set, now);
-  }
-  if (strategy === "quota") {
-    return resolveAnthropicQuota(sessionKey, config, set, now);
-  }
-
-  const kernelResult = resolvePoolAccount(
-    anthropicPoolPlugin,
-    sessionKey ?? null,
-    {
-      strategy: "round-robin",
-      enabled: true,
-      activeAccountId: set.activeAccountId,
-      stickyLimit: stickyLimitForPool(config),
-      autoSwitchThreshold: anthropicAutoSwitchThreshold(config),
-    },
-    now,
-  );
-
-  return {
-    accountId: kernelResult.accountId,
-    reason: kernelResult.reason as AnthropicAccountSelectionReason,
-  };
 }
 
 export function bindAnthropicSessionAffinity(
@@ -633,9 +631,9 @@ export function rotateAnthropicAccountOn429(
   sessionKey?: string | null,
   now = Date.now(),
 ): string | null {
-  // Presence enables reactive recovery only when the operator has not made a choice. An explicit
-  // false is authoritative: the second credential may belong to a different billing, retention,
-  // or policy domain, so a 429 does not grant permission to replay the request under it.
+  // Presence supplies the reactive default only when the operator has not made a choice. An
+  // explicit false is authoritative: a second credential can represent another billing,
+  // retention, or policy domain, and a 429 does not grant permission to replay under it.
   const configured = config.anthropicAccountPool?.enabled;
   if (configured === false) return null;
   if (configured !== true && !hasAnthropicFailoverQuorum(now)) return null;
@@ -653,9 +651,8 @@ export function rotateAnthropicAccountOn429(
   // from a count read taken before the failure.
   quorumCache = null;
 
-  // The pool's strategy is a PROACTIVE policy. When enabled is absent, presence-defaulted
-  // recovery must not silently reactivate round-robin/fill-first merely because dormant values
-  // remain in config. The quota picker is the neutral recovery policy used by the default.
+  // The pool's strategy is proactive policy. When enabled is absent, presence-defaulted
+  // recovery uses neutral quota ordering rather than reviving a dormant strategy.
   const next = configured === true
     ? pickAlternateAnthropicAccount(config, failedAccountId, now)
     : pickLowestUsage(config, failedAccountId, now);
@@ -674,9 +671,52 @@ export function rotateAnthropicAccountOn429(
   return next;
 }
 
-/** Promote dashboard active account after a validated failover target is usable. */
-export function promoteAnthropicActiveAccount(accountId: string): void {
-  void setActiveAccount(PROVIDER, accountId).catch(() => { /* best-effort */ });
+export interface AnthropicSelectionRoutingOptions {
+  config: OcxConfig;
+  sessionKey?: string | null;
+  reason?: AnthropicAccountSelectionReason;
+  expectedCredentialGeneration?: string;
+}
+
+/** Commit the selected account before dispatch; rejected proposals have no routing side effects. */
+export async function promoteAnthropicActiveAccount(
+  accountId: string,
+  expectedSelection: OAuthAccountSelection | null,
+  options: AnthropicSelectionRoutingOptions,
+): Promise<OAuthAccountSelection | null> {
+  if (!expectedSelection || !isPoolCredentialUsable(accountId, Date.now())
+    || !isAnthropicAccountEligible(accountId, Date.now())) return null;
+  const committed = await commitOAuthAccountSelection(PROVIDER, accountId, {
+    expectedSelection,
+    expectedCredentialGeneration: options.expectedCredentialGeneration,
+    requireUsableAccount: true,
+  });
+  if (!committed) return null;
+  return commitAnthropicSelectionRouting(accountId, expectedSelection, committed, options) ? committed : null;
+}
+
+/** Main's shared selection owner calls this only after its authoritative commit succeeds. */
+export function commitAnthropicSelectionRouting(
+  accountId: string,
+  expectedSelection: OAuthAccountSelection,
+  committed: OAuthAccountSelection,
+  options: AnthropicSelectionRoutingOptions,
+): boolean {
+  if (committed.accountId !== accountId) return false;
+  const current = captureOAuthAccountSelection(PROVIDER);
+  if (current?.accountId !== committed.accountId || current.revision !== committed.revision) return false;
+  if (isAnthropicAccountPoolEnabled(options.config)) {
+    if (anthropicPoolStrategy(options.config) === "round-robin" && options.reason !== "affinity") {
+      const limit = stickyLimitForPool(options.config);
+      const picked = pickRoundRobinAccount(POOL_KEY_ANTHROPIC, getEligibleAnthropicAccounts(), limit);
+      if (picked !== accountId) seedPoolRotationAccount(POOL_KEY_ANTHROPIC, accountId);
+      notePoolRotationSuccess(POOL_KEY_ANTHROPIC, accountId, limit);
+    }
+    bindAnthropicSessionAffinity(options.sessionKey, accountId);
+  }
+  if (manualPreference === undefined || (manualPreference?.accountId === expectedSelection.accountId
+    && manualPreference.revision === expectedSelection.revision)) manualPreference = null;
+  return true;
 }
 
 /**
@@ -686,6 +726,7 @@ export function promoteAnthropicActiveAccount(accountId: string): void {
 export function resetAnthropicRoutingForManualSelection(accountId: string): void {
   clearAffinityState(POOL_KEY_ANTHROPIC);
   clearResolveState(POOL_KEY_ANTHROPIC);
+  manualPreference = captureOAuthAccountSelection(PROVIDER);
   seedPoolRotationAccount(POOL_KEY_ANTHROPIC, accountId);
   // A manual account selection is an operator statement about the roster; do not answer the
   // next activation question from a count read before it.
@@ -709,6 +750,17 @@ export async function getAnthropicPoolAccessToken(accountId: string): Promise<st
   }
   const { getValidAccessTokenForAccount } = await import("./index");
   return getValidAccessTokenForAccount(PROVIDER, accountId);
+}
+
+/** Resolve through the pool's local-CLI restrictions, then bind the exact returned generation. */
+export async function getAnthropicPoolAccessSnapshot(accountId: string): Promise<OAuthAccessSnapshot> {
+  const accessToken = await getAnthropicPoolAccessToken(accountId);
+  const row = getAccountCredentialWithStatus(PROVIDER, accountId);
+  if (!row || row.needsReauth || row.credential.access !== accessToken
+    || row.credential.expires <= Date.now()) {
+    throw new Error("Anthropic pool credential changed during account selection");
+  }
+  return { provider: PROVIDER, accountId, accessToken, generation: credentialGeneration(row.credential) };
 }
 
 /**

@@ -6,7 +6,7 @@ description: opencodex 的開發環境、結構、約定，以及新增 provider
 ## 環境搭建
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy    # 開發模式代理 API
@@ -115,7 +115,7 @@ bun run release:watch               # 觀察最新的 Release workflow run
 ## 專案維護者
 
 目前維護者、其職責，以及 review 與 merge 政策記錄在
-[`MAINTAINERS.md`](https://github.com/lidge-jun/opencodex/blob/main/MAINTAINERS.md)。repository 與
+[`MAINTAINERS.md`](https://github.com/yansigit/opencodex/blob/main/MAINTAINERS.md)。repository 與
 安全敏感路徑的 GitHub review 所有權宣告在 `.github/CODEOWNERS`。
 
 ## 約定

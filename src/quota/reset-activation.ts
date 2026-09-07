@@ -14,7 +14,6 @@
 import type { QuotaResetEvent } from "./reset-detector";
 
 let activated = false;
-type ActivationGuard = () => boolean;
 
 /**
  * Install the sink when config asks for it, and remove it when config no longer does.
@@ -22,15 +21,11 @@ type ActivationGuard = () => boolean;
  * Idempotent and cheap to call repeatedly: the enable check is the mtime-cached resolver, not a
  * config parse. Returns whether a sink is now installed, for the caller's own reporting.
  */
-export async function syncQuotaResetActivation(isCurrent: ActivationGuard = () => true): Promise<boolean> {
-  if (!isCurrent()) return false;
+export async function syncQuotaResetActivation(): Promise<boolean> {
   const [{ isQuotaResetNotificationEnabled }, observer] = await Promise.all([
     import("./reset-notify-config"),
     import("./reset-observer"),
   ]);
-  // Startup and shutdown may cross while these optional modules load. The owner that scheduled
-  // this work must still be live before it is allowed to mutate the process-wide sink.
-  if (!isCurrent()) return false;
 
   if (!isQuotaResetNotificationEnabled()) {
     // Deliberately clears a previously installed sink. Disabling in config must actually stop
@@ -45,18 +40,6 @@ export async function syncQuotaResetActivation(isCurrent: ActivationGuard = () =
   if (activated) return true;
   observer.setQuotaResetSink(dispatch);
   activated = true;
-  return true;
-}
-
-/** Remove the process-wide sink when its final server owner stops. */
-export async function deactivateQuotaResetActivation(
-  isCurrent: ActivationGuard = () => true,
-): Promise<boolean> {
-  if (!isCurrent()) return false;
-  const observer = await import("./reset-observer");
-  if (!isCurrent()) return false;
-  observer.setQuotaResetSink(null);
-  activated = false;
   return true;
 }
 

@@ -238,20 +238,45 @@ describe("Codex startup health", () => {
       expect(serialized).not.toContain(secretName);
     }
 
-    const realNow = Date.now;
-    try {
-      Date.now = () => realNow() + 30_050;
-      const refreshed = await handleManagementAPI(
-        new Request(url),
-        url,
-        { port: 10100, providers: {}, defaultProvider: "openai", codexAutoStart: true } as OcxConfig,
-      );
-      const refreshedBody = await refreshed!.json() as Record<string, unknown>;
-      expect(refreshedBody.diagnosticStale).toBe(false);
-    } finally {
-      Date.now = realNow;
-    }
-  }, 40_000);
+    now += 30_001;
+    const refreshed = await handleManagementAPI(
+      new Request(url),
+      url,
+      { port: 10100, providers: {}, defaultProvider: "openai", codexAutoStart: true } as OcxConfig,
+      { getCachedStartupHealth: readStartupHealth },
+    );
+    const refreshedBody = await refreshed!.json() as Record<string, unknown>;
+    expect(refreshedBody.diagnosticStale).toBe(false);
+    expect(refreshedBody.routingKind).toBe("custom-remote");
+    expect(probeCalls).toBe(2);
+  });
+
+  test("a platform probe that misses its bounded wait returns stale health", async () => {
+    invalidateStartupHealthCache();
+    let releaseProbe!: (value: ReturnType<typeof deriveStartupHealth>) => void;
+    const pendingProbe = new Promise<ReturnType<typeof deriveStartupHealth>>(resolve => {
+      releaseProbe = resolve;
+    });
+    let observedWaitMs = 0;
+
+    const health = await getCachedStartupHealth(
+      { codexAutoStart: true },
+      {
+        probe: async () => pendingProbe,
+        waitForProbe: async (_probe, timeoutMs) => {
+          observedWaitMs = timeoutMs;
+          return null;
+        },
+      },
+    );
+
+    expect(health.diagnosticStale).toBe(true);
+    expect(observedWaitMs).toBeGreaterThan(0);
+
+    releaseProbe(deriveStartupHealth({ ...base, routingKind: "native" }));
+    await pendingProbe;
+    invalidateStartupHealthCache();
+  });
 });
 import { ManagementRequest as Request } from "../helpers/management-auth";
 

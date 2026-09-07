@@ -25,6 +25,7 @@ export function isCompletePatchEnvelope(text: string): boolean {
   return PATCH_OPERATION_LINE.test(match[3] ?? "");
 }
 ```
+
 `repairFreeformToolInput` and `normalizeApplyPatchDelimiters` are **not** modified.
 Their exec byte-exactness contract and its lock in
 `tests/apply-patch-envelope.test.ts` stand unchanged.
@@ -108,3 +109,4 @@ bun test tests/apply-patch-envelope.test.ts tests/bridge.test.ts \
   tests/legacy-shell-compat.test.ts tests/tool-catalog-nudge.test.ts
 bun run typecheck
 ```
+

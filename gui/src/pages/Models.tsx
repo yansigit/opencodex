@@ -10,6 +10,7 @@ import type { TFn, TKey } from "../i18n/shared";
 import { modelLabel } from "../model-display";
 import { formatNamespacedModelId, formatProviderDisplayName, providerDisplaySlug } from "../provider-icons";
 import { readJsonIfOk, readJsonOrThrow } from "../fetch-json";
+import { describeIntegrationRefusalParts } from "./integrations/refusal-copy";
 import { readSessionListCache, writeSessionListCache } from "../session-list-cache";
 import { setClientResourceData } from "../client-resource";
 import { createBoundedFetch } from "../bounded-fetch";
@@ -37,6 +38,8 @@ import {
   fetchSelectedModels,
   modelVisible,
   putModelVisibility,
+  clientCatalogRefreshFailures,
+  type ClientCatalogRefreshFailure,
   shouldApplyLoadGeneration,
   type ProviderModelMap,
   type ModelVisibilityScope,
@@ -51,16 +54,12 @@ import {
   fmtK,
   NATIVE_CAP_OPTIONS,
   NATIVE_CAP_OPTION_SET,
-  NATIVE_GPT56_DEFAULT_WINDOW,
-  NATIVE_GPT56_OPT_IN_WINDOW,
   PAGE,
   readCollapsedProviders,
   THREAD_OPTION_SET,
   THREAD_OPTIONS,
   writeCollapsedProviders,
   discoveryFailureLabel,
-  formatModelContextTooltip,
-  modelContextSourceChipKey,
   REASONING_EFFORT_LEVELS,
   type ModelRow,
   type ProviderContextCapsResponse,
@@ -77,6 +76,7 @@ type CachedModelsPage = {
   selectedModels: ProviderModelMap;
   disabled: string[];
   contextCaps: Record<string, number>;
+  contextCapValues?: Record<string, number>;
   contextCapValue: number;
 };
 
@@ -215,6 +215,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const [search, setSearch] = useState<Record<string, string>>({});
   const [limit, setLimit] = useState<Record<string, number>>({});
   const [contextCaps, setContextCaps] = useState<Record<string, number>>(() => cached?.contextCaps ?? {});
+  const [contextCapValues, setContextCapValues] = useState<Record<string, number>>(() => cached?.contextCapValues ?? {});
   const [contextCapValue, setContextCapValue] = useState(() => cached?.contextCapValue ?? 350_000);
   const [customCap, setCustomCap] = useState("");
   const [showCustom, setShowCustom] = useState(false);
@@ -224,6 +225,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const [collapsed, setCollapsed] = useState<Set<string>>(() => initialCollapsed ?? new Set());
   const needsDefaultCollapseRef = useRef(initialCollapsed === null);
   const [status, setStatus] = useState("");
+  const [integrationFailures, setIntegrationFailures] = useState<ClientCatalogRefreshFailure[]>([]);
   const [ok, setOk] = useState(false);
   // Feedback generation: a repeated identical message (same success string, same validation
   // error) must still re-arm the toast timer. Clearing `status` alone is not enough — a
@@ -246,6 +248,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   }, [status, ok, feedbackGen]);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
+  const catalogMutationRef = useRef(false);
   const loadGenerationRef = useRef(0);
   const loadPendingRef = useRef(false);
   // multi_agent_v2 / ultra gate. null = endpoint unavailable (older proxy build) -> section hidden.
@@ -275,6 +278,14 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     const data = await readJsonIfOk<AliasView>(response);
     if (data && !signal?.aborted) setAliases(data);
   }, [apiBase]);
+  useEffect(() => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => void reloadAliases(controller.signal), 0);
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [reloadAliases]);
 
   const saveProviderAlias = async (provider: string) => {
     const entered = window.prompt(t("models.aliasPrompt"), aliases.providers[provider] ?? "");
@@ -431,6 +442,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
       selectedModels: selectionData,
       disabled: [...nextDisabled],
       contextCaps: capsData.caps ?? {},
+      contextCapValues: capsData.values ?? capsData.caps ?? {},
       contextCapValue: nextCapValue,
     } satisfies CachedModelsPage;
     writeSessionListCache(cacheKey, next);
@@ -450,6 +462,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     setSelectedModels(next.selectedModels);
     setContextCapValue(next.contextCapValue);
     setContextCaps(next.contextCaps);
+    setContextCapValues(next.contextCapValues ?? next.contextCaps);
   }, []);
 
   const catalogResource = useDataSurface<CachedModelsPage>(
@@ -492,26 +505,32 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     }
   }, [applyCatalog, cacheKey, fetchCatalog]);
 
-  // Shadow/v2 controls must not wait on the models catalog (live discovery can be slow).
   /** #2465: load the per-provider preset preview. */
   const loadPresets = useCallback(async () => {
+    const bounded = createBoundedFetch(15_000);
     try {
-      const bounded = createBoundedFetch(15_000);
-      const r = await fetch(`${apiBase}/api/model-presets`, { signal: bounded.signal });
-      const data = await readJsonIfOk<{ providers?: Record<string, ModelPresetView> }>(r);
+      const response = await fetch(`${apiBase}/api/model-presets`, { signal: bounded.signal });
+      const data = await readJsonIfOk<{ providers?: Record<string, ModelPresetView> }>(response);
       setPresets(data?.providers ?? {});
     } catch {
+      // A preset preview is decoration on top of a working Models page; failing to load it must
+      // not take the page down.
       setPresets({});
+    } finally {
+      bounded.clear();
     }
   }, [apiBase]);
 
   const loadModelDiscovery = useCallback(async () => {
     try {
-      const r = await fetch(`${apiBase}/api/model-discovery`);
-      setModelDiscovery((await readJsonIfOk<ModelDiscoveryView>(r)) ?? null);
-    } catch { setModelDiscovery(null); }
+      const response = await fetch(`${apiBase}/api/model-discovery`);
+      setModelDiscovery((await readJsonIfOk<ModelDiscoveryView>(response)) ?? null);
+    } catch {
+      setModelDiscovery(null);
+    }
   }, [apiBase]);
 
+  // Shadow/v2 controls must not wait on the models catalog (live discovery can be slow).
   useEffect(() => {
     // Both belong to the catalog tab; a hidden panel polling /api/v2 every ten seconds
     // is the same leak as the catalog poll above.
@@ -519,7 +538,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     const timeout = window.setTimeout(() => {
       void loadShadowCall();
       void loadV2();
-      void reloadAliases();
       // Preset previews belong to the same tab. Loaded once rather than polled: the rules are
       // shipped code and the catalog poll above already refreshes the rows they describe.
       void loadPresets();
@@ -533,7 +551,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
       window.clearTimeout(timeout);
       stop();
     };
-  }, [catalogActive, loadModelDiscovery, loadPresets, loadShadowCall, loadV2, reloadAliases]);
+  }, [catalogActive, loadModelDiscovery, loadPresets, loadShadowCall, loadV2]);
 
   const groups = useMemo(
     () => buildProviderModelGroups(models, providers),
@@ -547,8 +565,10 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
    */
   const catalogCountReady = models.length > 0 || catalogState.data !== undefined;
 
-  const openContextSettings = (group: ProviderModelGroup<ModelRow>, trigger: HTMLButtonElement) => {
-    contextModalTriggerRef.current = trigger;
+  const openContextSettings = (group: ProviderModelGroup<ModelRow>) => {
+    contextModalTriggerRef.current = document.activeElement?.tagName === "BUTTON"
+      ? document.activeElement as HTMLButtonElement
+      : null;
     const modelIds = [...new Set([
       ...group.rows.map(model => model.id),
       ...group.configuredModels,
@@ -711,6 +731,8 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     targets: ModelVisibilityTarget[],
     enabled: boolean,
   ) => {
+    if (catalogMutationRef.current) return;
+    catalogMutationRef.current = true;
     ++loadGenerationRef.current;
     setBusy(true);
     busyRef.current = true;
@@ -719,6 +741,10 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     try {
       const response = await putModelVisibility(apiBase, scope, provider, targets, enabled);
       if (!response.ok) errorKey = "models.saveFailed";
+      else {
+        const failures = clientCatalogRefreshFailures(await response.json());
+        if (failures !== undefined) setIntegrationFailures(failures);
+      }
     } catch {
       errorKey = "models.networkError";
     } finally {
@@ -732,10 +758,11 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
       }
       setBusy(false);
       busyRef.current = false;
+      catalogMutationRef.current = false;
     }
   };
 
-  const toggleProviderCap = async (provider: string, nativeGroup = false) => {
+  const toggleProviderCap = async (provider: string) => {
     setBusy(true);
     busyRef.current = true;
     setStatus("");
@@ -746,13 +773,12 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
       const r = await fetch(`${apiBase}/api/provider-context-caps`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(enabled && nativeGroup
-          ? { provider, enabled, value: NATIVE_GPT56_OPT_IN_WINDOW }
-          : { provider, enabled }),
+        body: JSON.stringify({ provider, enabled }),
       });
       try {
         const data = await readJsonOrThrow<ProviderContextCapsResponse>(r, t("models.capSaveFailed"));
         setContextCaps(data?.caps ?? {});
+        setContextCapValues(data?.values ?? data?.caps ?? {});
         setOk(true);
         setStatus(t("models.capApplied"));
         await load(true);
@@ -797,6 +823,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
         const data = await readJsonOrThrow<ProviderContextCapsResponse>(r, t("models.capSaveFailed"));
         if (typeof data?.value === "number" && Number.isFinite(data.value) && data.value > 0) setContextCapValue(data.value);
         setContextCaps(data?.caps ?? {});
+        setContextCapValues(data?.values ?? data?.caps ?? {});
         setOk(true);
         setStatus(t("models.capApplied"));
         await load(true);
@@ -841,7 +868,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const onSelectProviderCap = (provider: string, raw: string) => {
     if (raw === CUSTOM_OPTION) {
       setProviderCapCustomOpen(prev => ({ ...prev, [provider]: true }));
-      setProviderCapCustomDraft(prev => ({ ...prev, [provider]: String(contextCaps[provider] ?? contextCapValue) }));
+      setProviderCapCustomDraft(prev => ({ ...prev, [provider]: String(contextCaps[provider] ?? contextCapValues[provider] ?? contextCapValue) }));
       return;
     }
     setProviderCapCustomOpen(prev => ({ ...prev, [provider]: false }));
@@ -953,8 +980,11 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   };
 
   const applyPreset = async (provider: string, mode: "preset" | "all") => {
-    if (presetBusy) return;
+    if (catalogMutationRef.current) return;
+    catalogMutationRef.current = true;
     setPresetBusy(provider);
+    setBusy(true);
+    busyRef.current = true;
     try {
       const bounded = createBoundedFetch(30_000);
       const r = await fetch(`${apiBase}/api/model-presets`, {
@@ -963,12 +993,15 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
         body: JSON.stringify({ provider, mode }),
         signal: bounded.signal,
       });
-      const res = await readJsonIfOk<{ fallback?: string; selected?: string[] }>(r) ?? {};
+      const res = await readJsonOrThrow<{ fallback?: string; selected?: string[]; clientIntegrations?: unknown }>(r, t("models.saveFailed"));
+      if (!res) throw new Error(t("models.saveFailed"));
       if (res.fallback === "preset-empty") {
         // Never silently narrow to nothing: the server kept the previous selection, so say so
         // rather than showing a success that changed nothing.
         publishFeedback(false, t("models.presetEmpty", { provider }));
       } else {
+        const failures = clientCatalogRefreshFailures(res);
+        if (failures !== undefined) setIntegrationFailures(failures);
         publishFeedback(true, mode === "all"
           ? t("models.presetClearedToast", { provider })
           : t("models.presetAppliedToast", { provider, count: String(res.selected?.length ?? 0) }));
@@ -978,6 +1011,9 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
       publishFeedback(false, error instanceof Error ? error.message : String(error));
     } finally {
       setPresetBusy(null);
+      setBusy(false);
+      busyRef.current = false;
+      catalogMutationRef.current = false;
     }
   };
 
@@ -1159,18 +1195,8 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     const recentForProvider = modelDiscovery?.recentArrivals[provider] ?? [];
     const recentIds = new Set(recentForProvider.map(row => row.id));
     const capOn = contextCaps[provider] !== undefined;
-    const providerCap = contextCaps[provider] ?? contextCapValue;
-    // With the cap off, `providerCap` is only the value a future toggle would apply — for the
-    // native group that is the 350k default, which says nothing true about what Codex sees.
-    // The honest number there is the largest window the rows actually advertise.
-    const widestRowWindow = rows.reduce<number | undefined>((widest, row) => {
-      const window = typeof row.contextWindow === "number" && row.contextWindow > 0 ? row.contextWindow : undefined;
-      if (window === undefined) return widest;
-      return widest === undefined || window > widest ? window : widest;
-    }, undefined);
-    const capDisplayValue = capOn
-      ? providerCap
-      : (nativeProviderGroup ? NATIVE_GPT56_DEFAULT_WINDOW : (widestRowWindow ?? providerCap));
+    // Show the value the next enable will actually use, including a remembered selection.
+    const capDisplayValue = contextCaps[provider] ?? contextCapValues[provider] ?? contextCapValue;
     // The native group offers only the three windows GPT-5.6 actually has contracts for
     // (272k live, 372k legacy, 1.05M measured); routed providers keep the generic ladder.
     // The set has to follow the list, or a saved value outside it loses its option.
@@ -1265,7 +1291,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                // control — a provider with nothing to curate would show a dead switch.
                const preset = presets[provider];
                if (!preset) return null;
-               const busyHere = presetBusy === provider;
+               const busyHere = busy || presetBusy !== null;
                const stale = preset.mode === "custom"
                  && preset.appliedVersion !== undefined
                  && preset.appliedVersion < preset.availableVersion;
@@ -1332,7 +1358,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                   screen-reader user was not told this governs the context window.
                   The number belongs to the adjacent Select, which is where a value
                   goes (020_control_affordances.md). */}
-              <Switch on={capOn} onClick={() => toggleProviderCap(provider, nativeProviderGroup)} disabled={busy} label={t("models.contextCapLabel")} showLabel />
+              <Switch on={capOn} onClick={() => toggleProviderCap(provider)} disabled={busy} label={t("models.contextCapLabel")} showLabel />
               {/* Always rendered, disabled when the cap is off. A cap-off provider used to
                   drop this control entirely, which is the defect the user reported: openai
                   showed 1.05M and anthropic showed nothing, so the two rows started at
@@ -1393,7 +1419,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               <button
                 type="button"
                 className="btn btn-ghost btn-sm text-caption"
-                onClick={event => openContextSettings(group, event.currentTarget)}
+                onClick={() => openContextSettings(group)}
                 aria-haspopup="dialog"
               >{t("models.contextSettings")}</button>
             </div>
@@ -1432,8 +1458,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
              {visible.map(m => {
                // The row reflects the same final-visibility answer as the count and the picker.
                const off = !isVisible(m);
-               const sourceKey = modelContextSourceChipKey(m);
-               const contextTip = formatModelContextTooltip(m, t);
                return (
                  <div
                    key={m.namespaced}
@@ -1457,10 +1481,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                          {t("models.customBadge")}
                        </span>
                      )}
-                     {!m.custom && recentIds.has(m.id) && <span className="badge badge-amber">{t("models.newBadge")}</span>}
-                     {m.contextCapped && <span className="models-chip muted mono text-caption">{t("models.contextCappedValue", { value: fmtK(m.contextCap ?? contextCapValue) })}</span>}
-                     {sourceKey && <span className="models-chip muted mono text-caption">{t(sourceKey)}</span>}
-                     {m.metadataStale && <span className="models-chip muted mono text-caption">{t("models.contextMetadataStale")}</span>}
                      {m.custom && m.customId && (
                        <span className="models-model-row-actions">
                          <button
@@ -1499,6 +1519,8 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                          ><IconTrash width={13} height={13} aria-hidden="true" /></button>
                        </span>
                      )}
+                     {!m.custom && recentIds.has(m.id) && <span className="badge badge-amber">{t("models.newBadge")}</span>}
+                     {m.contextCapped && <span className="models-chip muted mono text-caption">{t("models.contextCappedValue", { value: fmtK(m.contextCap ?? contextCapValue) })}</span>}
                    </div>
                    {hoveredModel?.namespaced === m.namespaced && (() => {
                      const r = hoveredModel.rect;
@@ -1535,16 +1557,10 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                          <div className="model-tip-grid">
                            <span className="model-tip-key">{t("models.tipProvider")}</span>
                            <span className="model-tip-val">{formatProviderDisplayName(m.provider, t)}</span>
-                           {contextTip && (
+                           {(m.contextWindow || m.contextCap) && (
                              <>
                                <span className="model-tip-key">{t("models.tipContext")}</span>
-                               <span className="model-tip-val">{contextTip}</span>
-                             </>
-                           )}
-                           {sourceKey && (
-                             <>
-                               <span className="model-tip-key">{t("models.contextMetadataSource")}</span>
-                               <span className="model-tip-val">{t(sourceKey)}</span>
+                               <span className="model-tip-val">{fmtK(m.contextWindow ?? m.contextCap ?? 0)}</span>
                              </>
                            )}
                            {m.inputModalities && m.inputModalities.length > 0 && (
@@ -1810,6 +1826,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
         <dialog
           ref={contextDialogRef}
           className="modal-overlay"
+          aria-label={t("models.contextSettings")}
           aria-labelledby="models-context-dialog-title"
           onCancel={event => {
             event.preventDefault();
@@ -2133,6 +2150,17 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
       )}
       {/* Keep the last-good catalog interactive but make a failed revalidation explicit. */}
       {catalogState.showError && <Notice tone="err">{t("models.loadFail")}</Notice>}
+      {integrationFailures.length > 0 && <div className="models-integration-warning">
+        <Notice tone="warn">
+          {t("models.integrationRefreshWarning")}
+          <ul>{integrationFailures.map(row => <li key={`${row.client}:${row.profileId ?? "all"}`}>
+            {row.client}{row.profileId === undefined ? "" : `:${row.profileId}`}: {describeIntegrationRefusalParts(t, {
+              clientId: row.client, message: row.reason === "integration_mutation_busy" ? t("integrations.error.busy") : row.reason,
+              reason: row.refusalReason, snapshotPath: row.snapshotPath, residual: row.residual,
+            })}
+          </li>)}</ul>
+        </Notice>
+      </div>}
       <div className="models-workspace-root" aria-busy={catalogState.refreshing || undefined}>
         <aside className="models-workspace-rail" aria-label={t("nav.models")}>
           <div className="models-workspace-rail-header">

@@ -100,7 +100,7 @@ afterEach(() => {
 });
 
 describe("cross-process user cost overlay reconciliation", () => {
-  test("a CLI-process saveConfig edit becomes live in the running server registry", async () => {
+  test("a CLI-process atomic config edit becomes live in the running server registry", async () => {
     // "Server" state: the live config object plus the module-level overlay
     // registry, with the reconciler polling the shared disk config.
     const liveConfig = loadConfig();
@@ -108,13 +108,15 @@ describe("cross-process user cost overlay reconciliation", () => {
     const versionBefore = userCostOverlayVersion();
 
     // Separate writer process: exactly what `ocx config set` does — a fresh
-    // module instance calling saveConfig() under the same OPENCODEX_HOME.
+    // module instance committing a field-scoped mutation against the latest
+    // validated disk snapshot under the same OPENCODEX_HOME.
     const { exitCode, stderr } = await runChild(`
       const { mutatePersistedConfig } = await import("./src/config.ts");
-      mutatePersistedConfig(config => {
+      const outcome = mutatePersistedConfig(config => {
         config.providers.acme.modelCosts = { "model-x": ${JSON.stringify(OVERLAY)} };
         return { changed: true, value: undefined };
       });
+      if (outcome.status !== "committed") throw new Error("overlay mutation failed: " + outcome.status);
     `);
     expect(exitCode).toBe(0);
     expect(stderr).toBe("");
@@ -174,10 +176,11 @@ describe("cross-process user cost overlay reconciliation", () => {
     // Make the overlay live first through the same cross-process path.
     const seed = await runChild(`
       const { mutatePersistedConfig } = await import("./src/config.ts");
-      mutatePersistedConfig(config => {
+      const outcome = mutatePersistedConfig(config => {
         config.providers.acme.modelCosts = { "model-x": ${JSON.stringify(OVERLAY)} };
         return { changed: true, value: undefined };
       });
+      if (outcome.status !== "committed") throw new Error("overlay mutation failed: " + outcome.status);
     `);
     expect(seed.exitCode).toBe(0);
     expect(seed.stderr).toBe("");
@@ -239,10 +242,11 @@ describe("cross-process user cost overlay reconciliation", () => {
     // inside the 500ms owner's cadence.
     const { exitCode, stderr } = await runChild(`
       const { mutatePersistedConfig } = await import("./src/config.ts");
-      mutatePersistedConfig(config => {
+      const outcome = mutatePersistedConfig(config => {
         config.providers.acme.modelCosts = { "model-x": ${JSON.stringify(OVERLAY)} };
         return { changed: true, value: undefined };
       });
+      if (outcome.status !== "committed") throw new Error("overlay mutation failed: " + outcome.status);
     `);
     expect(exitCode).toBe(0);
     expect(stderr).toBe("");

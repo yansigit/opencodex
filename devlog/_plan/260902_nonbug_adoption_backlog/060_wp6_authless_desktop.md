@@ -86,3 +86,4 @@ Config key (top-level, flat, next to the other Codex-injection switches):
 
 PR to dev, `Closes #1107`. Close comment names the key, the CLI flag, the non-loopback guarantee,
 and the documented picker caveat.
+

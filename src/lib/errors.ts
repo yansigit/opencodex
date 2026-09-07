@@ -4,20 +4,15 @@ export interface OcxErrorPayload {
   code: string | null;
 }
 
-/** A local request validation failure that must remain a client-visible HTTP 400. */
-export class OcxRequestValidationError extends Error {
-  readonly status = 400;
-
-  constructor(message: string) {
-    super(message);
-    this.name = "OcxRequestValidationError";
-  }
-}
+export const ENCRYPTED_FUNCTION_OUTPUT_REJECTION =
+  "Encrypted function output content could not be decrypted or decoded.";
 
 /** Canonical human-readable message paths used by Responses upstream failures. */
 export function upstreamErrorMessageFromPayload(payload: unknown): string | undefined {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
   const json = payload as {
+    type?: unknown;
+    message?: unknown;
     error?: { message?: unknown };
     last_error?: { message?: unknown };
     response?: {
@@ -28,7 +23,10 @@ export function upstreamErrorMessageFromPayload(payload: unknown): string | unde
   const message = json.error?.message
     ?? json.last_error?.message
     ?? json.response?.error?.message
-    ?? json.response?.incomplete_details?.message;
+    ?? json.response?.incomplete_details?.message
+    // The Responses stream error event carries a flat message (type/code/message),
+    // unlike the response.failed envelope the branches above already cover.
+    ?? (json.type === "error" ? json.message : undefined);
   return typeof message === "string" ? message : undefined;
 }
 
@@ -507,4 +505,13 @@ export function httpStatusFromTerminalError(error: {
     return structuredServerClass && inferred === 400 ? 502 : inferred;
   }
   return 502;
+}
+/** A local request validation failure that must remain a client-visible HTTP 400. */
+export class OcxRequestValidationError extends Error {
+  readonly status = 400;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "OcxRequestValidationError";
+  }
 }

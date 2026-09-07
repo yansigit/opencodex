@@ -155,10 +155,10 @@ export default function ProviderOverview({
         });
       }
     } finally {
-     if (connectionAbortRef.current?.controller === controller) {
-       connectionAbortRef.current = null;
-     }
-   }
+      if (connectionAbortRef.current?.controller === controller) {
+        connectionAbortRef.current = null;
+      }
+    }
   }, [apiBase, connectionProbeKey, isAiStudioWeb, item.name, t]);
 
   const handleAiStudioReauth = useCallback(async () => {
@@ -193,17 +193,17 @@ export default function ProviderOverview({
         return;
       }
       setAiStudioReauthMsg(t("pws.aiStudio.loginFailed"));
-    } catch (e) {
-      if (controller.signal.aborted || (e instanceof DOMException && e.name === "AbortError")) return;
-      setAiStudioReauthMsg(e instanceof Error ? e.message : t("pws.aiStudio.loginFailed"));
-   } finally {
-     if (aiStudioReauthAbortRef.current === controller) {
-       aiStudioReauthAbortRef.current = null;
-     }
-     if (!controller.signal.aborted) {
-       setAiStudioReauthBusy(false);
-     }
-   }
+    } catch (error) {
+      if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) return;
+      setAiStudioReauthMsg(error instanceof Error ? error.message : t("pws.aiStudio.loginFailed"));
+    } finally {
+      if (aiStudioReauthAbortRef.current === controller) {
+        aiStudioReauthAbortRef.current = null;
+      }
+      if (!controller.signal.aborted) {
+        setAiStudioReauthBusy(false);
+      }
+    }
   }, [apiBase, onRefreshConfig, t]);
 
   useEffect(() => {
@@ -270,15 +270,14 @@ export default function ProviderOverview({
         {isAiStudioWeb && (needsAiStudioReauth || aiStudioReauthMsg) && (
           <div className="row" style={{ marginTop: 12, alignItems: "center" }}>
             {needsAiStudioReauth && (
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              disabled={aiStudioReauthBusy}
-              onClick={() => void handleAiStudioReauth()}
-            >
-              {/* oxlint-disable-next-line local-i18n/no-hardcoded-ui-strings -- labels for a11y test query; component text is driven by i18n below but oxlint rule fires on JSX string literals; functional display is t() via aiStudioCtaLabel */}
-              {aiStudioReauthBusy ? t("common.loading") : status !== "ready" ? t("pws.aiStudio.connect") : t("pws.reauthenticate")}
-            </button>
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={aiStudioReauthBusy}
+                onClick={() => void handleAiStudioReauth()}
+              >
+                {aiStudioReauthBusy ? t("common.loading") : status !== "ready" ? t("pws.aiStudio.connect") : t("pws.reauthenticate")}
+              </button>
             )}
             {aiStudioReauthMsg && (
               <span role="status" className="muted">{aiStudioReauthMsg}</span>

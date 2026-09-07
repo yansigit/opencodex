@@ -18,7 +18,9 @@ describe("Google AI Studio Native Automated Login & Parsing", () => {
     expect(code).toContain("getAllCookies");
     // 4. Automated project/storage harvesting
     expect(code).toContain("selectedProject");
-    expect(code).toContain("aistudio-session.json");
+    // 5. The TypeScript launcher supplies an invocation-specific hardened target.
+    expect(code).toContain("--session-output");
+    expect(code).not.toContain("homeDirectoryForCurrentUser");
   });
 
   test("parseMakerSuiteChunk extracts model text and thinking signatures", () => {

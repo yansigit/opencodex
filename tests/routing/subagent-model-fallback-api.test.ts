@@ -7,8 +7,8 @@ import { mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleManagementAPI } from "../../src/server/management-api";
-import { inMemoryManagementPersistence } from "../helpers/management-auth";
 import type { OcxConfig } from "../../src/types";
+import { inMemoryManagementPersistence } from "../helpers/management-auth";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const savedHome = process.env.OPENCODEX_HOME;

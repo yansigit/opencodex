@@ -3265,8 +3265,8 @@ export function providerCodexAccountMode(id: string, provider?: OcxProviderConfi
  */
 export function effectiveGoogleMode(
   providerId: string,
-  prov: { adapter?: string; googleMode?: "ai-studio" | "vertex" | "cloud-code-assist" | "ai-studio-web" },
-): "ai-studio" | "vertex" | "cloud-code-assist" | "ai-studio-web" | null {
+  prov: { adapter?: string; googleMode?: "ai-studio" | "ai-studio-web" | "vertex" | "cloud-code-assist" },
+): "ai-studio" | "ai-studio-web" | "vertex" | "cloud-code-assist" | null {
   if (prov.adapter !== "google") return null;
   return prov.googleMode ?? getProviderRegistryEntry(providerId)?.googleMode ?? "ai-studio";
 }

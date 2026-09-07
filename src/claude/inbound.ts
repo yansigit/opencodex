@@ -17,7 +17,7 @@ import { decodeReasoningEnvelope, encodeReasoningEnvelope, OCX_REASONING_PREFIX 
 import { verifyDirectiveSignature } from "./directive-sign";
 import { createHash } from "node:crypto";
 
-export { AnthropicRequestError } from "./inbound-records";
+export { AnthropicRequestError, DesktopModelMappingUnavailableError } from "./inbound-records";
 export { resolveInboundModel, effortForThinkingBudget, effortFromOutputConfig, extractOcxRouteDirective, extractOcxEffortDirective } from "./inbound-model-options";
 import { AnthropicRequestError, isRec, type Rec } from "./inbound-records";
 import { resolveInboundModel, effortForThinkingBudget, effortFromOutputConfig, formatFromOutputConfig } from "./inbound-model-options";

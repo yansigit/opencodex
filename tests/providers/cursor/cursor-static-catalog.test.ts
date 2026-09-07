@@ -96,8 +96,6 @@ describe("Cursor static Codex catalog", () => {
     expect(entries.find(item => item.slug === "cursor/gpt-5.6-luna")?.context_window).toBe(1_000_000);
     expect(entries.find(item => item.slug === "cursor/glm-5.2")?.context_window).toBe(1_000_000);
     expect(entries.find(item => item.slug === "cursor/composer-2.5-fast")?.context_window).toBe(200_000);
-    expect(entries.find(item => item.slug === "cursor/composer-2.5")?.context_window).toBe(64_000);
-    expect(entries.find(item => item.slug === "cursor/composer-2.5")?.auto_compact_token_limit).toBe(57_600);
     expect(entries.find(item => item.slug === "cursor/gpt-5.5")?.supported_reasoning_levels)
       .toMatchObject([{ effort: "low" }, { effort: "medium" }, { effort: "high" }, { effort: "max" }, { effort: "ultra" }]);
     expect(entries.find(item => item.slug === "cursor/gpt-5.6-sol")?.supported_reasoning_levels)

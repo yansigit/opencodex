@@ -144,15 +144,6 @@ describe("run-turn adapter event queue", () => {
     expect(await queue.collect()).toEqual([heartbeat]);
   });
 
-  test("heartbeat coalescing preserves replayUnsafe", async () => {
-    const queue = createAdapterEventQueue();
-    queue.push({ type: "heartbeat" });
-    queue.push({ type: "heartbeat", replayUnsafe: true });
-    queue.push({ type: "heartbeat" });
-    queue.close();
-    expect(await queue.collect()).toEqual([{ type: "heartbeat", replayUnsafe: true }]);
-  });
-
   test("a tool event breaks text coalescing on both sides", async () => {
     const queue = createAdapterEventQueue();
 
@@ -248,22 +239,6 @@ describe("run-turn adapter event queue", () => {
 });
 
 describe("run-turn adapter event preflight", () => {
-  test("replayUnsafe heartbeat commits preflight before a later retryable error", async () => {
-    const result = await preflightAdapterEvents((async function* () {
-      yield { type: "heartbeat", replayUnsafe: true } as const;
-      yield { type: "error", status: 429, message: "rate limited" } as const;
-    })());
-    expect(result.replayUnsafe).toBe(true);
-    expect(result.error).toBeUndefined();
-    expect(result.empty).toBe(false);
-    const replayed: AdapterEvent[] = [];
-    for await (const event of result.stream) replayed.push(event);
-    expect(replayed).toEqual([
-      { type: "heartbeat", replayUnsafe: true },
-      { type: "error", status: 429, message: "rate limited" },
-    ]);
-  });
-
   test("10,000 leading heartbeats retain only the bounded tail and still complete", async () => {
     const values = [...Array.from({ length: 10_000 }, () => heartbeat), done];
     const preflight = await preflightAdapterEvents(events(values));

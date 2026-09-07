@@ -224,15 +224,8 @@ const boundaries: Array<{
 ];
 
 describe("native profile OpenCodex process-exit phases", () => {
-  /*
-   * Keep every crash boundary as its own test and cleanup unit. This matrix starts
-   * two real Bun processes per boundary; one cumulative 90s budget made the fifth
-   * boundary inherit the cost of the first four and contradicted the CI-scaled
-   * per-child waits above. Separate cases preserve the exact same coverage while
-   * naming the boundary that stalls and bounding each child lifecycle directly.
-   */
-  for (const scenario of boundaries) {
-    test(`hard exit at ${scenario.boundary} converges auth, vault, journal, gate, and runtime bearer`, async () => {
+  test("hard OpenCodex process exit after each published transaction phase converges exact auth, vault, journal, gate, and runtime bearer", async () => {
+    for (const scenario of boundaries) {
       const f = await fixture();
       const marker = join(f.root, `crash-${scenario.boundary}`);
       const result = join(f.root, `result-${scenario.boundary}`);
@@ -282,8 +275,8 @@ describe("native profile OpenCodex process-exit phases", () => {
       } finally {
         await stopStartup(restart, p);
       }
-    }, STARTUP_CHILD_BUDGET_MS);
-  }
+    }
+  }, 90_000);
 
   test("two concurrent real switches serialize to one commit without credential overlap", async () => {
     const f = await fixture();

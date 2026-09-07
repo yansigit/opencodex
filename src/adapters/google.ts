@@ -2,7 +2,6 @@ import type { AdapterFetchContext, AdapterRequest, IncomingMeta, ProviderAdapter
 import { debugDroppedFrame } from "../lib/debug";
 import { createToolCallIdAllocator } from "./tool-call-id";
 import { createImageBudget, materializeInlineImage, MAX_ENCODED_BYTES_PER_IMAGE, artifactHttpUrl } from "../images/artifacts";
-import { OcxRequestValidationError } from "../lib/errors";
 import type {
   AdapterEvent,
   OcxAssistantMessage,
@@ -22,11 +21,8 @@ import { fetchAntigravityWithRetry, fetchVertexWithRetry } from "./google-http";
 import { safeAntigravityHttpErrorMessage, safeVertexHttpErrorMessage } from "./google-errors";
 import { sanitizeUpstreamErrorText } from "./upstream-http-error";
 import { googleTruncationErrorMessage, isVertexTruncatedTurn, vertexTruncationErrorMessage } from "./google-truncation";
-import { ANTIGRAVITY_REQUEST_UA, ANTIGRAVITY_SIGNATURE_BYPASS_SENTINEL, antigravitySessionId, isLikelyRealThoughtSignature, sanitizeAntigravityClaudeSignatures } from "./google-antigravity-wire";
-import { repairGoogleToolPairs, stripTrailingClaudePrefill } from "./google-antigravity-tools";
-import { canonicalAntigravityHttpsHost, isAntigravityHttpsHost } from "./google-antigravity-hosts";
+import { ANTIGRAVITY_REQUEST_UA, antigravitySessionId, isLikelyRealThoughtSignature, sanitizeAntigravityClaudeSignatures } from "./google-antigravity-wire";
 import { compileGoogleWireBody } from "./google-wire-compiler";
-import { sanitizeGeminiToolParameters } from "./google-tool-schema";
 import { identifyRoutedModel } from "./identity";
 import {
   antigravityUsesReplayCache,
@@ -57,6 +53,7 @@ import { normalizeAntigravityProviderError } from "../oauth/antigravity-routing"
 import { buildAiStudioHeaders, parseGoogleCookieJar } from "../oauth/google-aistudio-auth";
 import { resolveAiStudioCredentials } from "../oauth/aistudio-credentials";
 import { parseMakerSuiteChunk } from "./google-aistudio-parser";
+import { OcxRequestValidationError } from "../lib/errors";
 
 const INLINE_ERROR_URL_USERINFO = /https?:\/\/[^\s"'<>]*@/gi;
 
@@ -245,19 +242,6 @@ const GEMINI_EMPTY_PLACEHOLDER = "(empty)";
 const GEMINI_EMPTY_TOOL_OUTPUT_PLACEHOLDER = "(empty tool output)";
 const GEMINI_MISSING_TOOL_RESULT = "[missing tool_result for this tool_use in history]";
 
-function appendGeminiContent(
-  contents: unknown[],
-  next: { role: string; parts: unknown[] },
-  mergeAdjacentUsers = true,
-): void {
-  const previous = contents.at(-1) as { role?: unknown; parts?: unknown[] } | undefined;
-  if (mergeAdjacentUsers && previous?.role === "user" && next.role === "user" && Array.isArray(previous.parts)) {
-    previous.parts.push(...next.parts);
-  } else {
-    contents.push(next);
-  }
-}
-
 /** A Gemini text part, or undefined when the value cannot form a valid non-empty text block. */
 function geminiTextPart(text: unknown): { text: string } | undefined {
   return typeof text === "string" && text.length > 0 ? { text } : undefined;
@@ -314,7 +298,6 @@ function geminiOrphanToolResultParts(msg: OcxToolResultMessage): unknown[] {
 function messagesToGeminiFormat(
   parsed: OcxParsedRequest,
   identityModelId: string,
-  repairToolPairs: boolean,
   stripRejectedClaudeSdkParagraph = false,
 ): { systemInstruction?: unknown; contents: unknown[]; replayedCallIds: string[] } {
   // Neutralize Codex's GPT-5 identity line (Gemini/Antigravity share this path) so a routed model
@@ -332,15 +315,9 @@ function messagesToGeminiFormat(
 
   const contents: unknown[] = [];
   const replayedCallIds: string[] = [];
-  let userMergeBarrier = false;
-  const appendContent = (next: { role: string; parts: unknown[] }): void => {
-    appendGeminiContent(contents, next, !userMergeBarrier);
-    userMergeBarrier = false;
-  };
-  const messages = repairGoogleToolPairs(parsed.context.messages, { dropUnmatchedCalls: repairToolPairs });
 
   const callIds = createToolCallIdAllocator();
-  for (const msg of messages) {
+  for (const msg of parsed.context.messages) {
     if (msg.role === "assistant") {
       for (const part of (msg as OcxAssistantMessage).content) {
         if (part.type === "toolCall") callIds.reserve((part as OcxToolCall).id);
@@ -355,7 +332,7 @@ function messagesToGeminiFormat(
       case "user":
       case "developer": {
         if (typeof msg.content === "string") {
-          appendContent({ role: "user", parts: [{ text: msg.content || GEMINI_EMPTY_PLACEHOLDER }] });
+          contents.push({ role: "user", parts: [{ text: msg.content || GEMINI_EMPTY_PLACEHOLDER }] });
         } else {
           const parts: unknown[] = [];
           for (const p of msg.content as OcxContentPart[]) {
@@ -377,7 +354,7 @@ function messagesToGeminiFormat(
             const textPart = geminiTextPart(p.text);
             if (textPart) parts.push(textPart);
           }
-          appendContent({ role: "user", parts: parts.length > 0 ? parts : [{ text: GEMINI_EMPTY_PLACEHOLDER }] });
+          contents.push({ role: "user", parts: parts.length > 0 ? parts : [{ text: GEMINI_EMPTY_PLACEHOLDER }] });
         }
         break;
       }
@@ -430,11 +407,8 @@ function messagesToGeminiFormat(
         // A turn with nothing Gemini can represent (e.g. thinking-only) would serialize as
         // `parts: []`, which the Anthropic translation rejects. Skip it, as the Anthropic
         // adapter does for its own empty assistant content.
-        if (parts.length === 0) {
-          userMergeBarrier = true;
-          break;
-        }
-        appendContent({ role: "model", parts });
+        if (parts.length === 0) break;
+        contents.push({ role: "model", parts });
         if (toolCalls.length > 0) {
           // Gemini/Claude-on-Antigravity requires one adjacent response batch for the whole
           // function-call turn. Replayed histories can be interrupted, reversed, duplicated, or
@@ -463,18 +437,16 @@ function messagesToGeminiFormat(
           for (const orphan of orphanResults) {
             responseParts.push(...geminiOrphanToolResultParts(orphan));
           }
-          appendContent({ role: "user", parts: responseParts });
+          contents.push({ role: "user", parts: responseParts });
           i = j - 1;
         }
         break;
       }
       case "toolResult": {
-        // repairGoogleToolPairs already dropped this result from pairing/id allocation, so a
-        // lone functionResponse cannot be emitted. Consecutive results after a functionCall
-        // batch never reach here (the assistant branch consumes them). Standalone or
-        // barrier-delayed results still have to stay visible — especially image-bearing
-        // screenshots — as explicit user text rather than vanishing or 400ing CCA.
-        appendContent({ role: "user", parts: geminiOrphanToolResultParts(msg as OcxToolResultMessage) });
+        // A standalone functionResponse is invalid without an immediately preceding matching
+        // functionCall batch. Preserve the result as explicit user text (plus any representable
+        // image siblings) rather than manufacturing a successful call or sending a 400-prone shape.
+        contents.push({ role: "user", parts: geminiOrphanToolResultParts(msg as OcxToolResultMessage) });
         break;
       }
     }
@@ -537,13 +509,6 @@ function usageFromGemini(usage: Record<string, number> | undefined): OcxUsage | 
   };
 }
 
-function googlePromptFeedbackError(root: Record<string, unknown>): Extract<AdapterEvent, { type: "error" }> | undefined {
-  const feedback = root.promptFeedback;
-  if (!isGoogleRecord(feedback) || typeof feedback.blockReason !== "string" || !feedback.blockReason.trim()) return undefined;
-  const reason = sanitizeUpstreamErrorText(feedback.blockReason).slice(0, 160);
-  return { type: "error", message: `google response blocked by prompt feedback: ${reason}` };
-}
-
 /**
  * Cap on the buffered non-streaming response body (100 MiB), matching
  * IMAGES_RESPONSE_MAX_BYTES in src/server/images.ts. Enforced by streaming the
@@ -590,30 +555,6 @@ function isImageCapableModel(modelId: string): boolean {
   return IMAGE_CAPABLE_MODELS.has(modelId);
 }
 
-function applyGeminiStructuredOutput(
-  generationConfig: Record<string, unknown>,
-  parsed: OcxParsedRequest,
-  wireModelId: string,
-): void {
-  const textFormat = parsed.options.textFormat;
-  if (!textFormat) return;
-  if (Array.isArray(parsed.context.tools) && parsed.context.tools.length > 0) return;
-  if (/claude/i.test(wireModelId) || /claude/i.test(parsed.modelId)) return;
-  if (isImageCapableModel(parsed.modelId)) return;
-
-  generationConfig.responseMimeType = "application/json";
-  if (textFormat.type !== "json_schema" || textFormat.schema === undefined) return;
-
-  const sanitized = sanitizeGeminiToolParameters(textFormat.schema);
-  const props = sanitized.properties;
-  const propKeys = props !== null && typeof props === "object" && !Array.isArray(props)
-    ? Object.keys(props)
-    : [];
-  const required = Array.isArray(sanitized.required) ? sanitized.required : [];
-  if (propKeys.length === 0 && required.length === 0) return;
-  generationConfig.responseSchema = sanitized;
-}
-
 /**
  * Model-visible markdown link for a materialized artifact. Uses the authenticated
  * opaque HTTP route so remote/container clients can fetch the image without host
@@ -647,21 +588,6 @@ function googlePartThoughtSignature(part: GoogleResponsePart): string | undefine
   if (typeof direct === "string" && direct.length > 0) return direct;
   const nested = part.extra_content?.google?.thought_signature;
   return typeof nested === "string" && nested.length > 0 ? nested : undefined;
-}
-
-function ensureThoughtSignatureBypassSentinel(contents: unknown[], modelId?: string): void {
-  if (modelId && !/gemini-(?:3.7|2.5)|thinking/i.test(modelId)) return;
-  for (const c of contents as { role?: string; parts?: unknown[] }[]) {
-    if (c?.role !== "model" || !Array.isArray(c.parts)) continue;
-    for (const p of c.parts) {
-      if (p && typeof p === "object") {
-        const partObj = p as Record<string, unknown>;
-        if (partObj.functionCall && !partObj.thoughtSignature && !partObj.thought_signature) {
-          partObj.thoughtSignature = ANTIGRAVITY_SIGNATURE_BYPASS_SENTINEL;
-        }
-      }
-    }
-  }
 }
 
 /**
@@ -892,6 +818,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
 
   return {
     name: "google",
+
     validateRequest(parsed: OcxParsedRequest) {
       if (provider.googleMode === "cloud-code-assist" && parsed.options.providerOptions?.google) {
         throw new OcxRequestValidationError("provider_options.google is not supported on Google Cloud Code Assist routes");
@@ -939,7 +866,6 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       const { systemInstruction, contents, replayedCallIds } = messagesToGeminiFormat(
         parsed,
         identityModelId,
-        provider.googleMode === "cloud-code-assist",
         stripRejectedClaudeSdkParagraph,
       );
       lastInjectedCallIds = [...replayedCallIds];
@@ -988,12 +914,10 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       if (!generationConfig.thinkingConfig && isImageCapableModel(parsed.modelId)) {
         generationConfig.responseModalities = ["TEXT", "IMAGE"];
       }
-      applyGeminiStructuredOutput(generationConfig, parsed, routedModelId);
       if (Object.keys(generationConfig).length > 0) body.generationConfig = generationConfig;
 
-      const ccaAlwaysSse = provider.googleMode === "cloud-code-assist";
-      const method = ccaAlwaysSse || parsed.stream ? "streamGenerateContent" : "generateContent";
-      const streamParam = ccaAlwaysSse || parsed.stream ? "?alt=sse" : "";
+      const method = parsed.stream ? "streamGenerateContent" : "generateContent";
+      const streamParam = parsed.stream ? "?alt=sse" : "";
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (provider.headers) Object.assign(headers, provider.headers);
 
@@ -1003,11 +927,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         if (!token) throw new Error("google-antigravity oauth token missing — run ocx login google-antigravity");
         const base = provider.baseUrl?.trim();
         if (!base) throw new Error("google-antigravity requires a non-empty baseUrl");
-        const canonicalBase = canonicalAntigravityHttpsHost(base) ?? base;
-        if (!isAntigravityHttpsHost(canonicalBase)) {
-          throw new Error("google-antigravity requires an HTTPS baseUrl");
-        }
-        const url = `${canonicalBase.replace(/\/+$/, "")}/v1internal:${method}${streamParam}`;
+        const url = `${base}/v1internal:${method}${streamParam}`;
         const project = provider.project;
         if (!project) throw new Error("Antigravity requires a discovered Cloud Code Assist project id (re-run `ocx login google-antigravity`).");
         const sessionId = antigravitySessionId(parsed);
@@ -1046,17 +966,12 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         }
         const compiled = compileGoogleWireBody(draftRequest);
         const request = compiled.body;
-        if (systemInstruction) {
-          request.preambleConfig = { mode: "SYSTEM_INSTRUCTION_MODE_REPLACE" };
-        }
         restoreGoogleToolName = compiled.restoreToolName;
         // Compile names before replay: signatures are keyed by the exact provider-visible name.
         if (Array.isArray((request as { contents?: unknown[] }).contents)) {
           const contents = (request as { contents: unknown[] }).contents;
-          const strippedModelTail = /claude/i.test(wireModelId) ? stripTrailingClaudePrefill(contents) : false;
           if (antigravityUsesReplayCache(wireModelId)) {
             applyAntigravityReplay(wireModelId, sessionId, contents);
-            ensureThoughtSignatureBypassSentinel(contents);
           } else {
             sanitizeAntigravityClaudeSignatures(contents);
           }
@@ -1069,10 +984,9 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           // must end with a user message." Context compaction, previous_response_id expansion,
           // and interrupted-turn replay can all produce a model-tail history. Append a user
           // "(continue)" nudge, mirroring the anthropic adapter's tail guard (src/adapters/anthropic.ts).
-          // When a trailing model turn was stripped, append even if the history now ends with user.
           if (/claude/i.test(wireModelId)) {
             const last = contents.length > 0 ? contents[contents.length - 1] as { role?: string } : undefined;
-            if (strippedModelTail || !last || last.role === "model") {
+            if (!last || last.role === "model") {
               contents.push({ role: "user", parts: [{ text: "(continue)" }] });
             }
           }
@@ -1090,9 +1004,6 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         };
         headers["User-Agent"] = ANTIGRAVITY_REQUEST_UA;
         headers["Authorization"] = `Bearer ${token}`;
-        if (/claude/i.test(wireModelId)) {
-          headers["anthropic-beta"] = "interleaved-thinking-2025-05-14";
-        }
         emitInTurnGroundingSourcesQueue.push(!!parsed._ccaInTurnGrounding);
         return { url, method: "POST", headers, body: JSON.stringify(envelope) };
       }
@@ -1143,7 +1054,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       if (provider.googleMode === "ai-studio-web") {
         const base = (provider.baseUrl || "https://alkalimakersuite-pa.clients6.google.com").replace(/\/+$/, "");
         const url = `${base}/v1internal:${method}${streamParam}`;
-        const credentials = resolveAiStudioCredentials(provider);
+        const credentials = resolveAiStudioCredentials(provider, undefined, url);
         if (credentials.kind !== "ready") throw new Error(credentials.reason);
         const jar = parseGoogleCookieJar(credentials.cookieHeader);
         const aiStudioHeaders = await buildAiStudioHeaders(jar, "https://aistudio.google.com");
@@ -1151,7 +1062,10 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         const compiled = compileGoogleWireBody({ ...body, model: routedModelId });
         restoreGoogleToolName = compiled.restoreToolName;
         if (Array.isArray((compiled.body as { contents?: unknown[] }).contents)) {
-          ensureThoughtSignatureBypassSentinel((compiled.body as { contents: unknown[] }).contents, routedModelId);
+          applyAntigravityThoughtSignatureFallback(
+            routedModelId,
+            (compiled.body as { contents: unknown[] }).contents,
+          );
         }
         emitInTurnGroundingSourcesQueue.push(!!parsed._ccaInTurnGrounding);
         return { url, method: "POST", headers, body: JSON.stringify(compiled.body) };
@@ -1165,9 +1079,6 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
 
       const compiled = compileGoogleWireBody(body);
       restoreGoogleToolName = compiled.restoreToolName;
-      if (Array.isArray((compiled.body as { contents?: unknown[] }).contents)) {
-        ensureThoughtSignatureBypassSentinel((compiled.body as { contents: unknown[] }).contents, routedModelId);
-      }
       emitInTurnGroundingSourcesQueue.push(!!parsed._ccaInTurnGrounding);
       return { url, method: "POST", headers, body: JSON.stringify(compiled.body) };
     },
@@ -1303,14 +1214,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         // absent key and an empty array are already skipped here; `null` joins them. A non-null
         // non-array container is still claimed structure the parser cannot read, and stays
         // terminal.
-        if (rawCandidates === undefined || rawCandidates === null) {
-          const feedbackError = googlePromptFeedbackError(root);
-          if (feedbackError) {
-            yield feedbackError;
-            return "terminate";
-          }
-          return "continue";
-        }
+        if (rawCandidates === undefined || rawCandidates === null) return "continue";
         if (!Array.isArray(rawCandidates)) {
           yield invalidGoogleShapeEvent({
             reason: "candidates_not_array",
@@ -1318,14 +1222,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           });
           return "terminate";
         }
-        if (rawCandidates.length === 0) {
-          const feedbackError = googlePromptFeedbackError(root);
-          if (feedbackError) {
-            yield feedbackError;
-            return "terminate";
-          }
-          return "continue";
-        }
+        if (rawCandidates.length === 0) return "continue";
         const rawCandidate = rawCandidates[0];
         if (!isGoogleRecord(rawCandidate)) {
           // Unlike a root `data: null` keepalive, this is a claimed response candidate. Treat it
@@ -1393,7 +1290,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         if (parts) {
           for (const part of parts) {
             const sig = googlePartThoughtSignature(part);
-            if (sig && isLikelyRealThoughtSignature(sig) && (part.thought === true || !part.functionCall)) {
+            if (part.thought === true && sig && isLikelyRealThoughtSignature(sig)) {
               pendingStreamThoughtSig = sig;
             }
             const textEvent = googlePartTextEvent(part, filterCcaSearchSuggestionHtml);
@@ -1467,7 +1364,6 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           appendReservation.commitRetained();
           budget.releaseRetained(bufferBytes, { kind: "live_transient" });
           bufferBytes = nextBufferBytes;
-
           const lines = buffer.split("\n");
           buffer = lines.pop() ?? "";
           const residualBytes = budgetEncoder.encode(buffer).byteLength;
@@ -1486,12 +1382,12 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
               continue;
             }
             if (provider.googleMode === "ai-studio-web") {
-              const parsed = parseMakerSuiteChunk(line);
-              if (parsed.text) {
+              const parsedMakerSuite = parseMakerSuiteChunk(line);
+              if (parsedMakerSuite.text) {
                 sawAnyFrame = true;
                 sawTerminalSignal = true;
                 sawContentEvent = true;
-                yield { type: "text_delta", text: parsed.text };
+                yield { type: "text_delta", text: parsedMakerSuite.text };
                 continue;
               }
             }
@@ -1517,9 +1413,9 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
               void err;
             }
             if (provider.googleMode === "ai-studio-web") {
-              const parsed = parseMakerSuiteChunk(residual);
-              if (parsed.text) {
-                yield { type: "text_delta", text: parsed.text };
+              const parsedMakerSuite = parseMakerSuiteChunk(residual);
+              if (parsedMakerSuite.text) {
+                yield { type: "text_delta", text: parsedMakerSuite.text };
                 yield { type: "done" };
                 return;
               }
@@ -1576,9 +1472,6 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
     },
 
     async parseResponse(response: Response, budget: TranslatorBudget): Promise<AdapterEvent[]> {
-      // Cloud Code Assist exposes only the SSE transport. Unary callers still use this
-      // buffered adapter entry point, so collect the exact same events parseStream emits
-      // instead of maintaining a second CCA JSON parser.
       const isSse = response.headers.get("content-type")?.includes("text/event-stream") ?? false;
       if ((provider.googleMode === "cloud-code-assist" && isSse) || provider.googleMode === "ai-studio-web") {
         const events: AdapterEvent[] = [];
@@ -1721,8 +1614,6 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       }
       const candidates = rawCandidates as { finishReason?: string }[] | undefined;
       if (!candidates?.length) {
-        const feedbackError = googlePromptFeedbackError(json);
-        if (feedbackError) return finish([feedbackError]);
         return finish([{ type: "error", message: "google response contained no candidates" }]);
       }
       const rawCandidate: unknown = candidates[0];

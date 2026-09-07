@@ -18,7 +18,7 @@ vision and web-search sidecars can also use your ChatGPT login when a routed mod
 ## Install
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @yansigit/opencodex
 ```
 
 :::note[npm blocked the bun postinstall?]
@@ -29,10 +29,10 @@ script — and always include the package name (npm's abbreviated suggestion
 omits it, which would reinstall the current directory instead):
 
 ```bash
-npm install -g --allow-scripts=bun @bitkyc08/opencodex
+npm install -g --allow-scripts=bun @yansigit/opencodex
 
 # if the original install used sudo, keep using sudo:
-sudo npm install -g --allow-scripts=bun @bitkyc08/opencodex
+sudo npm install -g --allow-scripts=bun @yansigit/opencodex
 ```
 :::
 
@@ -51,7 +51,7 @@ the catalog entries do not grant access by themselves. Use the preview channel o
 unreleased opencodex builds:
 
 ```bash
-npm install -g @bitkyc08/opencodex@preview
+npm install -g @yansigit/opencodex@preview
 ocx update --tag preview
 ```
 
@@ -60,7 +60,7 @@ ocx update --tag preview
 To hack on opencodex itself:
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy   # starts the proxy API in dev mode (src/cli/index.ts start)

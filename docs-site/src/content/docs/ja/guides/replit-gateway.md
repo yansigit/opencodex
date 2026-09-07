@@ -4,7 +4,7 @@ description: Replit AI Integrations 経由で OpenAI Chat と Anthropic Messages
 ---
 
 **Replit ゲートウェイコンパニオン**は
-[`integrations/replit-gateway`](https://github.com/lidge-jun/opencodex/tree/dev/integrations/replit-gateway)
+[`integrations/replit-gateway`](https://github.com/yansigit/opencodex/tree/dev/integrations/replit-gateway)
 のユーザー所有 Bun サービスで、**Replit デプロイ内**で動作します。Repl 環境の Replit AI Integrations
 資格情報を読み取り、opencodex に 2 つのネイティブワイヤーエンドポイントを公開します:
 
@@ -35,7 +35,7 @@ opencodex は `AI_INTEGRATIONS_*` シークレットを受け取りません。�
 - ダッシュボードウィザードまたは CLI インストール用の実行中 opencodex プロキシ（`ocx start`）。
 
 デプロイと設定は
-[パッケージ README](https://github.com/lidge-jun/opencodex/blob/dev/integrations/replit-gateway/README.md)を
+[パッケージ README](https://github.com/yansigit/opencodex/blob/dev/integrations/replit-gateway/README.md)を
 参照してください。
 
 ## ゲートウェイのデプロイ（概要）
@@ -172,14 +172,14 @@ Replit コンパニオンは**現時点で基準を満たしません**。
 | `AI_INTEGRATIONS_*` 名 | **未検証の観察慣行**；canary 待ち |
 | 規約・法人 | 利用規約 — **Replit, Inc.**；Pro/Enterprise: Commercial Agreement |
 | プラットフォーム外ルーティング | **未取得** |
-| 指名されたメンテナンス担当 | **opencodex:** [@lidge-jun](https://github.com/lidge-jun)、[@Ingwannu](https://github.com/Ingwannu)（[`MAINTAINERS.md`](https://github.com/lidge-jun/opencodex/blob/main/MAINTAINERS.md)）。**Replit:** 本ワークフローのパートナーではない。 |
+| 指名されたメンテナンス担当 | **opencodex:** [@lidge-jun](https://github.com/lidge-jun)、[@Ingwannu](https://github.com/Ingwannu)（[`MAINTAINERS.md`](https://github.com/yansigit/opencodex/blob/main/MAINTAINERS.md)）。**Replit:** 本ワークフローのパートナーではない。 |
 | 引用可能な検証日 | **2026-08-22** |
 
 **レジストリ昇格はブロック。** `replit`/`replit-anthropic` は `src/providers/registry.ts` にありません。
 
 ## 関連
 
-- [パッケージ README](https://github.com/lidge-jun/opencodex/blob/dev/integrations/replit-gateway/README.md)
-- [設計仕様](https://github.com/lidge-jun/opencodex/blob/dev/docs/superpowers/specs/2026-08-22-replit-gateway-design.md)
+- [パッケージ README](https://github.com/yansigit/opencodex/blob/dev/integrations/replit-gateway/README.md)
+- [設計仕様](https://github.com/yansigit/opencodex/blob/dev/docs/superpowers/specs/2026-08-22-replit-gateway-design.md)
 - [プロバイダー](/guides/providers/)
 - [Web ダッシュボード](/guides/web-dashboard/)

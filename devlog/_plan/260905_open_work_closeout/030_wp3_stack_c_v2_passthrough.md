@@ -653,3 +653,4 @@ that out in any revert PR.
 - `node --test .github/scripts/pr-sponsored-surface.test.cjs` was run to confirm both gate exits (label, push-permission) behave as read.
 - No files under `src/`, `tests/`, or `gui/` in the worktree were modified; all scratch trees live outside it.
 - `git merge-tree --write-tree` could not be re-run in this sandbox (`unable to create temporary file: Operation not permitted` — the shared git dir is not writable here). The clean-merge result is carried from the lane doc and cross-checked by the empty drift query, which is the stronger evidence for these six files.
+

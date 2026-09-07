@@ -117,9 +117,9 @@ export async function runInit(args: string[] = []): Promise<void> {
     const existingConfig = existsSync(getConfigPath());
     let overwriteDecision = decideInitOverwrite(existingConfig, parsedArgs.yes, Boolean(process.stdin.isTTY));
     if (overwriteDecision === "refuse") {
-        console.error("❌ An opencodex config already exists. Re-run `ocx init --yes` to replace it.");
-        process.exitCode = 2;
-        return;
+      console.error("❌ An opencodex config already exists. Re-run `ocx init --yes` to replace it.");
+      process.exitCode = 2;
+      return;
     }
     if (overwriteDecision === "cancel") {
       const answer = await prompt.ask("Overwrite existing config? [y/N]: ");

@@ -11,8 +11,8 @@ export function useProvidersFetch({
   setConfig,
   setOauthProviders,
   setOauthStatus,
-  invalidateProviderQuotas,
   notify,
+  invalidateProviderQuotas,
   setConfigLoadFailed,
   configCacheKey,
 }: {
@@ -21,11 +21,11 @@ export function useProvidersFetch({
   setConfig: React.Dispatch<React.SetStateAction<ProvidersConfig | null>>;
   setOauthProviders: React.Dispatch<React.SetStateAction<string[]>>;
   setOauthStatus: React.Dispatch<React.SetStateAction<Record<string, OAuthStatus>>>;
-  /** Bump the shell's quota revision; `force` adds `?refresh=1` to its next read. */
-  invalidateProviderQuotas: (force?: boolean) => void;
-  notify: (message: string, ok: boolean) => void;
+  notify: (msg: string, ok: boolean) => void;
   /** Mirrors config fetch health so cached data can retain the page's inline retry affordance. */
   setConfigLoadFailed?: (failed: boolean) => void;
+  /** Bump the shell's quota revision; `force` adds `?refresh=1` to its next read. */
+  invalidateProviderQuotas: (force?: boolean) => void;
   /** Session seed key for instant Providers shell paint (no secrets — hasApiKey flags only). */
   configCacheKey?: string;
 }) {

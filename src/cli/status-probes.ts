@@ -1,8 +1,8 @@
 import { readPidFileValue, readRuntimePort } from "../config/process-state";
-import { loadConfig } from "../config";
 import { isOpencodexHealthz, probeHostname } from "../server/proxy-liveness";
 import { directLocalHttpFetch } from "../server/direct-local-http";
 import { isProcessAlive } from "../lib/process-control";
+import { loadConfig } from "../config";
 import { canonicalServerOrigin } from "../lib/server-tls";
 import type { OcxConfig } from "../types";
 

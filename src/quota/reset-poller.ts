@@ -60,7 +60,7 @@ async function tick(): Promise<void> {
     // with the section absent has no sink, and the seams therefore skip all work, so something
     // has to notice the operator turned it on. Cheap — the resolver is mtime-cached.
     const { syncQuotaResetActivation } = await import("./reset-activation");
-    await syncQuotaResetActivation(() => entryGeneration === generation);
+    await syncQuotaResetActivation();
     if (!isQuotaResetNotificationEnabled()) return;
     const configured = resolveQuotaResetPollMs();
     if (configured === 0) return;

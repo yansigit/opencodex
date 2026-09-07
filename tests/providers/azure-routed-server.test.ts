@@ -45,6 +45,80 @@ describe("Azure identity routed response path", () => {
     expect(seenHeaders.get("x-api-key")).toBeNull();
   });
 
+  test("rebuilds identity transport when the managed identity changes before dispatch", async () => {
+    let releaseFirstToken!: () => void;
+    const firstTokenStarted = new Promise<void>(resolve => {
+      setAzureCredentialFactoryForTests(options => ({
+        getToken: async () => {
+          if (options?.managedIdentityClientId === "client-a") {
+            resolve();
+            await new Promise<void>(release => { releaseFirstToken = release; });
+          }
+          return { token: `token-${options?.managedIdentityClientId}` };
+        },
+      }));
+    });
+    const dispatches: Array<{ url: string; authorization: string }> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      dispatches.push({
+        url: String(input),
+        authorization: new Headers(init?.headers).get("authorization") ?? "",
+      });
+      return Response.json({ id: "resp_1", object: "response", created_at: 1, status: "completed", model: "gpt-4o", output: [], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } });
+    }) as typeof fetch;
+    const azureConfig = config({
+      adapter: "azure-openai",
+      baseUrl: "https://resource.openai.azure.com/openai",
+      azureCredential: { type: "default-azure-credential", managedIdentityClientId: "client-a" },
+    });
+
+    const pending = handleResponses(request(), azureConfig, { model: "", provider: "" }, {});
+    await firstTokenStarted;
+    azureConfig.providers["azure-test"] = {
+      ...azureConfig.providers["azure-test"]!,
+      baseUrl: "https://resource-b.openai.azure.com/openai",
+      azureCredential: { type: "default-azure-credential", managedIdentityClientId: "client-b" },
+    };
+    releaseFirstToken();
+
+    expect((await pending).status).toBe(200);
+    expect(dispatches).toEqual([{
+      url: "https://resource-b.openai.azure.com/openai/v1/responses",
+      authorization: "Bearer token-client-b",
+    }]);
+  });
+
+  test("refuses dispatch when the identity provider disappears during token acquisition", async () => {
+    let releaseToken!: () => void;
+    const tokenStarted = new Promise<void>(resolve => {
+      setAzureCredentialFactoryForTests(() => ({
+        getToken: async () => {
+          resolve();
+          await new Promise<void>(release => { releaseToken = release; });
+          return { token: "stale-token" };
+        },
+      }));
+    });
+    let fetches = 0;
+    globalThis.fetch = (async () => {
+      fetches++;
+      return Response.json({});
+    }) as typeof fetch;
+    const azureConfig = config({
+      adapter: "azure-openai",
+      baseUrl: "https://resource.openai.azure.com/openai",
+      azureCredential: { type: "default-azure-credential" },
+    });
+
+    const pending = handleResponses(request(), azureConfig, { model: "", provider: "" }, {});
+    await tokenStarted;
+    delete azureConfig.providers["azure-test"];
+    releaseToken();
+
+    expect((await pending).status).toBe(502);
+    expect(fetches).toBe(0);
+  });
+
   test("keeps ordinary Azure API-key mode fail-closed when the key is absent", async () => {
     await expect(handleResponses(request(), config({
       adapter: "azure-openai",

@@ -58,7 +58,7 @@ function buildFixtureHome(home: string = mkdtempSync(join(tmpdir(), "ocx-storage
   logs.exec("CREATE TABLE logs (ts INTEGER, level TEXT, estimated_bytes INTEGER)");
   logs.exec("INSERT INTO logs VALUES (1,'info',10),(2,'info',20),(3,'warn',30),(4,'error',40),(5,'info',50)");
  logs.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-  logs.close();
+ logs.close();
   for (const suf of ["-wal", "-shm"]) {
     rmSync(join(home, `logs_2.sqlite${suf}`), { force: true });
   }

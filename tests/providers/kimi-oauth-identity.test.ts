@@ -8,9 +8,8 @@ import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-let testDir: string | undefined;
+let testDir = "";
 let previousOpencodexHome: string | undefined;
-
 const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function jwtWithClaims(claims: Record<string, unknown>): string {
@@ -130,7 +129,6 @@ describe("Kimi multiauth via saveCredential", () => {
     if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousOpencodexHome;
     if (testDir) removeTreeWithRetry(testDir);
-    testDir = undefined;
   });
 
   test("two distinct user_ids append two kimi accounts", async () => {

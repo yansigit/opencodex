@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -229,7 +229,7 @@ describe("OAuth provider reconciliation", () => {
     // holds; only the rows the projection actually changed may be replaced.
     expect(config.providers.untouched).toBe(liveUntouched);
   });
-  test("refreshes a saved Antigravity 3.5 preset without touching credentials or user fields", async () => {
+  test("refreshes a saved Antigravity live catalog without touching credentials or user fields", async () => {
     const home = mkdtempSync(join(tmpdir(), "ocx-gemini-36-reconcile-"));
     homes.push(home);
     process.env.OPENCODEX_HOME = home;
@@ -261,7 +261,7 @@ describe("OAuth provider reconciliation", () => {
 
     expect(reconcileOAuthProviders(config)).toBe(true);
     const provider = config.providers["google-antigravity"];
-    expect(provider.defaultModel).toBe("gemini-3.8-flash");
+    expect(provider.defaultModel).toBe("gemini-3.5-flash-low");
     expect(provider.models).toEqual([
       "gemini-3.8-flash",
       "gemini-3.7-flash",
@@ -288,7 +288,7 @@ describe("OAuth provider reconciliation", () => {
     });
 
     const persisted = loadConfig();
-    expect(persisted.providers["google-antigravity"]?.defaultModel).toBe("gemini-3.8-flash");
+    expect(persisted.providers["google-antigravity"]?.defaultModel).toBe("gemini-3.5-flash-low");
     expect(persisted.providers["google-antigravity"]?.liveModels).toBe(true);
     expect(reconcileOAuthProviders(config)).toBe(false);
   });
@@ -331,10 +331,9 @@ describe("OAuth provider reconciliation", () => {
   });
 
   test("an explicit 3.7 default survives the 3.8 launch while its capabilities refresh", () => {
-    // The 3.5 case above starts from a RETIRED id, so it only exercises the stale-default
-    // healing branch. This one is the opposite claim, and the one that matters for an
-    // additive rollout: a user who deliberately chose 3.7 must still be on 3.7 afterwards.
-    // Google still serves it, so healing it onto 3.8 would be silently overriding a choice.
+    // The earlier live-discovery case preserves an id outside the static seed. This case
+    // preserves a still-listed choice during an additive catalog rollout, while refreshing
+    // its capability records.
     const home = mkdtempSync(join(tmpdir(), "ocx-antigravity-explicit-default-"));
     homes.push(home);
     process.env.OPENCODEX_HOME = home;
@@ -356,7 +355,7 @@ describe("OAuth provider reconciliation", () => {
     } satisfies OcxConfig;
     saveConfig(config);
 
-    reconcileOAuthProviders(config, false);
+    reconcileOAuthProviders(config);
     const provider = config.providers["google-antigravity"];
 
     expect(provider.defaultModel).toBe("gemini-3.7-flash");
@@ -367,55 +366,51 @@ describe("OAuth provider reconciliation", () => {
     expect(provider.modelReasoningEfforts?.["gemini-3.8-flash"]).toEqual(["low", "medium", "high"]);
   });
 
-  test("adopts already-reconciled persisted OAuth state into a stale live config", () => {
-    const home = mkdtempSync(join(tmpdir(), "ocx-antigravity-unchanged-adopt-"));
-    homes.push(home);
-    process.env.OPENCODEX_HOME = home;
-    const staleLive = {
+  test("does not validate a live-models default against the static preset", () => {
+    const config = {
       port: 10100,
       defaultProvider: "google-antigravity",
-      googleAntigravityStaticCatalogVersion: 1,
       providers: {
         "google-antigravity": {
           ...structuredClone(OAUTH_PROVIDERS["google-antigravity"].providerConfig),
-          defaultModel: "gemini-3.6-flash",
-          models: [
-            "gemini-3.6-flash",
-            "gemini-3.1-pro",
-            "gemini-3.1-flash-image",
-            "claude-sonnet-4-6",
-            "claude-opus-4-6-thinking",
-            "gpt-oss-120b-medium",
-          ],
-          liveModels: false,
-        },
-        "local-only": {
-          adapter: "openai",
-          baseUrl: "http://127.0.0.1:9999/v1",
-          allowPrivateNetwork: true,
-          models: ["local-live"],
-          note: "live-only",
+          authMode: "oauth",
+          liveModels: true,
+          models: ["account-specific-model"],
+          defaultModel: "account-specific-model",
         },
       },
     } satisfies OcxConfig;
-    const reconciledDisk = structuredClone(staleLive);
-    reconciledDisk.providers["disk-only"] = {
-      adapter: "openai",
-      baseUrl: "http://127.0.0.1:9998/v1",
-      allowPrivateNetwork: true,
-      models: ["disk-only"],
-    };
-    delete reconciledDisk.providers["local-only"];
-    expect(reconcileOAuthProviders(reconciledDisk, false)).toBe(true);
-    saveConfig(reconciledDisk);
-    const beforeBytes = readFileSync(getConfigPath(), "utf8");
 
-    expect(reconcileOAuthProviders(staleLive)).toBe(true);
-    expect(readFileSync(getConfigPath(), "utf8")).toBe(beforeBytes);
-    expect(staleLive.googleAntigravityStaticCatalogVersion).toBe(2);
-    expect(staleLive.providers["google-antigravity"]).toEqual(reconciledDisk.providers["google-antigravity"]);
-    expect(staleLive.providers["local-only"]?.note).toBe("live-only");
-    expect(staleLive.providers["disk-only"]).toBeUndefined();
+    expect(reconcileOAuthProviders(config, false)).toBe(true);
+    expect(config.providers["google-antigravity"].defaultModel).toBe("account-specific-model");
+
+    upsertOAuthProvider(config, "google-antigravity");
+    expect(config.providers["google-antigravity"].defaultModel).toBe("account-specific-model");
+  });
+
+  test.each(["reconcile", "upsert"] as const)("%s heals an obsolete static default without enabling live discovery", operation => {
+    const preset = OAUTH_PROVIDERS["google-antigravity"].providerConfig;
+    const config: OcxConfig = {
+      port: 10100,
+      defaultProvider: "google-antigravity",
+      providers: {
+        "google-antigravity": {
+          ...structuredClone(preset),
+          liveModels: false,
+          defaultModel: "retired-static-model",
+          models: ["retired-static-model"],
+        },
+      },
+    };
+
+    if (operation === "reconcile") expect(reconcileOAuthProviders(config, false)).toBe(true);
+    else upsertOAuthProvider(config, "google-antigravity");
+
+    const provider = config.providers["google-antigravity"]!;
+    expect(provider.liveModels).toBe(false);
+    expect(provider.defaultModel).toBe(preset.defaultModel);
+    expect(provider.models).toEqual(preset.models);
+    expect(reconcileOAuthProviders(config, false)).toBe(false);
   });
 
   test("preserves an explicit Antigravity static opt-out without the legacy migration marker", () => {

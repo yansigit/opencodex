@@ -13,7 +13,7 @@ import {
  * Quota-reset detection is an optional subsystem, so it must stay off the core path.
  *
  * AGENTS.md states that obligation for optional subsystems generally, but
- * tests/lab/core-lab-boundary.test.ts hardcodes "/src/lab/" -- so nothing enforced it for
+ * tests/core-lab-boundary.test.ts hardcodes "/src/lab/" -- so nothing enforced it for
  * src/quota/. The gap is not theoretical here. Both quota seams
  * (src/codex/quota.ts, src/providers/quota.ts) are statically reachable from
  * src/server/responses/core.ts, so one static import in either puts the detector, its

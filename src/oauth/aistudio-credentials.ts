@@ -16,6 +16,25 @@ export type AiStudioCredentialResolution =
   | { kind: "invalid"; reason: string };
 
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
+export const AI_STUDIO_WEB_BASE_URL = "https://alkalimakersuite-pa.clients6.google.com";
+
+export function isCanonicalAiStudioWebBaseUrl(value: unknown): boolean {
+  if (value !== undefined && typeof value !== "string") return false;
+  const candidate = typeof value === "string" && value.trim() ? value.trim() : AI_STUDIO_WEB_BASE_URL;
+  try {
+    const url = new URL(candidate);
+    return url.protocol === "https:"
+      && url.hostname.toLowerCase() === "alkalimakersuite-pa.clients6.google.com"
+      && url.port === ""
+      && url.username === ""
+      && url.password === ""
+      && (url.pathname === "" || url.pathname === "/")
+      && url.search === ""
+      && url.hash === "";
+  } catch {
+    return false;
+  }
+}
 
 function validCookieHeader(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -37,7 +56,11 @@ function ready(cookieHeader: string, source: "provider-api-key" | "provider-head
 export function resolveAiStudioCredentials(
   provider: OcxProviderConfig,
   session?: AiStudioSessionData | null,
+  requestUrl?: string | URL,
 ): AiStudioCredentialResolution {
+  if (!isCanonicalAiStudioWebBaseUrl(provider.baseUrl)) {
+    return { kind: "invalid", reason: "AI Studio web credentials require the canonical Google endpoint." };
+  }
   const invalidSources: string[] = [];
   const apiKey = validCookieHeader(provider.apiKey);
   if (apiKey) return ready(apiKey, "provider-api-key");
@@ -55,7 +78,7 @@ export function resolveAiStudioCredentials(
   }
 
   const savedSession = session === undefined ? loadAiStudioSession() : session;
-  const sessionCookie = validCookieHeader(cookieHeaderFromSession(savedSession));
+  const sessionCookie = validCookieHeader(cookieHeaderFromSession(savedSession, requestUrl ?? AI_STUDIO_WEB_BASE_URL));
   if (sessionCookie) return ready(sessionCookie, "session");
   if (savedSession) invalidSources.push("saved session");
 

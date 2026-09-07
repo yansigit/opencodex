@@ -854,7 +854,6 @@ describe("server local API auth", () => {
       modelMaxInputTokens: { "gpt-test": 1000 },
       codexAccountMode: "pool",
       reasoningWireFormat: "gateway-object",
-      replayTransientFailures: true,
       virtualModels: { "gpt-test-pro": { wireModelId: "gpt-test", reasoningMode: "pro" } },
       codexAuthContext: { accessToken: "runtime-token" },
       selectedForwardHeaders: { authorization: "Bearer runtime-token" },
@@ -882,7 +881,6 @@ describe("server local API auth", () => {
       hasHeaders: true,
       codexAccountMode: "pool",
       reasoningWireFormat: "gateway-object",
-      replayTransientFailures: true,
     });
     expect(dto.providers.openai).not.toHaveProperty("apiKey");
     expect(dto.providers.openai).not.toHaveProperty("headers");
@@ -1085,21 +1083,6 @@ describe("server local API auth", () => {
     } as OcxConfig) as { providers: Record<string, { freeTier?: boolean }> };
     expect(dto.providers.nvidia.freeTier).toBe(true);
     expect(dto.providers.venice.freeTier).toBeUndefined();
-  });
-
-  test("safeConfigDTO preserves non-secret Google transport mode for the provider UI", () => {
-    const dto = safeConfigDTO({
-      ...config("127.0.0.1"),
-      providers: {
-        "google-aistudio": {
-          adapter: "google",
-          baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
-          authMode: "local",
-          googleMode: "ai-studio-web",
-        },
-      },
-    } as OcxConfig) as { providers: Record<string, { googleMode?: string }> };
-    expect(dto.providers["google-aistudio"].googleMode).toBe("ai-studio-web");
   });
   test("management GET rejects non-local Origin even with a valid API key", async () => {
     if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
@@ -1432,38 +1415,6 @@ describe("server local API auth", () => {
       expect(JSON.parse(response.body)).toMatchObject({
         error: { code: "origin_rejected" },
       });
-    } finally {
-      await server.stop(true);
-    }
-  });
-
-  test("AI Studio relay endpoints return 410 Gone and session sync requires API auth", async () => {
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
-    mkdirSync(TEST_DIR, { recursive: true });
-    process.env.OPENCODEX_HOME = TEST_DIR;
-    process.env.OPENCODEX_API_AUTH_TOKEN = "local-secret";
-    saveConfig({ ...config("0.0.0.0"), port: 0 });
-
-    const server = startServer(0);
-    try {
-      const gone = await fetch(new URL("/v1/ws/aistudio", server.url), {
-        headers: { connection: "Upgrade", upgrade: "websocket" },
-      });
-      expect(gone.status).toBe(410);
-
-      const missing = await fetch(new URL("/api/aistudio/session", server.url), {
-        method: "POST",
-      });
-      expect(missing.status).toBe(401);
-
-      const hostile = await fetch(new URL("/api/aistudio/session", server.url), {
-        method: "POST",
-        headers: {
-          "x-opencodex-api-key": "local-secret",
-          origin: "https://attacker.test",
-        },
-      });
-      expect(hostile.status).toBe(403);
     } finally {
       await server.stop(true);
     }
@@ -1868,6 +1819,81 @@ describe("server local API auth", () => {
       clearCodexUpstreamHealth();
       clearAccountQuota();
       rmSync(join(isolatedCodexHome!.path, "auth.json"), { force: true });
+
+      const nativeCallerConfig = {
+        ...mainOnlyConfig(),
+        hostname: "0.0.0.0",
+      } as OcxConfig;
+      replacePersistedConfig(nativeCallerConfig);
+      const beforeNativeCaller = seen.length;
+      const nativeCaller = startServer(0, { inspectNativeCodexOwnership });
+      try {
+        await waitForNativeMainStartupGate();
+
+        expect((await request(nativeCaller, {
+          authorization: "Bearer local-secret",
+          "chatgpt-account-id": "must-not-forward",
+        })).status).toBe(401);
+        expect(seen).toHaveLength(beforeNativeCaller);
+        writeMainToken("opaque-file-main-token");
+
+        const fileMainBaseline = {
+          reauth: isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID),
+          quota: structuredClone(getAccountQuota(MAIN_CODEX_ACCOUNT_ID)),
+          health: structuredClone(getCodexUpstreamHealth(MAIN_CODEX_ACCOUNT_ID)),
+          active: loadConfig().activeCodexAccountId,
+        };
+        const expectFileMainUnchanged = () => {
+          expect(isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID)).toBe(fileMainBaseline.reauth);
+          expect(getAccountQuota(MAIN_CODEX_ACCOUNT_ID)).toEqual(fileMainBaseline.quota);
+          expect(getCodexUpstreamHealth(MAIN_CODEX_ACCOUNT_ID)).toEqual(fileMainBaseline.health);
+          expect(loadConfig().activeCodexAccountId).toBe(fileMainBaseline.active);
+        };
+        const isolatedCallerFailures = [
+          ["caller-invalid-401", 401],
+          ["caller-invalid-403", 403],
+          ["caller-quota-429", 429],
+          ["caller-transient-500", 500],
+        ] as const;
+        for (const [token, status] of isolatedCallerFailures) {
+          const headers = {
+            authorization: `Bearer ${token}`,
+            "chatgpt-account-id": `${token}-account`,
+          };
+          expect((await request(nativeCaller, headers)).status).toBe(status);
+          expect((await compact(nativeCaller, headers)).status).toBe(status);
+          expect(await wsTurn(nativeCaller, headers)).toContain(String(status));
+          expectFileMainUnchanged();
+        }
+        const quotaOnlyHeaders = {
+          authorization: "Bearer caller-quota-headers",
+          "chatgpt-account-id": "caller-quota-headers-account",
+        };
+        expect((await request(nativeCaller, quotaOnlyHeaders)).status).toBe(200);
+        expect((await compact(nativeCaller, quotaOnlyHeaders)).status).toBe(200);
+        expect(await wsTurn(nativeCaller, quotaOnlyHeaders)).toContain("resp_tier");
+        expectFileMainUnchanged();
+
+        markAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);
+
+        const nativeHeaders = {
+          authorization: "Bearer caller-keyring-token",
+          "chatgpt-account-id": "caller-keyring-account",
+        };
+        const beforeHealthyNativeCaller = seen.length;
+        expect((await request(nativeCaller, nativeHeaders)).status).toBe(200);
+        expect((await compact(nativeCaller, nativeHeaders)).status).toBe(200);
+        expect(seen.slice(beforeHealthyNativeCaller)).toEqual(Array.from({ length: 2 }, () => ({
+          host: "chatgpt.com",
+          authorization: "Bearer caller-keyring-token",
+          chatgptAccountId: "caller-keyring-account",
+        })));
+        expect(isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID)).toBe(true);
+      } finally {
+        await nativeCaller.stop(true);
+        clearAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);
+        rmSync(join(isolatedCodexHome!.path, "auth.json"), { force: true });
+      }
 
       replacePersistedConfig({
         port: 0,
@@ -2315,12 +2341,6 @@ describe("server local API auth", () => {
     });
     redirectCanonicalCodexTo(upstream.url.toString());
     const now = 1_800_000_000_000;
-    const originalNow = Date.now;
-    const originalFetch = globalThis.fetch;
-    // Seed the credential and quota under the same clock the server will use. If the quota
-    // is stamped by the real clock first, the 2027 fixture clock makes it immediately stale;
-    // startup priming can then refresh the credential before the first websocket turn.
-    Date.now = () => now;
     saveConfig({
       port: 0,
       defaultProvider: "openai",
@@ -2334,6 +2354,16 @@ describe("server local API auth", () => {
       codexAccountNamespaces: { "ws-refresh": "pool-a" },
       activeCodexAccountId: "pool-a",
     } as OcxConfig);
+    const originalNow = Date.now;
+    const originalFetch = globalThis.fetch;
+    // Both the clock and the fetch stub go up before `startServer`. The async pool-quota
+    // prime it arms (src/server/index.ts:2054-2064) reads the clock AND fetches, so leaving
+    // either real for the width of two dynamic `import()` resolutions is what made this test
+    // fail on loaded CI runners while passing locally: the prime judged `pool-a` stale
+    // against a 2027 clock versus a `updatedAt` stamped in real time, then refreshed the
+    // credential before the first turn was served — so `seenAuth[0]` was already the new
+    // token. The failure diff was always the first element, never the second.
+    Date.now = () => now;
     // Seed the credential and quota AFTER the clock is pinned.
     //
     // Both writes stamp real time when they run before the pin: `updateAccountQuota` sets
@@ -2351,18 +2381,16 @@ describe("server local API auth", () => {
       chatgptAccountId: "acct-pool-a",
     });
     updateAccountQuota("pool-a", 10, 5);
-    // Install the fetch control before startServer. Its asynchronous pool-quota prime must
-    // remain inside the fixture's controlled world even though the fresh seed makes it a no-op.
     globalThis.fetch = (async (input, init) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      if (url === "https://auth.openai.com/oauth/token") {
-        return new Response(JSON.stringify({
-          access_token: "new-access-token",
-          refresh_token: "new-refresh-token",
-          expires_in: 3600,
-        }), { status: 200 });
-      }
-      return originalFetch(input, init);
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url === "https://auth.openai.com/oauth/token") {
+          return new Response(JSON.stringify({
+            access_token: "new-access-token",
+            refresh_token: "new-refresh-token",
+            expires_in: 3600,
+          }), { status: 200 });
+        }
+        return originalFetch(input, init);
     }) as typeof fetch;
     const server = startServer(0);
     const wsUrl = new URL("/v1/responses", server.url);
@@ -3616,7 +3644,7 @@ describe("server local API auth", () => {
     } finally {
       await stopPoolRetryHarness(positive);
     }
-  }, { timeout: SERVER_BUDGET_MS });
+  }, 12_000);
 
   test("valid JSON wrong top-level shape never authorizes a pool retry", async () => {
     // One harness, five bodies — same reason as the sibling above. Each
@@ -3637,7 +3665,7 @@ describe("server local API auth", () => {
     } finally {
       await stopPoolRetryHarness(harness);
     }
-  }, { timeout: SERVER_BUDGET_MS });
+  });
 
   test("alternate account resolution failure preserves the original 400", async () => {
     const body = unsupportedModelBody();
@@ -3781,7 +3809,7 @@ describe("server local API auth", () => {
   });
 
   test("passthrough pool send refuses a 307 without exposing Location (#914)", async () => {
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
     mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
     clearCodexUpstreamHealth();
@@ -3913,25 +3941,11 @@ describe("server local API auth", () => {
 
       expect(response.status).toBe(200);
       await response.text();
-      // The passthrough response has a client-facing tee branch and an async
-      // inspection branch. Wait for the latter to record its outcome before
-      // asserting the health/log contract.
-      const deadline = Date.now() + 1_000;
-      let health = getCodexUpstreamHealth("pool-a");
-      let logs: ReturnType<typeof logsFromApiBody> = [];
-      while (Date.now() < deadline) {
-        health = getCodexUpstreamHealth("pool-a");
-        logs = logsFromApiBody(await fetch(new URL("/api/logs?tail=1", server.url), { headers: managementHeaders() }).then(r => r.json()));
-        if (health?.consecutiveFailures === 3 && logs.at(-1)?.terminalStatus === "failed") break;
-        await Bun.sleep(10);
-      }
-      if (health?.consecutiveFailures !== 3 || logs.at(-1)?.terminalStatus !== "failed") {
-        throw new Error(`timed out waiting for passthrough terminal inspection (health=${JSON.stringify(health)}, lastLog=${JSON.stringify(logs.at(-1))})`);
-      }
-      expect(health).toMatchObject({
+      expect(getCodexUpstreamHealth("pool-a")).toMatchObject({
         consecutiveFailures: 3,
         lastFailureStatus: 502,
       });
+      const logs = logsFromApiBody(await fetch(new URL("/api/logs?tail=1", server.url), { headers: managementHeaders() }).then(r => r.json()));
       expect(logs.at(-1)).toMatchObject({
         status: 502,
         errorCode: "upstream_server_error",

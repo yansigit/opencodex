@@ -92,8 +92,8 @@ describe("google-aistudio provider registration & instructions", () => {
     const parsed = JSON.parse(readFileSync(saved, "utf-8"));
     expect(parsed.selectedProject).toBe("project-xyz-999");
     expect(parsed.windowId).toBe("window-abc-123");
-    expect(parsed.cookies.length).toBe(3);
-    expect(parsed.cookies[2].path).toBe("/aistudio");
+    expect(parsed.cookies.length).toBe(2);
+    expect(parsed.cookies.some((cookie: { path?: string }) => cookie.path === "/aistudio")).toBe(false);
   });
 });
 

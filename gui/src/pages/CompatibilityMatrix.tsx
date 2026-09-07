@@ -19,7 +19,6 @@ import {
   buildMatrixRows,
   formatAsOf,
   shortSubjectId,
-  subjectSuggestions,
   verdictQueryFromFilters,
   type ArtifactStatus,
   type CompatibilityVerdict,
@@ -441,9 +440,13 @@ export default function CompatibilityMatrix({ apiBase, active = true, onCountCha
     { value: "", label: t("lab.filter.all") },
     ...COMPATIBILITY_VERDICTS.map(verdict => ({ value: verdict, label: t(VERDICT_LABEL[verdict]) })),
   ];
-  const subjectOptions = surface.data
-    ? subjectSuggestions(surface.data.subjects, allVerdicts)
-    : [];
+  const subjectOptions = [
+    { value: "", label: t("lab.filter.all") },
+    ...(surface.data?.subjects ?? []).map(subject => ({
+      value: subject.subjectId,
+      label: `${shortSubjectId(subject.subjectId)} · ${subject.subjectKind}`,
+    })),
+  ];
 
   if (surface.state.showSkeleton) return <DataSurfaceSkeleton label={t("lab.loading")} rows={5} />;
 
@@ -499,22 +502,14 @@ export default function CompatibilityMatrix({ apiBase, active = true, onCountCha
               </div>
               <div className="lab-filter-field">
                 <label htmlFor="lab-filter-subject">{t("lab.filter.subject")}</label>
-                <input
+                <Select
                   id="lab-filter-subject"
-                  type="search"
                   value={filters.subjectQuery}
-                  list="lab-subject-suggestions"
-                  onChange={event => updateFilters(current => ({ ...current, subjectQuery: event.currentTarget.value }))}
+                  options={subjectOptions}
+                  onChange={value => updateFilters(current => ({ ...current, subjectQuery: value }))}
+                  label={t("lab.filter.subject")}
+                  portal={false}
                 />
-                <datalist id="lab-subject-suggestions">
-                  {subjectOptions.map(subject => (
-                    <option
-                      key={subject.subjectId}
-                      value={subject.subjectId}
-                      label={subject.subjectKind || labSupplement(locale, "subjectKindUnknown")}
-                    />
-                  ))}
-                </datalist>
               </div>
             </div>
 

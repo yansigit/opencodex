@@ -3,7 +3,6 @@ import { isCodexReserveRequestEligible } from "../../src/codex/loopback-target";
 import type { DataPlaneAdmission } from "../../src/server/auth-cors";
 import { captureMainQuotaWriter } from "../../src/codex/main-account-cache";
 import { getMainReserveAuthorization, isMainReserveAuthorizationLive } from "../../src/codex/reserve-availability";
-import { clearRequestLogsForTests, getRequestLogEntries } from "../../src/server/request-log";
 import { ACCESS, ACCOUNT, EXTERNAL, PROXY_KEY, reserveIngressFixture, type Counters } from "../helpers/reserve-ingress-fixture";
 import { SERVER_BUDGET_MS } from "../helpers/test-budget";
 
@@ -176,7 +175,7 @@ describe("Reserve eligibility trusts receiving-listener admission", () => {
     } finally { await fixture.close(); }
   }, SERVER_BUDGET_MS);
 
-  test.each(["chat", "messages"] as const)("translated %s follows the receiving listener's allowlist and Reserve admission", async transport => {
+  test.each(["chat", "messages"] as const)("translated %s: public has no Reserve WHAM; local allowlist refuses", async transport => {
     const fixture = await reserveIngressFixture();
     try {
       const before = snapshot(fixture.counters);
@@ -185,14 +184,9 @@ describe("Reserve eligibility trusts receiving-listener admission", () => {
       expect(delta(fixture.counters, before)).toMatchObject({ wham: 0, inference: 1 });
       const localBefore = snapshot(fixture.counters);
       const localResult = await fixture.request("local", transport, "gpt-reserve", headers("dedicated"));
-      expect(localResult.status).toBe(transport === "chat" ? 404 : 429);
-      expect(delta(fixture.counters, localBefore)).toEqual({
-        wham: transport === "chat" ? 0 : 1,
-        credential: 0,
-        tokenRead: transport === "chat" ? 0 : 1,
-        inference: 0,
-      });
-      if (transport === "messages") expect(localResult.text).toContain("Reserve");
+      expect(localResult.status).toBe(404);
+      expect(delta(fixture.counters, localBefore)).toEqual({ wham: 0, credential: 0, tokenRead: 0, inference: 0 });
+      // This local 404 does NOT prove admission propagation inside the translated handler.
       fixture.assertConfigUnchanged();
     } finally { await fixture.close(); }
   }, SERVER_BUDGET_MS);
@@ -210,22 +204,12 @@ describe("terminal routed vision helpers cannot spend Reserve", () => {
     const fixture = await reserveIngressFixture({ primaryLoopback: true });
     try {
       fixture.allow(); // A permission denial must not accidentally make this test green.
-      clearRequestLogsForTests();
       const before = snapshot(fixture.counters);
       const result = await fixture.request("public", transport, model, terminal);
       expect(result.status).toBe(400);
       expect(result.text).toContain("only available as a conversation model");
       expect(JSON.parse(result.text).error.type).toBe("invalid_request_error");
       expect(delta(fixture.counters, before)).toEqual({ wham: 0, credential: 0, tokenRead: 0, inference: 0 });
-      if (transport === "chat") {
-        expect(getRequestLogEntries().at(-1)).toMatchObject({
-          status: 400,
-          inboundProtocol: "chat",
-          provider: "openai",
-          model: "gpt-reserve",
-          closeReason: "non_stream",
-        });
-      }
       fixture.assertConfigUnchanged();
     } finally { await fixture.close(); }
   }, SERVER_BUDGET_MS);

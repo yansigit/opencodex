@@ -220,7 +220,11 @@ async function handleAdd(args: string[]): Promise<void> {
     config.providers[name] = next;
     if (setDefault) config.defaultProvider = name;
     validateProviderConfig(config);
-    return { changed: JSON.stringify(existingProvider) !== JSON.stringify(next) || (setDefault && config.defaultProvider === name), value: { provider: next, defaultProvider: config.defaultProvider } };
+    return {
+      changed: JSON.stringify(existingProvider) !== JSON.stringify(next)
+        || (setDefault && config.defaultProvider === name),
+      value: { provider: next, defaultProvider: config.defaultProvider },
+    };
   });
   provConfig = saved.provider;
 
@@ -302,7 +306,10 @@ function handleRemove(args: string[]): void {
     delete config.providers[name];
     const droppedCustomModels = dropProviderCustomModels(config, name);
     validateProviderConfig(config);
-    return { changed: true, value: { droppedCustomModels, providers: Object.keys(config.providers), defaultProvider: config.defaultProvider } };
+    return {
+      changed: true,
+      value: { droppedCustomModels, providers: Object.keys(config.providers), defaultProvider: config.defaultProvider },
+    };
   });
   const { droppedCustomModels } = saved;
 

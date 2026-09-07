@@ -3,12 +3,25 @@ import WebKit
 import AppKit
 
 let fileManager = FileManager.default
-let sessionFile = fileManager.homeDirectoryForCurrentUser
-    .appendingPathComponent(".opencodex", isDirectory: true)
-    .appendingPathComponent("aistudio-session.json")
+
+let args = CommandLine.arguments
+guard args.contains("--login"),
+      let outputFlag = args.firstIndex(of: "--session-output"),
+      args.indices.contains(outputFlag + 1) else {
+    fputs("Usage: aistudio-login --login --session-output <absolute-path>\n", stderr)
+    exit(1)
+}
+let sessionOutput = args[outputFlag + 1]
+guard NSString(string: sessionOutput).isAbsolutePath else {
+    fputs("Session output path must be absolute\n", stderr)
+    exit(1)
+}
+let sessionFile = URL(fileURLWithPath: sessionOutput).standardizedFileURL
 
 func writeSecureSession(_ data: Data, to url: URL) throws {
-    try fileManager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let directory = url.deletingLastPathComponent()
+    try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+    try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
     try data.write(to: url, options: [.atomic])
     try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
 }
@@ -19,6 +32,33 @@ private let allowedNavigationHosts = [
     "clients6.google.com",
     "alkalimakersuite-pa.clients6.google.com",
 ]
+private let aiStudioCookieHost = "alkalimakersuite-pa.clients6.google.com"
+private let aiStudioCookiePaths = [
+    "/v1internal:generateContent",
+    "/v1internal:streamGenerateContent",
+]
+
+func cookieDomainMatchesAiStudio(_ cookie: HTTPCookie) -> Bool {
+    let rawDomain = cookie.domain.lowercased()
+    let domain = rawDomain.hasPrefix(".") ? String(rawDomain.dropFirst()) : rawDomain
+    if rawDomain.hasPrefix(".") {
+        return aiStudioCookieHost == domain || aiStudioCookieHost.hasSuffix(".\(domain)")
+    }
+    return aiStudioCookieHost == domain
+}
+
+func cookiePathMatchesAiStudio(_ cookiePath: String, requestPath: String) -> Bool {
+    if requestPath == cookiePath { return true }
+    guard requestPath.hasPrefix(cookiePath) else { return false }
+    if cookiePath.hasSuffix("/") { return true }
+    let boundary = requestPath.index(requestPath.startIndex, offsetBy: cookiePath.count)
+    return boundary < requestPath.endIndex && requestPath[boundary] == "/"
+}
+
+func isCookieScopedToAiStudioTarget(_ cookie: HTTPCookie) -> Bool {
+    cookieDomainMatchesAiStudio(cookie)
+        && aiStudioCookiePaths.contains { cookiePathMatchesAiStudio(cookie.path, requestPath: $0) }
+}
 
 func isAllowedNavigationHost(_ host: String?) -> Bool {
     guard let host else { return false }
@@ -103,9 +143,9 @@ final class LoginAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             let windowId = values["windowId"] as? String ?? ""
             webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
                 guard let self, !self.finished else { return }
-                let googleCookies = cookies.filter { $0.domain == "google.com" || $0.domain.hasSuffix(".google.com") }
-                guard googleCookies.contains(where: { $0.name == "SAPISID" }) else { return }
-                let cookieMaps: [[String: String]] = googleCookies.map { cMap in
+                let aiStudioCookies = cookies.filter(isCookieScopedToAiStudioTarget)
+                guard aiStudioCookies.contains(where: { $0.name == "SAPISID" }) else { return }
+                let cookieMaps: [[String: String]] = aiStudioCookies.map { cMap in
                     ["name": cMap.name, "value": cMap.value, "domain": cMap.domain, "path": cMap.path]
                 }
                 let session: [String: Any] = [
@@ -124,12 +164,6 @@ final class LoginAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             }
         }
     }
-}
-
-let args = CommandLine.arguments
-guard args.contains("--login") else {
-    fputs("Usage: aistudio-login --login\n", stderr)
-    exit(1)
 }
 
 let app = NSApplication.shared

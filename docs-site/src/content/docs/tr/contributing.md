@@ -11,7 +11,7 @@ aracının bulunması gerekir. Yayınlanan npm paketi kullanıcılar için kendi
 üzerinden çalışır.
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy    # geliştirme modunda proxy API
@@ -164,7 +164,7 @@ commit'leri belirtin.
 ## Proje bakımcıları
 
 Mevcut bakımcılar, sorumlulukları ve inceleme ile birleştirme politikası
-[`MAINTAINERS.md`](https://github.com/lidge-jun/opencodex/blob/main/MAINTAINERS.md)
+[`MAINTAINERS.md`](https://github.com/yansigit/opencodex/blob/main/MAINTAINERS.md)
 dosyasında belgelenmiştir. Depo ve güvenliğe duyarlı yollar için GitHub inceleme
 sahipliği `.github/CODEOWNERS` dosyasında bildirilmiştir.
 

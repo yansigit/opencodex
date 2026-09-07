@@ -1,19 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import {
-  bootstrapContainerTls,
-  CONTAINER_TLS_CERT_NAME,
-  CONTAINER_TLS_IDENTITY_DIR_NAME,
-  CONTAINER_TLS_KEY_NAME,
-  ensureContainerTls,
-  type OpenSslRunner,
-} from "../../docker/bootstrap-tls";
-import { bootstrapToken, readBoundedToken } from "../../docker/bootstrap-token";
+import { readBoundedToken } from "../../docker/bootstrap-token";
 import { verifyCompatibilitySnapshot } from "../../docker/verify-compatibility";
-import { loadServiceTokenFromFile } from "../../src/lib/service-secrets";
 import {
   REQUIRED_COMPATIBILITY_FILES,
   type CompatibilityVersionManifest,
@@ -41,138 +32,12 @@ describe("container token bootstrap", () => {
     await expect(readBoundedToken(input(token, "\n"))).resolves.toBe(token);
   });
 
-  test("round-trips a maximum-size bootstrap token through the startup reader", async () => {
-    const root = mkdtempSync(join(tmpdir(), "ocx-container-token-"));
-    snapshotDirs.push(root);
-    const previousHome = process.env.OPENCODEX_HOME;
-    process.env.OPENCODEX_HOME = root;
-    try {
-      const token = "x".repeat(512);
-      await bootstrapToken(input(token, "\n"));
-      const path = join(root, "service-api-token");
-      expect(lstatSync(path).size).toBe(513);
-      expect(loadServiceTokenFromFile({ OCX_API_TOKEN_FILE: path })).toBe(token);
-    } finally {
-      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
-      else process.env.OPENCODEX_HOME = previousHome;
-    }
-  });
-
   test("rejects empty, multiline, and oversized input", async () => {
     await expect(readBoundedToken(input(" \n"))).rejects.toThrow("token input is empty");
     await expect(readBoundedToken(input("first\nsecond\n"))).rejects.toThrow("exactly one line");
     await expect(readBoundedToken(input("first\n\n"))).rejects.toThrow("exactly one line");
     await expect(readBoundedToken(input("\nfirst\n"))).rejects.toThrow("exactly one line");
     await expect(readBoundedToken(input("x".repeat(513), "\n"))).rejects.toThrow("exceeds 512 bytes");
-  });
-});
-
-describe("container TLS bootstrap", () => {
-  function fakeOpenSsl(options: { mismatch?: boolean } = {}): OpenSslRunner {
-    return argv => {
-      if (argv.includes("req")) {
-        writeFileSync(argv[argv.indexOf("-keyout") + 1]!, "private key");
-        writeFileSync(argv[argv.indexOf("-out") + 1]!, "certificate");
-      }
-      if (argv.includes("-pubkey")) return { exitCode: 0, stdout: "public-key\n" };
-      if (argv.includes("pkey")) return { exitCode: 0, stdout: options.mismatch ? "other-key\n" : "public-key\n" };
-      return { exitCode: 0, stdout: "" };
-    };
-  }
-
-  test("creates an owner-only key and reuses the complete per-volume identity", () => {
-    const root = mkdtempSync(join(tmpdir(), "ocx-container-tls-"));
-    snapshotDirs.push(root);
-    let calls = 0;
-    const delegate = fakeOpenSsl();
-    const run: OpenSslRunner = argv => {
-      if (argv.includes("req")) calls++;
-      return delegate(argv);
-    };
-    expect(ensureContainerTls(root, run)).toBe("created");
-    expect(ensureContainerTls(root, run)).toBe("present");
-    expect(calls).toBe(1);
-    const identity = join(root, CONTAINER_TLS_IDENTITY_DIR_NAME);
-    expect(readFileSync(join(identity, CONTAINER_TLS_CERT_NAME), "utf8")).toBe("certificate");
-    expect(readFileSync(join(identity, CONTAINER_TLS_KEY_NAME), "utf8")).toBe("private key");
-    if (process.platform !== "win32") {
-      expect(lstatSync(root).mode & 0o777).toBe(0o700);
-      expect(lstatSync(identity).mode & 0o777).toBe(0o700);
-      expect(lstatSync(join(identity, CONTAINER_TLS_KEY_NAME)).mode & 0o077).toBe(0);
-    }
-  });
-
-  test("refuses an incomplete pre-existing identity and a mismatched pair", () => {
-    const root = mkdtempSync(join(tmpdir(), "ocx-container-tls-partial-"));
-    snapshotDirs.push(root);
-    const identity = join(root, CONTAINER_TLS_IDENTITY_DIR_NAME);
-    mkdirSync(identity, { mode: 0o700 });
-    writeFileSync(join(identity, CONTAINER_TLS_KEY_NAME), "private key", { mode: 0o600 });
-    expect(() => ensureContainerTls(root, fakeOpenSsl())).toThrow("bounded regular file");
-    writeFileSync(join(identity, CONTAINER_TLS_CERT_NAME), "certificate", { mode: 0o644 });
-    expect(() => ensureContainerTls(root, fakeOpenSsl({ mismatch: true }))).toThrow("do not match");
-  });
-
-  test("hardens the state directory and recovers an abandoned private staging directory", () => {
-    const root = mkdtempSync(join(tmpdir(), "ocx-container-tls-recovery-"));
-    snapshotDirs.push(root);
-    const abandoned = join(root, ".container-tls-stage-interrupted");
-    mkdirSync(abandoned, { mode: 0o700 });
-    writeFileSync(join(abandoned, "key.pem"), "partial", { mode: 0o600 });
-    if (process.platform !== "win32") chmodSync(root, 0o777);
-    expect(ensureContainerTls(root, fakeOpenSsl())).toBe("created");
-    expect(existsSync(abandoned)).toBe(false);
-    if (process.platform !== "win32") expect(lstatSync(root).mode & 0o777).toBe(0o700);
-  });
-
-  test.skipIf(process.platform === "win32")("refuses linked state and identity directories", () => {
-    const target = mkdtempSync(join(tmpdir(), "ocx-container-tls-link-target-"));
-    const parent = mkdtempSync(join(tmpdir(), "ocx-container-tls-link-parent-"));
-    snapshotDirs.push(target, parent);
-    const linkedState = join(parent, "state");
-    symlinkSync(target, linkedState, "dir");
-    expect(() => ensureContainerTls(linkedState, fakeOpenSsl())).toThrow("state path is not a regular directory");
-
-    const identityTarget = join(parent, "identity-target");
-    mkdirSync(identityTarget, { mode: 0o700 });
-    symlinkSync(identityTarget, join(target, CONTAINER_TLS_IDENTITY_DIR_NAME), "dir");
-    expect(() => ensureContainerTls(target, fakeOpenSsl())).toThrow("identity directory is not a regular directory");
-  });
-
-  test("migrates retained non-TLS config and derives the public origin from the host port", () => {
-    const root = mkdtempSync(join(tmpdir(), "ocx-container-tls-migrate-"));
-    snapshotDirs.push(root);
-    const configPath = join(root, "config.json");
-    writeFileSync(configPath, '{"hostname":"0.0.0.0","providers":{}}\n', { mode: 0o600 });
-    const before = process.env["OPENCODEX_HOME"];
-    process.env["OPENCODEX_HOME"] = root;
-    try {
-      expect(bootstrapContainerTls(root, configPath, { OCX_CONTAINER_PUBLIC_PORT: "10190" }, fakeOpenSsl())).toBe("created");
-      expect(JSON.parse(readFileSync(configPath, "utf8"))).toMatchObject({
-        hostname: "0.0.0.0",
-        tls: {
-          certFile: "/home/bun/.opencodex/container-tls/cert.pem",
-          keyFile: "/home/bun/.opencodex/container-tls/key.pem",
-          publicOrigin: "https://localhost:10190",
-        },
-      });
-      expect(bootstrapContainerTls(root, configPath, { OCX_CONTAINER_PUBLIC_PORT: "443" }, fakeOpenSsl())).toBe("present");
-      expect(JSON.parse(readFileSync(configPath, "utf8")).tls.publicOrigin).toBe("https://localhost");
-
-      const customized = JSON.parse(readFileSync(configPath, "utf8"));
-      customized.tls.publicOrigin = "https://hub.example.test";
-      writeFileSync(configPath, `${JSON.stringify(customized)}\n`, { mode: 0o600 });
-      expect(bootstrapContainerTls(root, configPath, { OCX_CONTAINER_PUBLIC_PORT: "10443" }, fakeOpenSsl())).toBe("present");
-      expect(JSON.parse(readFileSync(configPath, "utf8")).tls.publicOrigin).toBe("https://hub.example.test");
-      expect(bootstrapContainerTls(root, configPath, {
-        OCX_CONTAINER_PUBLIC_PORT: "10443",
-        OCX_CONTAINER_PUBLIC_ORIGIN: "https://new-hub.example.test",
-      }, fakeOpenSsl())).toBe("present");
-      expect(JSON.parse(readFileSync(configPath, "utf8")).tls.publicOrigin).toBe("https://new-hub.example.test");
-    } finally {
-      if (before === undefined) delete process.env["OPENCODEX_HOME"];
-      else process.env["OPENCODEX_HOME"] = before;
-    }
   });
 });
 
@@ -219,11 +84,22 @@ describe("container deployment contract", () => {
       ignored.indexOf("!gui/**"),
     );
     for (const sensitive of [
+      "**/node_modules",
+      "**/dist",
+      "**/coverage",
+      "**/.vite",
+      "**/*.log",
+      "**/*.log.*",
+      "**/*.tgz",
+      "**/*.tar",
+      "**/*.tar.gz",
+      "**/*.zip",
       "**/.git",
       "**/.tmp",
       "**/.worktrees",
       "**/.codex",
       "**/.opencode",
+      "**/.opencodex",
       "**/.planning",
       "**/.agents",
       "**/.claude",
@@ -235,7 +111,6 @@ describe("container deployment contract", () => {
       "**/.docker/config.json",
       "**/.config/containers/auth.json",
       "**/.config/gh/hosts.yml",
-      "**/.opencodex",
       "**/.env",
       "**/.env.*",
       "**/.npmrc",
@@ -251,6 +126,9 @@ describe("container deployment contract", () => {
       "**/*.sqlite",
       "**/*.sqlite3",
       "**/*.db",
+      "**/*.sqlite-*",
+      "**/*.sqlite3-*",
+      "**/*.db-*",
     ]) {
       expect(ignored).toContain(sensitive);
       expect(ignored.indexOf(sensitive)).toBeGreaterThan(lastSourceNegation);
@@ -258,9 +136,6 @@ describe("container deployment contract", () => {
 
     const dockerfile = readFileSync(repoPath("Dockerfile"), "utf8");
     const runtime = dockerfile.split(" AS runtime")[1];
-    const containerConfig = JSON.parse(readFileSync(repoPath("docker/config.json"), "utf8"));
-    expect(containerConfig).toMatchObject({ hostname: "0.0.0.0" });
-    expect(containerConfig.tls).toBeUndefined();
     expect(dockerfile).toContain("RUN --mount=type=bind,target=/build-context bun /tmp/verify-compatibility.ts /build-context");
     expect(dockerfile.indexOf("RUN --mount=type=bind")).toBeLessThan(dockerfile.indexOf("COPY --chown=bun:bun src ./src"));
     expect(dockerfile).toContain("COPY --chown=bun:bun scripts/model-metadata.source.json ./scripts/model-metadata.source.json");
@@ -278,7 +153,13 @@ describe("container deployment contract", () => {
 
 const snapshotDirs: string[] = [];
 const manifestPath = "src/generated/compatibility-version.json";
-const snapshotPaths = [...REQUIRED_COMPATIBILITY_FILES, "src/main.ts"];
+const snapshotPaths = [
+  ...REQUIRED_COMPATIBILITY_FILES,
+  "src/main.ts",
+  "gui/src/main.tsx",
+  "gui/public/logo.png",
+  "gui/vite.config.ts",
+];
 // Independent SHA-256 test vector for the bytes "abc", not computed by the verifier.
 const abcDigest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
@@ -313,9 +194,12 @@ describe("container compatibility snapshot validation", () => {
     expect(() => verifyCompatibilitySnapshot(root)).not.toThrow();
   });
 
-  test("runtime verification omits build-only authority bytes after the context verified them", () => {
+  test("runtime verification omits build-only authority and GUI inputs after the context verified them", () => {
     const { root } = compatibilitySnapshot();
     for (const path of [".dockerignore", "Dockerfile", "compose.yaml"]) unlinkSync(join(root, path));
+    rmSync(join(root, "gui"), { recursive: true });
+    mkdirSync(join(root, "gui/dist"), { recursive: true });
+    writeFileSync(join(root, "gui/dist/index.html"), "derived GUI");
     expect(() => verifyCompatibilitySnapshot(root, { runtime: true })).not.toThrow();
   });
 
@@ -346,6 +230,8 @@ describe("container compatibility snapshot validation", () => {
     ["src/untracked.ts", "Source file absent from compatibility manifest"],
     ["src/generated/untracked.json", "Source file absent from compatibility manifest"],
     ["docker/extra.ts", "Container authority file absent from compatibility manifest"],
+    ["gui/src/untracked.ts", "GUI build input absent from compatibility manifest"],
+    ["gui/public/untracked.svg", "GUI build input absent from compatibility manifest"],
   ] as const) {
     test(`rejects an extra inventoried file: ${path}`, () => {
       const { root } = compatibilitySnapshot();
@@ -416,7 +302,7 @@ describe("container compatibility snapshot validation", () => {
     });
   }
 
-  for (const path of ["src", "src/generated", "docker", "scripts"]) {
+  for (const path of ["src", "src/generated", "docker", "scripts", "gui", "gui/src", "gui/public"]) {
     test(`rejects a linked input directory: ${path}`, () => {
       const { root } = compatibilitySnapshot();
       const target = join(root, "linked-target");

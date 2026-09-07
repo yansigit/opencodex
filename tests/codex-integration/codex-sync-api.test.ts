@@ -17,7 +17,6 @@ const TEST_CODEX_HOME = join(TEST_DIR, "codex");
 const TEST_OCX_HOME = join(TEST_DIR, "ocx");
 const TEST_HOME = join(TEST_DIR, "home");
 const repoRoot = resolveRepoRoot();
-const CHILD_TIMEOUT_MS = SPAWN_BUDGET_MS - 5_000;
 const COMPETING_OFF_REAP_MS = 5_000;
 const COMPETING_OFF_BOOT_MS = SPAWN_BUDGET_MS - COMPETING_OFF_REAP_MS;
 const COMPETING_OFF_CHILD_MS = 2 * COMPETING_OFF_BOOT_MS + COMPETING_OFF_REAP_MS;
@@ -205,8 +204,6 @@ describe("GUI/CLI Codex sync backend", () => {
         OPENCODEX_HOME: TEST_OCX_HOME,
       }),
       encoding: "utf8",
-      timeout: CHILD_TIMEOUT_MS,
-      killSignal: "SIGKILL",
     });
 
     expect(child.status).toBe(0);
@@ -214,7 +211,7 @@ describe("GUI/CLI Codex sync backend", () => {
     expect(readFileSync(configPath, "utf8")).toBe(before);
     expect(existsSync(profilePath)).toBe(false);
     expect(existsSync(journalPath)).toBe(false);
-  }, SPAWN_BUDGET_MS);
+  });
 
   test("returns a policy skip without touching the catalog or config", async () => {
     let refreshed = false;
@@ -544,8 +541,6 @@ describe("GUI/CLI Codex sync backend", () => {
       cwd: resolveRepoRoot(),
       env: childEnv({ CODEX_HOME: TEST_CODEX_HOME, OPENCODEX_HOME: ocxHome }),
       encoding: "utf8",
-      timeout: CHILD_TIMEOUT_MS,
-      killSignal: "SIGKILL",
     });
 
     expect(child.status).toBe(0);
@@ -558,7 +553,7 @@ describe("GUI/CLI Codex sync backend", () => {
     expect(payload.body.error).toBe(payload.body.message);
     expect(payload.body.error).toContain("inspect");
     expect(payload.body.error).toContain(join(TEST_CODEX_HOME, "config.toml"));
-  }, SPAWN_BUDGET_MS);
+  });
 
   test("skips catalog refresh before preserving an external provider", async () => {
     let refreshed = false;

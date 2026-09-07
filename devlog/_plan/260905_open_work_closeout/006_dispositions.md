@@ -95,3 +95,4 @@ LAND_AS_IS 7 · LAND_WITH_FIX 13 · REIMPLEMENT 5 · IMPLEMENT 2 · SUPERSEDED 6
   carry branch chosen (030).
 - Sandbox-red verifiers (EADDRINUSE on `Bun.serve({port:0})`, missing `gui/node_modules`) are
   hosted-CI-only and must not be read as regressions (020, 040).
+

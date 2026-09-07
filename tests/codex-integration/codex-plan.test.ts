@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
@@ -15,11 +15,10 @@ import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-let TEST_DIR = "";
-let TEST_CODEX_HOME = "";
+let testDir = "";
+let testCodexHome = "";
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
-
 const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function chatgptPlanJwt(plan: string, accountId = "acct"): string {
@@ -35,15 +34,13 @@ function chatgptPlanJwt(plan: string, accountId = "acct"): string {
 beforeEach(() => {
   previousOpencodexHome = process.env.OPENCODEX_HOME;
   previousCodexHome = process.env.CODEX_HOME;
-  // These tests exercise plan persistence, not Windows ACL behavior. Stub both runners because
-  // config hardening uses the async seam while some paths still use the synchronous one.
   setIcaclsRunnerForTests(() => ICACLS_OK);
   setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-  TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-codex-plan-"));
-  TEST_CODEX_HOME = mkdtempSync(join(tmpdir(), "ocx-codex-plan-codex-"));
-  mkdirSync(TEST_CODEX_HOME, { recursive: true });
-  process.env.OPENCODEX_HOME = TEST_DIR;
-  process.env.CODEX_HOME = TEST_CODEX_HOME;
+  testDir = mkdtempSync(join(tmpdir(), "ocx-codex-plan-"));
+  testCodexHome = mkdtempSync(join(tmpdir(), "ocx-codex-plan-codex-"));
+  mkdirSync(testCodexHome, { recursive: true });
+  process.env.OPENCODEX_HOME = testDir;
+  process.env.CODEX_HOME = testCodexHome;
   setMainAccountPlan(null);
   resetJwtPlanNotesForTests();
 });
@@ -58,10 +55,8 @@ afterEach(async () => {
   else process.env.OPENCODEX_HOME = previousOpencodexHome;
   if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = previousCodexHome;
-  if (TEST_DIR && existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
-  if (TEST_CODEX_HOME && existsSync(TEST_CODEX_HOME)) removeTreeWithRetry(TEST_CODEX_HOME);
-  TEST_DIR = "";
-  TEST_CODEX_HOME = "";
+  if (testDir) removeTreeWithRetry(testDir);
+  if (testCodexHome) removeTreeWithRetry(testCodexHome);
 });
 
 describe("extractChatgptPlanType", () => {
@@ -130,7 +125,7 @@ describe("reconcileCodexPlansFromTokens", () => {
 
 describe("getMainAccountPlan JWT fallback", () => {
   test("reads chatgpt_plan_type from auth.json when WHAM has not cached a plan (#1989)", () => {
-    writeFileSync(join(TEST_CODEX_HOME, "auth.json"), JSON.stringify({
+    writeFileSync(join(testCodexHome, "auth.json"), JSON.stringify({
       tokens: {
         access_token: chatgptPlanJwt("pro", "acct-main-jwt"),
         account_id: "acct-main-jwt",

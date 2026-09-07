@@ -42,3 +42,4 @@ node plugins/codexclaw/skills/qa/scripts/validate-evidence.mjs   .codexclaw/evid
 QA가 띄운 모든 것에 각각 정리 증거를 남긴다: 프록시 PID, 포트, tmux 세션,
 임시 디렉터리. `lsof -i :<port>` 비어 있음, `ps` 확인, 파일 부재 확인.
 아무것도 안 띄웠으면 "무엇을 확인했는지"와 함께 그렇게 적는다.
+

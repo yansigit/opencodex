@@ -179,7 +179,7 @@ test("image and ignore policy freeze dependencies and exclude host state", () =>
   expect(entrypoint.indexOf('writeFileSync("/app/.ocx-write-test"')).toBeLessThan(entrypoint.indexOf('const workspace = "/tmp/ocx-test-workspace"'));
   expect(entrypoint).not.toContain('await run("/app", ["run", "test"])');
   expect(entrypoint).not.toContain('await run("/app/integrations/replit-gateway", ["run", "test"])');
-  for (const pattern of ["**/.git", "**/.worktrees", "**/.tmp", "**/.codex", "**/.opencode", "**/.opencodex", "**/.planning", "**/.agents", "**/.claude", "**/.cursor", "**/.windsurf", "**/.ssh", "**/.gnupg", "**/.aws", "**/.docker/config.json", "**/.config/containers/auth.json", "**/.config/gh/hosts.yml", "**/.env", "**/.env.*", "**/.npmrc", "**/.netrc", "**/.pypirc", "**/auth.json", "**/credentials.json", "**/node_modules", "**/dist", "**/coverage", "**/*.log", "**/*.log.*", "**/*.tgz", "**/*.tar", "**/*.tar.gz", "**/*.zip", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/*.jks", "**/*.sqlite", "**/*.sqlite3", "**/*.db", "**/*.sqlite-*", "**/*.sqlite3-*", "**/*.db-*"]) expect(ignored).toContain(pattern);
+  for (const pattern of ["**/.git", "**/.worktrees", "**/.tmp", "**/.codex", "**/.opencode", "**/.opencodex", "**/.planning", "**/.agents", "**/.claude", "**/.cursor", "**/.windsurf", "**/.ssh", "**/.gnupg", "**/.aws", "**/.docker/config.json", "**/.config/containers/auth.json", "**/.config/gh/hosts.yml", "**/.env", "**/.env.*", "**/.npmrc", "**/.netrc", "**/.pypirc", "**/auth.json", "**/credentials.json", "**/node_modules", "**/dist", "**/coverage", "**/.vite", "**/*.log", "**/*.log.*", "**/*.tgz", "**/*.tar", "**/*.tar.gz", "**/*.zip", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/*.jks", "**/*.sqlite", "**/*.sqlite3", "**/*.db", "**/*.sqlite-*", "**/*.sqlite3-*", "**/*.db-*"]) expect(ignored).toContain(pattern);
   expect(ignored).toContain("!tests/fixtures/network-tls-test-cert.pem");
   expect(ignored).toContain("!tests/fixtures/network-tls-test-key.pem");
   expect(ignored.indexOf("!tests/fixtures/network-tls-test-cert.pem")).toBeGreaterThan(ignored.indexOf("**/*.pem"));
@@ -213,6 +213,7 @@ test("ignore policies exclude nested credentials and state from allowed subtrees
     "docker/local/secrets.tar.gz",
     "gui/local/coverage/report.json",
     "docker/local/dist/bundle.js",
+    "gui/local/.vite/deps/chunk.js",
   ];
   for (const { file, fixtureIncluded } of contexts) {
     const rules = readFileSync(join(ROOT, file), "utf8").split(/\r?\n/);

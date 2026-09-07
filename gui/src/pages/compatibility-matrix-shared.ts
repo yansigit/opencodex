@@ -149,7 +149,7 @@ export type MatrixRow = {
   byLayer: Record<EvidenceLayer, VerdictDto[]>;
 };
 
-/** UI filter state. subjectQuery is an exact subject id entered in the subject search. */
+/** UI filter state. subjectQuery is an exact subject id selected from the subject picker. */
 export type VerdictFilters = {
   layer: EvidenceLayer | "";
   verdict: CompatibilityVerdict | "";
@@ -163,8 +163,6 @@ export type VerdictQueryFilters = {
   subjectId?: string;
   suiteId?: string;
 };
-
-const MAX_SUBJECT_SUGGESTIONS = 50;
 
 export function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -346,25 +344,6 @@ export function buildMatrixRows(verdicts: VerdictDto[], subjects: SubjectListIte
     row.byLayer[verdict.evidenceLayer].push(verdict);
   }
   return [...bySubject.values()].sort((a, b) => a.subjectId.localeCompare(b.subjectId));
-}
-
-export function subjectSuggestions(
-  subjects: readonly SubjectListItemDto[],
-  verdicts: readonly VerdictDto[],
-): SubjectListItemDto[] {
-  const subjectById = new Map(subjects.map(subject => [subject.subjectId, subject]));
-  const suggestions = new Map<string, SubjectListItemDto>();
-  for (const verdict of verdicts) {
-    if (suggestions.size >= MAX_SUBJECT_SUGGESTIONS) break;
-    if (!suggestions.has(verdict.subjectId)) {
-      suggestions.set(verdict.subjectId, subjectById.get(verdict.subjectId) ?? { subjectId: verdict.subjectId, subjectKind: "" });
-    }
-  }
-  for (const subject of subjects) {
-    if (suggestions.size >= MAX_SUBJECT_SUGGESTIONS) break;
-    if (!suggestions.has(subject.subjectId)) suggestions.set(subject.subjectId, subject);
-  }
-  return [...suggestions.values()].slice(0, MAX_SUBJECT_SUGGESTIONS);
 }
 
 /** Client-side helper retained for tests and future local-only filters. */

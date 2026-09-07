@@ -12,6 +12,7 @@ const Claude = lazy(() => import("./Claude"));
 const Grok = lazy(() => import("./Grok"));
 const CursorIntegrationPage = lazy(() => import("./integrations/CursorIntegrationPage"));
 const IntegrationsOverview = lazy(() => import("./integrations/IntegrationsOverview"));
+const AsideProfilesPage = lazy(() => import("./integrations/AsideProfilesPage"));
 const FileIntegrationPage = lazy(() => import("./integrations/FileIntegrationPage"));
 
 function readIntegrationTab(hash = window.location.hash): IntegrationTab {
@@ -177,7 +178,7 @@ export default function Integrations({ apiBase, machineApiBase = apiBase, connec
             aria-labelledby={tabDomId(definition.id)}
             hidden={!active}
           >
-                        <ErrorBoundary
+            <ErrorBoundary
               pageName={t(definition.labelKey)}
               title={t("errorBoundary.title")}
               message={t("errorBoundary.message")}
@@ -207,7 +208,7 @@ export default function Integrations({ apiBase, machineApiBase = apiBase, connec
                 {definition.id === "grok" && <Grok apiBase={apiBase} active={active} />}
                 {definition.id === "cursor" && <CursorIntegrationPage apiBase={apiBase} active={active} />}
                 {FILE_CLIENTS.has(definition.id as FileIntegrationClientId) && (
-                  <FileIntegrationPage
+                  definition.id === "aside" ? <AsideProfilesPage apiBase={apiBase} active={active} /> : <FileIntegrationPage
                     apiBase={apiBase}
                     client={definition.id as FileIntegrationClientId}
                     active={active}

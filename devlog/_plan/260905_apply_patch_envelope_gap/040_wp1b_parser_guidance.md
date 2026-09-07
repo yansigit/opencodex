@@ -74,3 +74,4 @@ genuinely different call paths sound like one.
 If this is ever revisited, the defensible version is a short ASCII mention of
 `*** End Patch` that does not import the nested-exec strictness, together with an update
 to `tests/responses-parser.test.ts:111`. That is not justified now.
+

@@ -6,26 +6,20 @@ export function effectiveProviderAlias(
   provider?: Pick<OcxProviderConfig, "alias">,
   config?: Pick<OcxConfig, "providers">,
 ): string | undefined {
+  if (provider && provider.alias !== undefined) {
+    const trimmed = provider.alias.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
   const regAlias = PROVIDER_REGISTRY.find(e => e.id === providerName)?.alias;
-  const configuredAlias = provider?.alias;
-  const candidate = configuredAlias !== undefined ? configuredAlias.trim() : regAlias;
-  if (!candidate) return undefined;
+  if (!regAlias) return undefined;
   if (config?.providers) {
-    const lower = candidate.toLowerCase();
-    const candidateIsRegistryDefault = regAlias?.toLowerCase() === lower;
-    const claimedByOther = Object.entries(config.providers).some(([name, p]) => {
-      if (name === providerName) return false;
-      if (name.toLowerCase() === lower) return true;
-      if (typeof p.alias !== "string" || p.alias.trim().toLowerCase() !== lower) return false;
-      const otherRegistryAlias = PROVIDER_REGISTRY.find(entry => entry.id === name)?.alias;
-      const otherClaimIsRegistryDefault = otherRegistryAlias?.toLowerCase() === lower;
-      // A custom alias outranks a materialized registry default. Equal-priority claims are
-      // suppressed so direct/legacy configs cannot make routing depend on insertion order.
-      return candidateIsRegistryDefault || !otherClaimIsRegistryDefault;
-    });
+    const lower = regAlias.toLowerCase();
+    const claimedByOther = Object.entries(config.providers).some(([name, p]) =>
+      name !== providerName && typeof p.alias === "string" && p.alias.trim().toLowerCase() === lower
+    );
     if (claimedByOther) return undefined;
   }
-  return candidate;
+  return regAlias;
 }
 
 export function effectiveProviderAliasDecision(

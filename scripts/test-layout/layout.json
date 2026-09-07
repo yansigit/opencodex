@@ -11,7 +11,7 @@
   "domains": {
     "providers": {
       "match": [
-        "^(?:aside|auto|azure|baseten|chutes|cline|command|commandcode|context|cyber|deepinfra|deepseek|digitalocean|exa|featherless|forward|hyperbolic|kimi|meta|mimo|minimax|moonshot|muse|new|nous|novita|nscale|nvidia|opencode|openrouter|qwen38|sambanova|umans|vercel|zcode|zhipu)-"
+        "^(?:aside(?!-profile)|auto|azure|baseten|chutes|cline|command|commandcode|context|cyber|deepinfra|deepseek|digitalocean|exa|featherless|forward|hyperbolic|kimi|meta|mimo|minimax|moonshot|muse|new|nous|novita|nscale|nvidia|opencode|openrouter|qwen38|sambanova|umans|vercel|zcode|zhipu)-"
       ],
       "children": {
         "cursor": [
@@ -38,6 +38,7 @@
     },
     "server": {
       "match": [
+        "^aside-profiles-routes",
         "^(?:account|alias|bounded|cancel|config\\.test\\.ts|consume|data|debug|error|errors|fetch|health|input|loopback|management|memory|outbound|owned|passive|port|ports\\.test\\.ts|proxy|relay|response|retry|server|session|sidebar|stream|v2)-"
       ]
     },
@@ -107,6 +108,7 @@
     },
     "clients": {
       "match": [
+        "^aside-profile(?!s-routes)",
         "^(?:desktop|omp|pi|prime|remote|sync)-"
       ]
     },
@@ -1342,7 +1344,23 @@
     "zhipu-bigmodel-provider.test.ts": "providers",
     "zz-ci-api-usage-isolation.test.ts": "ci-workflows",
     "zz-ci-storage-policy-isolation.test.ts": "ci-workflows",
-    "zz-pr-coderabbit-readiness-revalidation.test.ts": "ci-workflows"
+    "zz-pr-coderabbit-readiness-revalidation.test.ts": "ci-workflows",
+    "aside-profiles-routes.test.ts": "server",
+    "aside-profiles.test.ts": "clients",
+    "aside-profile-paths.test.ts": "clients",
+    "aside-profile-sync-owner.test.ts": "clients",
+    "catalog-full-picker-order.test.ts": "codex-integration",
+    "catalog-go-exact-efforts.test.ts": "codex-integration",
+    "claude-desktop-discovery.test.ts": "claude-integration",
+    "claude-desktop-remote-hub.test.ts": "claude-integration",
+    "client-injection-guard.test.ts": "codex-integration",
+    "client-lifecycle-lock.test.ts": "clients",
+    "desktop-remote-store.test.ts": "clients",
+    "lab-fabric-producer-deadline.test.ts": "lab",
+    "opencode-go-agent-messages.test.ts": "providers",
+    "responses-function-tool-repair.test.ts": "responses",
+    "server-agent-task-recovery-replay.test.ts": "server",
+    "server-google-antigravity-oauth-401-replay.test.ts": "server"
   },
   "migrated": [
     "adapters",

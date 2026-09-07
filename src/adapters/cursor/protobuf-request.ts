@@ -87,32 +87,7 @@ export const CURSOR_INVOCATION_ARGUMENTS_BYTE_LIMIT = 2 * 1024;
  * results already stored in history blobs are visible without a ResumeAction.
  */
 export const CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT =
-  "Continue: the requested tool results are provided in the conversation history above. Follow the active system and developer instructions exactly, including any required output format. Answer the user request or proceed with the next step directly without repeating status summaries, greetings, or a tool invocation that already completed successfully.";
-
-const CURSOR_EXTERNAL_INSTRUCTION_REMINDER_BYTE_LIMIT = 2 * 1024;
-
-export function externalToolContinuationText(
-  rawMessages?: readonly OcxMessage[],
-  system?: readonly string[],
-): string {
-  const joinedInstructions = system?.join("\n\n").trim() ?? "";
-  const instructionReminder = joinedInstructions
-    && encoder.encode(joinedInstructions).byteLength <= CURSOR_EXTERNAL_INSTRUCTION_REMINDER_BYTE_LIMIT
-      ? `\n\nActive instructions:\n${joinedInstructions}`
-      : "";
-  const last = rawMessages?.at(-1);
-  if (last?.role === "toolResult") {
-    const raw = typeof last.content === "string" ? last.content : JSON.stringify(last.content ?? "");
-    const trimmed = raw.trim();
-    if (
-      (last.toolName?.includes("list_agents") || last.toolName?.includes("search"))
-      && (trimmed === "[]" || trimmed === "" || trimmed === "{}" || trimmed === "null")
-    ) {
-      return `${CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT} If a prior discovery or list tool returned empty results (e.g. no sub-agents currently active), proceed directly with your next concrete action using available tools.${instructionReminder}`;
-    }
-  }
-  return CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT + instructionReminder;
-}
+  "Continue: the requested tool results are provided in the conversation history above.";
 
 function jsonBlob(value: unknown): { data: Uint8Array; serialized: string } {
   const serialized = JSON.stringify(value);
@@ -1429,7 +1404,7 @@ function buildPreparedCursorRunRequest(
     ? "userMessageAction"
     : "resumeAction";
   let actionText = externalToolContinuation
-    ? (request.echoRetryContinuationText ?? externalToolContinuationText(request.rawMessages, request.system))
+    ? (request.echoRetryContinuationText ?? CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT)
     : request.echoRetryContinuationText
       ? `${text}\n\n[correction] ${request.echoRetryContinuationText}`
       : text;
@@ -1628,8 +1603,6 @@ function buildPreparedCursorRunRequest(
       readPaths: [],
     });
   }
-  // Hoisted out of the mcp_tools spread below so the estimate can read the same
-  // filtered definitions the wire carries. Both helpers are pure.
   // The envelope is measured HERE, on the final root set, and nowhere else.
   //
   // `rootPromptMessages` cannot do it: it sees only a checkpoint suffix, so 192 checkpoint roots

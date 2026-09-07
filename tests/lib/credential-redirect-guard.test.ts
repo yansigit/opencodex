@@ -79,7 +79,7 @@ describe("credential-bearing sidecars refuse to follow redirects", () => {
   // drift apart silently.
   test("the shared credential-bearing fetch helper still applies manual redirects", async () => {
     const helper = await Bun.file(new URL("../../src/server/responses/fetch-helpers.ts", import.meta.url)).text();
-    expect(helper).toContain('redirect: "manual"');
+    expect(helper).toContain('redirect: "manual" as const');
 
     // And the callers still opt in for forward auth rather than dropping the flag.
     const compact = await Bun.file(new URL("../../src/server/responses/compact.ts", import.meta.url)).text();

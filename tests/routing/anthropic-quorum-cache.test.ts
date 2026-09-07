@@ -48,19 +48,16 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  try {
-    clearAnthropicAccountPoolState();
-    forgetAnthropicFailoverQuorum();
-    await flushConfigDirHardeningForTests();
-  } finally {
-    readSpy?.mockRestore();
-    readSpy = undefined;
-    setIcaclsRunnerForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
-    if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
-    else process.env.OPENCODEX_HOME = originalHome;
-    removeTreeWithRetry(home);
-  }
+  readSpy?.mockRestore();
+  readSpy = undefined;
+  clearAnthropicAccountPoolState();
+  forgetAnthropicFailoverQuorum();
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+  if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = originalHome;
+  removeTreeWithRetry(home);
 });
 
 async function seed(count: number, offset = 0): Promise<string[]> {

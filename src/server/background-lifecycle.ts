@@ -46,33 +46,10 @@ export type ServerBackgroundLifecycleLease = {
 const owners: LeaseOwner[] = [];
 let processLoops: ProcessLoops | null = null;
 let cleanupInProgress = false;
-let quotaResetActivationGeneration = 0;
 
 function setLivePolicyOwner(applyPolicy: PolicyApply | null): void {
   setStorageCleanupPolicyLiveSink(applyPolicy);
   setStorageCleanupPolicyJobLiveApply(applyPolicy);
-}
-
-function activateQuotaResetSinkForProcessLoops(): void {
-  const generation = ++quotaResetActivationGeneration;
-  void import("../quota/reset-activation")
-    .then(activation => activation.syncQuotaResetActivation(
-      () => generation === quotaResetActivationGeneration && processLoops !== null,
-    ))
-    .catch(() => {
-      // The next poll tick retries.
-    });
-}
-
-function deactivateQuotaResetSinkForProcessLoops(): void {
-  const generation = ++quotaResetActivationGeneration;
-  void import("../quota/reset-activation")
-    .then(activation => activation.deactivateQuotaResetActivation(
-      () => generation === quotaResetActivationGeneration && processLoops === null,
-    ))
-    .catch(() => {
-      // Best-effort during rollback/shutdown; a later activation re-evaluates config.
-    });
 }
 
 function startProcessLoops(applyPolicy: PolicyApply): ProcessLoops {
@@ -97,14 +74,17 @@ function startProcessLoops(applyPolicy: PolicyApply): ProcessLoops {
     // minutes by default. Without this, an enabled install would observe nothing for its first
     // quarter hour — including the live request path, which is gated on the sink existing.
     // Fire-and-forget: startup must not await an optional subsystem.
-    activateQuotaResetSinkForProcessLoops();
+    void import("../quota/reset-activation")
+      .then(activation => activation.syncQuotaResetActivation())
+      .catch(() => {
+        // The next poll tick retries.
+      });
     return { memoryWatchdog, stateStoreSweeper };
   } catch (error) {
     memoryWatchdog?.stop();
     stateStoreSweeper?.stop();
     stopStorageCleanupScheduler();
     stopQuotaResetPoller();
-    deactivateQuotaResetSinkForProcessLoops();
     setLivePolicyOwner(null);
     throw error;
   }
@@ -117,7 +97,6 @@ function stopProcessLoops(): void {
   loops?.stateStoreSweeper.stop();
   stopStorageCleanupScheduler();
   stopQuotaResetPoller();
-  deactivateQuotaResetSinkForProcessLoops();
   setLivePolicyOwner(null);
 }
 

@@ -1,21 +1,24 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
 import { createServer } from "node:net";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { claudeClientStatusView, isConnectionRefused, isUncleanExitEvidence, proxyHealthFailureReason, resolveStatusPid, selectListenTarget, type CliStatusJson } from "../../src/cli/status";
+import { isConnectionRefused, isUncleanExitEvidence, proxyHealthFailureReason, resolveStatusPid, selectListenTarget } from "../../src/cli/status";
 import * as statusFacade from "../../src/cli/status";
 import * as statusProbes from "../../src/cli/status-probes";
 import { findDeadPid } from "../helpers/dead-pid";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { STORE_BUDGET_MS } from "../helpers/test-budget";
+import { inspectClientRotationRecoveryGate, readClientConnectionState } from "../../src/client/state";
+import * as lifecycleLock from "../../src/client/lifecycle-lock";
+import { writeDesktopDisconnectReceipt } from "../../src/claude/desktop-remote-store";
 
 const repoRoot = dirname(fileURLToPath(new URL("../../package.json", import.meta.url)));
 const cliPath = join(repoRoot, "src", "cli", "index.ts");
-type ClaudeClientFieldIsOptional = {} extends Pick<CliStatusJson, "claudeClient"> ? true : false;
-const claudeClientFieldIsOptional: ClaudeClientFieldIsOptional = true;
 
 function runStatusJson(opencodexHome: string) {
   return spawnSync(process.execPath, [cliPath, "status", "--json"], {
@@ -25,20 +28,132 @@ function runStatusJson(opencodexHome: string) {
   });
 }
 
-describe("CLI status JSON", () => {
-  test("Claude client field remains additive for TypeScript consumers", () => {
-    expect(claudeClientFieldIsOptional).toBe(true);
-  });
-  test("Claude client status view serializes each advisory state without probe text", () => {
-    for (const [stdout, expected] of [["2.1.201\n", "compatible"], ["2.1.200\n", "outdated"], ["bad", "unparseable"]] as const) {
-      const value = claudeClientStatusView({ versionProbe: () => ({ stdout, status: 0 }) });
-      expect(value.state).toBe(expected);
-      expect(JSON.stringify(value)).not.toContain("bad");
-    }
-    expect(claudeClientStatusView({ versionProbe: () => ({ error: { code: "ENOENT" } }) }).state).toBe("missing");
-    expect(claudeClientStatusView({ versionProbe: () => ({ error: new Error("secret output") }) }).state).toBe("timed-out");
-  });
+function withRecoveryStatusFixture(work: (fixture: {
+  home: string;
+  lockDeps: { lockPath: string };
+  tokenPath: string;
+  backupPath: string;
+  config: ReturnType<typeof recoveryStatusConfig>;
+  writeConfig: () => void;
+}) => void): void {
+  const home = mkdtempSync(join(tmpdir(), "ocx-status-recovery-"));
+  const previousHome = process.env.OPENCODEX_HOME;
+  const previousDesktop = process.env.OPENCODEX_CLAUDE_DESKTOP_CONFIG_DIR;
+  process.env.OPENCODEX_HOME = home;
+  process.env.OPENCODEX_CLAUDE_DESKTOP_CONFIG_DIR = join(home, "desktop");
+  const tokenPath = join(home, "service-api-token");
+  const config = recoveryStatusConfig();
+  const writeConfig = () => writeFileSync(join(home, "config.json"), JSON.stringify(config));
+  try {
+    writeConfig();
+    writeFileSync(tokenPath, "status-fixture-token", { mode: 0o600 });
+    work({ home, config, writeConfig, tokenPath, backupPath: `${tokenPath}.prev`,
+      lockDeps: { lockPath: join(home, "locks", "lifecycle.sqlite") } });
+  } finally {
+    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousHome;
+    if (previousDesktop === undefined) delete process.env.OPENCODEX_CLAUDE_DESKTOP_CONFIG_DIR;
+    else process.env.OPENCODEX_CLAUDE_DESKTOP_CONFIG_DIR = previousDesktop;
+    removeTreeWithRetry(home);
+  }
+}
 
+function recoveryStatusConfig() {
+  return {
+    port: 9, defaultProvider: "openai",
+    providers: { openai: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward" } },
+    runtimeRole: "client",
+    client: {
+      serverUrl: "https://hub.example.test", managementUrl: "https://hub.example.test",
+      managementTransport: "direct", selectedClients: ["claude"], tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
+      apiKeyId: "status-fixture", tokenFingerprint: createHash("sha256").update("status-fixture-token").digest("hex"),
+      protocolVersion: 1, connectedAt: "2026-09-06T00:00:00.000Z",
+    },
+  };
+}
+
+describe("status recovery inspection is read-only unless an orphan needs cleanup", () => {
+  test.each(["clean", "disconnected", "malformed", "pending", "unsafe-backup", "unsafe-receipt", "unsafe-desktop"])(
+    "%s observation creates neither lifecycle nor config database", scenario => {
+      withRecoveryStatusFixture(f => {
+        if (scenario === "disconnected") writeFileSync(join(f.home, "config.json"), JSON.stringify({ port: 9, providers: {} }));
+        if (scenario === "malformed") writeFileSync(join(f.home, "config.json"), "{malformed");
+        if (scenario === "pending") {
+          Object.assign(f.config.client, { pendingOperation: {
+            kind: "rotate", rotationId: "fixture-rotation", newKeyIssuedAt: "2026-09-06T00:00:01.000Z", oldKeyBackupPath: f.backupPath,
+          } });
+          f.writeConfig();
+          writeFileSync(f.backupPath, "status-fixture-token", { mode: 0o600 });
+        }
+        if (scenario === "unsafe-backup") mkdirSync(f.backupPath);
+        if (scenario === "unsafe-receipt" || scenario === "unsafe-desktop") {
+          mkdirSync(join(f.home, "desktop-remote"), { mode: 0o700 });
+          writeFileSync(join(f.home, "desktop-remote", scenario === "unsafe-receipt" ? "disconnect.json" : "state.json"), "{bad", { mode: 0o600 });
+          writeFileSync(f.backupPath, "status-fixture-token", { mode: 0o600 });
+        }
+        const before = readdirSync(f.home).sort();
+        const configBefore = readFileSync(join(f.home, "config.json"), "utf8");
+        const result = inspectClientRotationRecoveryGate(undefined, f.lockDeps);
+        expect(result.kind).toBe(scenario === "pending" || scenario === "unsafe-desktop" ? "recovery-required"
+          : scenario.startsWith("unsafe-") ? "unsafe" : "clean");
+        expect(readdirSync(f.home).sort()).toEqual(before);
+        expect(readFileSync(join(f.home, "config.json"), "utf8")).toBe(configBefore);
+        expect(existsSync(join(f.home, "locks"))).toBe(false);
+        expect(existsSync(join(f.home, "config-mutation.sqlite"))).toBe(false);
+        if (scenario === "pending" || scenario.startsWith("unsafe-")) expect(existsSync(f.backupPath)).toBe(true);
+      });
+    },
+  );
+
+  test("only a proven orphan takes L/C; a held L preserves its backup", () => {
+    withRecoveryStatusFixture(f => {
+      writeFileSync(f.backupPath, "status-fixture-token", { mode: 0o600 });
+      lifecycleLock.withClientLifecycleSync(() => {
+        expect(inspectClientRotationRecoveryGate(undefined, f.lockDeps)).toEqual({ kind: "recovery-required", reason: "client_lifecycle_busy" });
+        expect(existsSync(f.backupPath)).toBe(true);
+        expect(existsSync(join(f.home, "config-mutation.sqlite"))).toBe(false);
+      }, f.lockDeps);
+      expect(inspectClientRotationRecoveryGate(undefined, f.lockDeps)).toEqual({ kind: "orphan-cleaned" });
+      expect(existsSync(f.backupPath)).toBe(false);
+      expect(existsSync(join(f.home, "config-mutation.sqlite"))).toBe(true);
+      expect(inspectClientRotationRecoveryGate(undefined, f.lockDeps)).toEqual({ kind: "clean" });
+    });
+  }, STORE_BUDGET_MS);
+
+  test.each(["rotation", "token-changed", "disconnect", "backup-removed"])(
+    "revalidates %s after acquiring L rather than using the initial observation", transition => {
+      withRecoveryStatusFixture(f => {
+        writeFileSync(f.backupPath, "status-fixture-token", { mode: 0o600 });
+        const stale = readClientConnectionState();
+        const actualLock = lifecycleLock.withClientLifecycleSync;
+        let entered = false;
+        const lock = spyOn(lifecycleLock, "withClientLifecycleSync").mockImplementation((work, deps) => actualLock(held => {
+          entered = true;
+          if (transition === "rotation") {
+            Object.assign(f.config.client, { pendingOperation: {
+              kind: "rotate", rotationId: "fixture-rotation", newKeyIssuedAt: "2026-09-06T00:00:01.000Z", oldKeyBackupPath: f.backupPath,
+            } });
+            f.writeConfig();
+          } else if (transition === "token-changed") writeFileSync(f.tokenPath, "replacement-fixture-token");
+          else if (transition === "backup-removed") unlinkSync(f.backupPath);
+          else writeDesktopDisconnectReceipt(held, null, {
+            version: 1, owner: { serverUrl: f.config.client.serverUrl, apiKeyId: f.config.client.apiKeyId, connectedAt: f.config.client.connectedAt },
+            tokenFingerprint: f.config.client.tokenFingerprint, keepCatalog: false, phase: "prepared",
+          });
+          return work(held);
+        }, deps));
+        try {
+          const result = inspectClientRotationRecoveryGate(stale, f.lockDeps);
+          expect(entered).toBe(true);
+          expect(result.kind).toBe(transition === "token-changed" ? "unsafe" : transition === "backup-removed" ? "clean" : "recovery-required");
+          expect(existsSync(f.backupPath)).toBe(transition !== "backup-removed");
+        } finally { lock.mockRestore(); }
+      });
+    }, STORE_BUDGET_MS,
+  );
+});
+
+describe("CLI status JSON", () => {
   test("status facade preserves probe identity without exposing its health helper", () => {
     expect(statusFacade.proxyHealthFailureReason).toBe(statusProbes.proxyHealthFailureReason);
     expect(statusFacade.isConnectionRefused).toBe(statusProbes.isConnectionRefused);
@@ -119,7 +234,6 @@ describe("CLI status JSON", () => {
           warning?: unknown;
           action?: unknown;
         };
-        claudeClient?: { state?: unknown; version?: unknown; source?: unknown };
       };
 
       expect(parsed.schemaVersion).toBe(1);
@@ -169,9 +283,6 @@ describe("CLI status JSON", () => {
         state: "disconnected",
         credentialFile: "missing",
       });
-      expect(["compatible", "outdated", "missing", "timed-out", "unparseable"]).toContain(parsed.claudeClient?.state);
-      expect(parsed.claudeClient?.version === null || typeof parsed.claudeClient?.version === "string").toBe(true);
-      expect(["path", "windows-executable", "windows-command-shim"]).toContain(parsed.claudeClient?.source);
 
       const serialized = JSON.stringify(parsed).toLowerCase();
       for (const forbidden of ["apikey", "sk-test-secret", "token", "refreshtoken", "authorization", "email"]) {
@@ -506,14 +617,9 @@ describe("unclean prior exit evidence", () => {
  * drive the real CLI, so the field has to travel from disk to output.
  */
 describe("status reports stale process records end to end", () => {
-  // The Linux hosted runner can legitimately assign low PIDs such as 4242 while this
-  // parallel batch runs. INT_MAX is accepted by process.kill but cannot name a live
-  // process on the supported platforms, so these end-to-end fixtures stay deterministic.
-  const deadPid = 2_147_483_647;
-
   const seed = (home: string, opts: { pid?: number; runtime?: boolean; port: number }): void => {
     writeFileSync(join(home, "config.json"), JSON.stringify({ port: opts.port, codexAutoStart: false }), "utf8");
-    const pid = opts.pid ?? deadPid;
+    const pid = opts.pid ?? findDeadPid();
     if (opts.pid !== 0) writeFileSync(join(home, "ocx.pid"), String(pid), "utf8");
     if (opts.runtime) {
       writeFileSync(join(home, "runtime-port.json"), JSON.stringify({ pid, port: opts.port, hostname: "127.0.0.1" }), "utf8");
@@ -600,18 +706,11 @@ describe("status reports stale process records end to end", () => {
     const occupied = createServer(socket => { socket.destroy(); });
     await new Promise<void>(resolve => { occupied.listen(0, "127.0.0.1", () => resolve()); });
     const occupiedPort = (occupied.address() as AddressInfo).port;
-    // Allocate while the configured port is still held so Windows cannot recycle
-    // that same ephemeral port for the recorded-port probe.
-    const probe = createServer();
-    await new Promise<void>(resolve => { probe.listen(0, "127.0.0.1", () => resolve()); });
-    const recordedPort = (probe.address() as AddressInfo).port;
-    expect(recordedPort).not.toBe(occupiedPort);
-    await new Promise<void>(resolve => { probe.close(() => resolve()); });
     try {
-      const pid = deadPid;
+      const pid = findDeadPid();
       writeFileSync(join(home, "config.json"), JSON.stringify({ port: occupiedPort, codexAutoStart: false }), "utf8");
       writeFileSync(join(home, "ocx.pid"), String(pid), "utf8");
-      writeFileSync(join(home, "runtime-port.json"), JSON.stringify({ pid, port: recordedPort, hostname: "127.0.0.1" }), "utf8");
+      writeFileSync(join(home, "runtime-port.json"), JSON.stringify({ pid, port: freePort, hostname: "127.0.0.1" }), "utf8");
 
       const parsed = JSON.parse(runStatusJson(home).stdout) as { proxy?: { staleProcessState?: unknown } };
       expect(parsed.proxy?.staleProcessState).toBe(true);

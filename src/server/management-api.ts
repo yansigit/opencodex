@@ -10,6 +10,7 @@ import {
   multiAgentGuidanceEnabled,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
+  saveConfigPreservingClaudeCode,
 } from "../config";
 import {
   clearLoginState,
@@ -74,8 +75,8 @@ import { handleIntegrationRoutes } from "./management/integration-routes";
 import { handleNativeIntegrationRoutes } from "./management/native-integration-routes";
 import { handleCursorIntegrationRoutes } from "./management/cursor-integration-routes";
 import type { ManagementContext } from "./management/context";
-import type { ManagementPrincipal, ManagementSessionControl } from "./management-auth";
 import { ManagementPersistenceError, MissingManagementPersistenceError } from "./management/context";
+import type { ManagementPrincipal, ManagementSessionControl } from "./management-auth";
 export type { ManagementApiDeps } from "./management/context";
 import { fetchAllModels } from "./management/shared";
 import { CatalogGatherBusyError } from "../codex/catalog/provider-fetch";

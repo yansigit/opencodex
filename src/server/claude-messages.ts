@@ -10,10 +10,11 @@ import { FORWARD_HEADERS } from "../adapters/openai-responses";
 import { sseFieldValue } from "../lib/sse-decoder";
 import { enforceAnthropicImageLimits, sniffImageDimensions } from "../adapters/anthropic-image-guard";
 import { normalizeAnthropicImages } from "../adapters/anthropic-image-normalize";
-import { AnthropicRequestError, anthropicToResponsesTranslation, extractOcxEffortDirective, extractOcxRouteDirective, verifyAndExtractDirectives, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
+import { AnthropicRequestError, DesktopModelMappingUnavailableError, anthropicToResponsesTranslation, extractOcxEffortDirective, extractOcxRouteDirective, verifyAndExtractDirectives, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
 import { getOrCreateDirectiveSigningKey } from "../claude/directive-key";
 import { isAllowedLegacyDirective } from "../claude/agents-inject";
-import { resolveDesktop3pAlias } from "../claude/desktop-3p";
+import { isKnownDesktop3pModelId, resolveDesktop3pAlias } from "../claude/desktop-3p";
+import { resolveAlias, claudeCodeNativeAlias } from "../claude/alias";
 import { recordDesktopRequest } from "../claude/desktop-health";
 import { stripOneMillionMarker } from "../claude/context-windows";
 import { annotateClaudeInboundDecision, captureClaudeInbound } from "../claude/inbound-debug";
@@ -116,15 +117,35 @@ function isLocalPolicyRoutingError(
  * resolve a synthetic one.
  */
 function decodeClaudeFastSelector(raw: string, cc?: OcxConfig["claudeCode"]): string {
-  const exact = resolveInboundModel(raw, cc);
-  if (exact !== raw || !raw.endsWith("--fast")) return exact;
-  const bare = raw.slice(0, -"--fast".length);
+  const model = stripOneMillionMarker(raw);
+  const exact = resolveInboundModel(model, cc);
+  if (!model.endsWith("--fast")) return exact;
+  const fullMapping = cc?.modelMap?.[model];
+  if (resolveAlias(model) || isKnownDesktop3pModelId(model)
+    || (typeof fullMapping === "string" && fullMapping.length > 0)) return exact;
+  const bare = model.slice(0, -"--fast".length);
+  // A classifier fallback is not an exact match for a registered Desktop base.
+  // Preserve established non-Desktop fallback behavior while decoding that base first.
+  if (exact !== model && !resolveDesktop3pAlias(bare)) return exact;
   const decodedBase = resolveInboundModel(bare, cc);
   return decodedBase === bare ? exact : `${decodedBase}--fast`;
 }
 
+/** Restore the reversible Fable picker alias before Anthropic passthrough checks. */
+function decodeFablePickerAlias(raw: string, cc?: OcxConfig["claudeCode"]): string {
+  const decoded = resolveInboundModel(raw, cc);
+  if (!decoded.startsWith("claude-fable-")) return raw;
+  return claudeCodeNativeAlias(decoded) === raw ? decoded : raw;
+}
+
 function isRec(v: unknown): v is Rec {
   return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+function desktopMappingUnavailableResponse(error: DesktopModelMappingUnavailableError): Response {
+  const response = anthropicErrorResponse(503, error.message, "api_error", "desktop_model_mapping_unavailable");
+  response.headers.set("Retry-After", "1");
+  return response;
 }
 
 /** Resolve Claude-only sidecar overrides without mutating the shared server config. */
@@ -869,6 +890,9 @@ async function handleClaudeMessagesWithBudget(
       }
     }
     if (isRec(anthropicBody) && typeof anthropicBody.model === "string") {
+      anthropicBody.model = decodeFablePickerAlias(anthropicBody.model, config.claudeCode);
+    }
+    if (isRec(anthropicBody) && typeof anthropicBody.model === "string") {
       requestedModel = anthropicBody.model;
       // Decode for Fast only. A Claude alias is `claude-ocx-<provider>--<model>`, so it
       // already uses `--` as its own separator: stripping the marker off the RAW alias would
@@ -969,8 +993,10 @@ async function handleClaudeMessagesWithBudget(
     }
   } catch (err) {
     const overflow = isTranslatorBudgetExceededError(err);
-    const status = overflow ? 413 : err instanceof AnthropicRequestError ? 400 : 500;
+    const unavailable = err instanceof DesktopModelMappingUnavailableError;
+    const status = overflow ? 413 : unavailable ? 503 : err instanceof AnthropicRequestError ? 400 : 500;
     if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, status, { closeReason: "non_stream" });
+    if (unavailable) return desktopMappingUnavailableResponse(err);
     return anthropicErrorResponse(
       status,
       overflow ? "request translation buffer exceeded the safe limit" : err instanceof Error ? err.message : String(err),
@@ -1292,6 +1318,7 @@ export async function handleClaudeCountTokens(
   try {
     body = await readAnthropicBody(req, translatorBudget);
   } catch (err) {
+    if (err instanceof DesktopModelMappingUnavailableError) return desktopMappingUnavailableResponse(err);
     if (err instanceof AnthropicRequestError) return anthropicErrorResponse(400, err.message);
     if (isTranslatorBudgetExceededError(err)) {
       return anthropicErrorResponse(413, "request translation buffer exceeded the safe limit", "request_too_large", "translation_buffer_limit");
@@ -1305,6 +1332,7 @@ export async function handleClaudeCountTokens(
   if (typeof raw.model !== "string" || raw.model.length === 0) {
     return anthropicErrorResponse(400, "model is required");
   }
+  try {
   let model = raw.model;
   // Case-insensitive [1m] strip (audit 021 #7 — the CLI matches /\[1m\]/i).
   const stripped = stripOneMillionMarker(model);
@@ -1330,6 +1358,8 @@ export async function handleClaudeCountTokens(
     model = stripOneMillionMarker(directives.route);
     raw.model = model;
   }
+  model = decodeFablePickerAlias(model, config.claudeCode);
+  raw.model = model;
   // Fast-only count requests carry a synthetic selector but never parsed an effort row.
   // Normalize the identity before native passthrough or estimation; no tier is sent here.
   const countFastRow = parseFastOnlyRowId(
@@ -1372,4 +1402,9 @@ export async function handleClaudeCountTokens(
     status: 200,
     headers: { "Content-Type": "application/json" },
   });
+  } catch (error) {
+    if (error instanceof DesktopModelMappingUnavailableError) return desktopMappingUnavailableResponse(error);
+    if (error instanceof AnthropicRequestError) return anthropicErrorResponse(400, error.message);
+    throw error;
+  }
 }

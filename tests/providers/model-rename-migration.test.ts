@@ -151,15 +151,15 @@ describe("model rename startup persistence", () => {
     process.env.OPENCODEX_HOME = home;
   }
 
-  /** A saved config the renames actually rewrite, valid enough for loadConfig to accept. */
-  function persistableStale(): OcxConfig {
-    return { port: 10100, defaultProvider: "alibaba-token-plan-intl", ...staleConfig() } as OcxConfig;
-  }
-
   beforeEach(() => {
     setIcaclsRunnerForTests(() => ICACLS_OK);
     setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   });
+
+  /** A saved config the renames actually rewrite, valid enough for loadConfig to accept. */
+  function persistableStale(): OcxConfig {
+    return { port: 10100, defaultProvider: "alibaba-token-plan-intl", ...staleConfig() } as OcxConfig;
+  }
 
   afterEach(async () => {
     setPersistedConfigMutationBeforeCommitForTests(null);

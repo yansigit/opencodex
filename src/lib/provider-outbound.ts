@@ -7,7 +7,7 @@ import {
   resolvePublicAddresses,
 } from "./destination-policy";
 import { pinnedHttpGet, pinnedHttpPost } from "./pinned-http";
-import { effectiveProxyFor, noProxyMatches, proxyForUrl } from "./proxy-env";
+import { effectiveProxyFor, noProxyMatches, normalizeProxyHostname } from "./proxy-env";
 import { publicProviderBaseUrl } from "./provider-url";
 import { antigravityOAuthDestinationConfigError, isCanonicalAntigravityUrl, providerTlsFetch } from "./provider-tls-profile";
 import { waitForProviderRequestSlot } from "../providers/request-pacing";
@@ -15,7 +15,9 @@ import { testProviderFetch } from "./test-provider-fetch";
 
 type ProviderGetInit = Omit<RequestInit, "body" | "method" | "redirect">;
 type ProviderPostInit = ProviderGetInit & { body: string };
-type ProviderOutboundConfig = Pick<OcxProviderConfig, "baseUrl" | "allowPrivateNetwork"> & Partial<Pick<OcxProviderConfig, "adapter" | "authMode" | "googleMode" | "tlsProfile">>;
+type ProviderOutboundConfig = Pick<OcxProviderConfig, "baseUrl" | "allowPrivateNetwork">
+  & Partial<Pick<OcxProviderConfig, "adapter" | "authMode" | "googleMode" | "tlsProfile">>
+  & { fetch?: typeof globalThis.fetch };
 export interface ProviderOutboundDependencies {
   resolveAddresses?: typeof resolvePublicAddresses;
   pinnedGet?: typeof pinnedHttpGet;
@@ -74,13 +76,6 @@ function transparentFakeIpException(
   return isCanonicalUrl(name, url);
 }
 
-function normalizeProxyHostname(hostname: string): string {
-  const normalized = hostname.trim().toLowerCase().replace(/\.+$/, "");
-  return normalized.startsWith("[") && normalized.endsWith("]")
-    ? normalized.slice(1, -1)
-    : normalized;
-}
-
 function antigravityProfileFetch(
   name: string,
   provider: ProviderOutboundConfig,
@@ -126,13 +121,12 @@ function warnProxyDnsDegradationOnce(): void {
 export async function providerRedirectError(response: Response, requestUrl: string): Promise<string | null> {
   if (response.status < 300 || response.status >= 400) return null;
   try { await response.body?.cancel(); } catch { /* ignore cancellation failures */ }
-  return `provider at ${publicProviderBaseUrl(requestUrl)} returned ${response.status} redirect; configure the final provider URL directly`;
-}
-
-async function requireFinalProviderResponse(response: Response, requestUrl: string): Promise<Response> {
-  const redirectError = await providerRedirectError(response, requestUrl);
-  if (redirectError) throw new ProviderOutboundPolicyError(redirectError);
-  return response;
+  const location = response.headers.get("location");
+  let target = "the final upstream URL";
+  if (location) {
+    try { target = publicProviderBaseUrl(new URL(location, requestUrl).toString()); } catch { /* keep fallback */ }
+  }
+  return `provider returned ${response.status} redirect to ${target}; configure the final provider URL directly`;
 }
 
 const CREDENTIAL_HEADERS = new Set([
@@ -171,10 +165,16 @@ async function providerOutboundRequest(
   init: ProviderGetInit | ProviderPostInit,
   dependencies: ProviderOutboundDependencies = {},
 ): Promise<Response> {
-  const antigravityBaseError = antigravityOAuthDestinationConfigError(name, provider);
-  if (antigravityBaseError) throw new ProviderOutboundPolicyError(`provider ${name} ${antigravityBaseError}`);
-  if (name === "google-antigravity" && !isCanonicalAntigravityUrl(url)) {
-    throw new ProviderOutboundPolicyError("provider google-antigravity requires a canonical Antigravity HTTPS destination for OAuth");
+  const antigravityContract = provider.adapter === "google"
+    || provider.authMode === "oauth"
+    || provider.googleMode === "cloud-code-assist"
+    || provider.tlsProfile !== undefined;
+  if (antigravityContract) {
+    const antigravityBaseError = antigravityOAuthDestinationConfigError(name, provider);
+    if (antigravityBaseError) throw new ProviderOutboundPolicyError(`provider ${name} ${antigravityBaseError}`);
+    if (name === "google-antigravity" && !isCanonicalAntigravityUrl(url)) {
+      throw new ProviderOutboundPolicyError("provider google-antigravity requires a canonical Antigravity HTTPS destination for OAuth");
+    }
   }
   const postUrl = method === "POST" ? new URL(url) : undefined;
   if (postUrl?.protocol !== undefined && postUrl.protocol !== "https:") {
@@ -189,23 +189,16 @@ async function providerOutboundRequest(
       throw new ProviderOutboundPolicyError("credential-bearing provider GET URL must use HTTPS except for loopback");
     }
   }
+  const effectiveProxy = effectiveProxyFor(parsed);
+  const selectedProxy = noProxyMatches(parsed) ? null : effectiveProxy;
   const profiledFetch = antigravityProfileFetch(name, provider, url);
-  const fetchOverride = dependencies.fetch ?? testProviderFetch(provider) ?? profiledFetch;
+  const fetchOverride = dependencies.fetch ?? testProviderFetch(provider) ?? provider.fetch ?? profiledFetch;
   if (profiledFetch) {
-    // Keep the profiled executor behind the same pre-dispatch DNS boundary as
-    // the pinned path. A proxy owns peer selection, so match the existing
-    // providerOutbound proxy boundary and deliberately skip local resolution.
-    if (!proxyForUrl(url)) {
+    if (!selectedProxy) {
       const resolveAddresses = dependencies.resolveAddresses ?? resolvePublicAddresses;
-      await resolveAddresses(url, {
-        context: "provider URL",
-        allowPrivateNetwork: false,
-      });
+      await resolveAddresses(url, { context: "provider URL", allowPrivateNetwork: false });
     }
-    return requireFinalProviderResponse(
-      await fetchOverride!(url, { ...init, method, redirect: "manual" }),
-      url,
-    );
+    return fetchOverride!(url, { ...init, method, redirect: "manual" });
   }
   if (fetchOverride) {
     // A caller-owned executor cannot be peer-pinned here. This branch keeps literal/config
@@ -226,17 +219,12 @@ async function providerOutboundRequest(
       });
       if (destinationError) throw new ProviderOutboundPolicyError(destinationError);
     }
-    return requireFinalProviderResponse(
-      await fetchOverride(url, { ...init, method, redirect: "manual" }),
-      url,
-    );
+    return fetchOverride(url, { ...init, method, redirect: "manual" });
   }
   // Snapshot the scheme-matched proxy once, before the DNS await, so admission and transport
   // below reason about the same value. `null` here means "no proxy fetch would actually use",
   // even if some other proxy variable is set.
-  const effectiveProxy = effectiveProxyFor(parsed);
   const allowMihomoIpv6FakeIp = effectiveProxy !== null && !noProxyMatches(parsed);
-  const selectedProxy = noProxyMatches(parsed) ? null : effectiveProxy;
   const resolveAddresses = dependencies.resolveAddresses ?? resolvePublicAddresses;
   const pinnedGet = dependencies.pinnedGet ?? pinnedHttpGet;
   const pinnedPost = dependencies.pinnedPost ?? pinnedHttpPost;
@@ -278,20 +266,14 @@ async function providerOutboundRequest(
     if (!selectedProxy) throw error;
     warnProxyBoundaryOnce();
     warnProxyDnsDegradationOnce();
-    return requireFinalProviderResponse(
-      await globalThis.fetch(url, { ...init, method, redirect: "manual" }),
-      url,
-    );
+    return globalThis.fetch(url, { ...init, method, redirect: "manual" });
   }
   if (selectedProxy && !resolved.privateNetwork) {
     warnProxyBoundaryOnce();
     // When the Mihomo exception could have admitted an answer, pin the transport to the
     // proxy the admission assumed instead of letting fetch re-infer it from the environment.
-    const proxy = allowMihomoIpv6FakeIp ? effectiveProxy : undefined;
-    return requireFinalProviderResponse(
-      await globalThis.fetch(url, { ...init, method, redirect: "manual", ...(proxy ? { proxy } : {}) }),
-      url,
-    );
+    const proxy = allowMihomoIpv6FakeIp ? selectedProxy : undefined;
+    return globalThis.fetch(url, { ...init, method, redirect: "manual", ...(proxy ? { proxy } : {}) });
   }
   if (selectedProxy && resolved.privateNetwork) {
     const hostname = normalizeProxyHostname(parsed.hostname);
@@ -306,15 +288,9 @@ async function providerOutboundRequest(
   };
   const pinned = pickPinnedAddress(resolved.addresses);
   if (method === "POST") {
-    return requireFinalProviderResponse(
-      await pinnedPost(url, pinned, (init as ProviderPostInit).body, init.signal ?? undefined, requestOptions),
-      url,
-    );
+    return pinnedPost(url, pinned, (init as ProviderPostInit).body, init.signal ?? undefined, requestOptions);
   }
-  return requireFinalProviderResponse(
-    await pinnedGet(url, pinned, init.signal ?? undefined, requestOptions),
-    url,
-  );
+  return pinnedGet(url, pinned, init.signal ?? undefined, requestOptions);
 }
 
 export async function providerOutboundGet(

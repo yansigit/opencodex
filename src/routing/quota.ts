@@ -13,12 +13,11 @@
  */
 
 import {
-  CODEX_UNKNOWN_USAGE_SCORE,
   codexQuotaWindowForPlan,
   getAccountQuota,
+  isCodexQuotaExhausted,
   listAccountQuotas,
 } from "../codex/quota";
-import { computeCodexUsageScore } from "../codex/routing";
 import { getCachedProviderAccountQuota } from "../providers/quota";
 import type { RouteQuotaEvidence } from "./trace";
 
@@ -39,28 +38,33 @@ function codexAccountQuotaEvidence(accountId: string, plan?: string): RouteQuota
   const quota = getAccountQuota(accountId);
   if (!quota) return { known: false };
   const monthly = codexQuotaWindowForPlan(plan) === "monthly";
-  const maxPercent = computeCodexUsageScore(quota, plan);
+  const percents = [
+    ...(monthly ? [] : [quota.weeklyPercent]),
+    quota.monthlyPercent,
+    // The burst window is upstream-enforced independently of the governing window, so an
+    // account at 97% here has 3% headroom whatever its weekly figure says. This was invisible
+    // while the header parser misfiled 5h readings into weeklyPercent - routing saw the burst
+    // by accident. Once that is fixed, omitting it here reports 88% headroom for an account
+    // that is one request away from a 429. computeCodexUsageScore already folds it in.
+    quota.shortPercent,
+  ].filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  const maxPercent = percents.length > 0 ? Math.max(...percents) : undefined;
   // Credits-only snapshots prove neither usage nor exhaustion. Unknown must not
   // become healthy capacity merely because a cache row exists.
-  if (maxPercent === CODEX_UNKNOWN_USAGE_SCORE) return { known: false };
-  const resetAtMs = (value: number | undefined): number | undefined => {
-    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
-    return value < 10_000_000_000 ? value * 1000 : value;
-  };
+  if (maxPercent === undefined) return { known: false };
   const resets = [
     ...(monthly ? [] : [quota.weeklyResetAt]),
     quota.monthlyResetAt,
     // Pair the reset with the window that can actually gate the next request: a burst-limited
     // account recovers in hours, and reporting a distant weekly reset would defer a retry that
     // is already safe.
-    quota.fiveHourResetAt ?? quota.shortResetAt,
-  ].map(resetAtMs)
-    .filter((value): value is number => value !== undefined)
+    quota.shortResetAt,
+  ].filter((value): value is number => typeof value === "number" && Number.isFinite(value))
     .filter(value => value > Date.now());
   return {
     known: true,
     headroom: Math.max(0, Math.min(1, 1 - maxPercent / 100)),
-    exhausted: maxPercent >= 100,
+    exhausted: isCodexQuotaExhausted(quota, plan),
     ...(resets.length > 0 ? { resetAtMs: Math.min(...resets) } : {}),
     source: "codex-pool",
   };

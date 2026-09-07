@@ -80,3 +80,4 @@ Constraint: `rg -n 'downloads.cursor.com|cursor-local/' docs-site/src/content/do
   if the docs build is too slow locally, CI's docs job is the gate and this becomes human review).
 - `bun run privacy:scan` exit 0.
 - Both PRs open, correct bases, CI green on head SHA.
+

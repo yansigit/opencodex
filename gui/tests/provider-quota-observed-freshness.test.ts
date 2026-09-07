@@ -67,7 +67,7 @@ test("the marker round-trips, because the cache is re-validated through the same
 
   // What writeSessionListCache/readSessionListCache do to it between page loads.
   const rehydrated = freshQuotaReportRecord(
-    JSON.parse(JSON.stringify(fromResponse)) as unknown,
+    structuredClone(fromResponse),
     NOW + 60 * 60_000,
   );
   expect(rehydrated?.["meta-muse"]).toBeDefined();

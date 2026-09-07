@@ -13,7 +13,6 @@ import { join } from "node:path";
 import {
   extractSectionsForTests,
   probePromptText,
-  promptTextProbeCloseEventsForTests,
   promptTextProbeSpawnAttemptsForTests,
   resetPromptTextProbeForTests,
   setPromptTextProbeCloseBarrierForTests,
@@ -183,19 +182,10 @@ describe("prompt probe process lifecycle", () => {
   test("the last cancellation drains the exact child before another command starts", async () => {
     const dir = root();
     const pidPath = join(dir, "pid.txt");
-    const replacementStartPath = join(dir, "replacement-started.txt");
     const overlapPath = join(dir, "overlap.txt");
     const hangingSource = [
       `require("node:fs").writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));`,
-      // The overlap oracle is identity-bound: only this exact process writes
-      // the marker, and only while it is still alive when the replacement has
-      // already started. A reclaimed numeric PID can never fabricate it, so
-      // PID reuse cannot fake an overlap (the old kill(pid, 0) check did).
-      "setInterval(() => {",
-      `  if (!require("node:fs").existsSync(${JSON.stringify(replacementStartPath)})) return;`,
-      `  require("node:fs").writeFileSync(${JSON.stringify(overlapPath)}, "overlap");`,
-      "  process.exit(0);",
-      "}, 10);",
+      "setInterval(() => {}, 1_000);",
     ].join("");
     setPromptTextProbeCommandForTests({ binary: process.execPath, args: ["-e", hangingSource] });
     const controller = new AbortController();
@@ -208,7 +198,10 @@ describe("prompt probe process lifecycle", () => {
     expect((await hanging).detail).toBe("prompt probe cancelled");
 
     const replacementSource = [
-      `require("node:fs").writeFileSync(${JSON.stringify(replacementStartPath)}, String(process.pid));`,
+      `const fs = require("node:fs"); const pid = Number(fs.readFileSync(${JSON.stringify(pidPath)}, "utf8"));`,
+      "let priorProbeAlive = true;",
+      "try { process.kill(pid, 0); } catch { priorProbeAlive = false; }",
+      `if (priorProbeAlive) fs.writeFileSync(${JSON.stringify(overlapPath)}, "overlap");`,
       `process.stdout.write(${JSON.stringify(VALID_PROBE_OUTPUT)});`,
     ].join("");
     setPromptTextProbeCommandForTests({ binary: process.execPath, args: ["-e", replacementSource] });
@@ -223,21 +216,24 @@ describe("prompt probe process lifecycle", () => {
 
     expect(replacement.ok).toBe(true);
     expect(promptTextProbeSpawnAttemptsForTests()).toBe(1);
-    // Give the still-running child (if any) time to observe the replacement's
-    // start marker; the drained case cannot write it at all.
-    await Bun.sleep(50);
     expect(existsSync(overlapPath)).toBe(false);
+    await waitUntil(() => !isProcessAlive(pid), "cancelled child exit");
   });
 
   test("admission stays occupied between child exit and close handling", async () => {
+    const pidPath = join(root(), "exited-parent-pid.txt");
     let releaseClose!: () => void;
     setPromptTextProbeCloseBarrierForTests(new Promise<void>(resolve => { releaseClose = resolve; }));
     const delayedCloseSource = [
+      `const fs = require("node:fs");`,
+      `fs.writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));`,
       `process.stdout.write(${JSON.stringify(VALID_PROBE_OUTPUT)});`,
     ].join("");
     setPromptTextProbeCommandForTests({ binary: process.execPath, args: ["-e", delayedCloseSource] });
     const first = probePromptText(2_000);
-    await waitUntil(() => promptTextProbeCloseEventsForTests() === 1, "probe close event");
+    await waitUntil(() => existsSync(pidPath), "exit-close parent pid");
+    const pid = Number(readFileSync(pidPath, "utf8"));
+    await waitUntil(() => !isProcessAlive(pid), "probe parent exit");
 
     setPromptTextProbeCommandForTests({
       binary: process.execPath,

@@ -181,15 +181,38 @@ function catalogLimitNote(kept: readonly OcxTool[], omitted: readonly OcxTool[])
 }
 
 /**
- * Resolve a `cursor/<model>` selection + Codex reasoning effort to Cursor's requested model shape.
- * Most models encode effort in a flat id (`claude-4.6-opus-high`). Grok Fast is parameterized
- * instead: current Cursor clients send the matching Grok base id plus `effort` and `fast` parameters.
- * A fully-qualified id (one that is not a known effort base) passes through unchanged.
+ * True when this turn should take Cursor's fast variant.
+ *
+ * Reads the tier DECISION rather than the raw caller field so one authority owns precedence:
+ * `decideTier` has already applied config `fastMode`, the caller's `service_tier`, and the
+ * route's eligibility, so `fastMode: false` correctly suppresses a caller's Fast request.
+ * A `{kind:"set"}` decision on a Cursor route means canonical Fast survived that gate.
  */
 export function cursorFastRequested(parsed: OcxParsedRequest): boolean {
   return parsed.options.tierDecision?.kind === "set";
 }
 
+/**
+ * Whether the wire this request will carry expresses the fast variant, for tier telemetry.
+ *
+ * Recomputed from the same pure inputs the builder uses rather than read off a built
+ * request: `tierLogForRunTurn` runs BEFORE `runTurn` (server/responses/core.ts), and
+ * `createCursorRequest` is not pure — it mints conversation ids — so rebuilding there would
+ * report a request that was never sent.
+ */
+export function cursorRequestEmitsFastVariant(parsed: OcxParsedRequest): boolean {
+  if (!cursorFastRequested(parsed)) return false;
+  const model = normalizeCursorModelId(parsed.modelId, parsed.options.reasoning, true);
+  return model.modelId.endsWith("-fast")
+    || (model.requestedModelParameters ?? []).some(p => p.id === "fast" && p.value === "true");
+}
+
+/**
+ * Resolve a `cursor/<model>` selection + Codex reasoning effort to Cursor's requested model shape.
+ * Most models encode effort in a flat id (`claude-4.6-opus-high`). Grok Fast is parameterized
+ * instead: current Cursor clients send the matching Grok base id plus `effort` and `fast` parameters.
+ * A fully-qualified id (one that is not a known effort base) passes through unchanged.
+ */
 function normalizeCursorModelId(modelId: string, reasoning?: string, fast?: boolean): {
   modelId: string;
   requestedModelParameters?: readonly CursorRequestedModelParameter[];
@@ -216,30 +239,12 @@ function normalizeCursorModelId(modelId: string, reasoning?: string, fast?: bool
       ],
     };
   }
-  // Composer 2.5 requires an explicit standard-lane marker. Omitting this field is
-  // not equivalent to false on Cursor's wire contract, and the generic fast-option
-  // refactor must not silently move Composer conversations onto a fast variant.
-  if (id === "composer-2.5") {
-    return {
-      ...selection,
-      modelId: id,
-      requestedModelParameters: [{ id: "fast", value: "false" }],
-    };
-  }
   const resolved = resolveCursorSelection(id, reasoning, undefined, { fast });
   return {
     ...selection,
     ...(resolved.maxMode ? { maxMode: true } : {}),
     modelId: resolved.wireId,
   };
-}
-
-/** Whether the resolved Cursor wire selection explicitly requests a fast variant. */
-export function cursorRequestEmitsFastVariant(parsed: OcxParsedRequest): boolean {
-  if (!cursorFastRequested(parsed)) return false;
-  const model = normalizeCursorModelId(parsed.modelId, parsed.options.reasoning, true);
-  return model.modelId.endsWith("-fast")
-    || (model.requestedModelParameters ?? []).some(parameter => parameter.id === "fast" && parameter.value === "true");
 }
 
 function contentPartToText(part: OcxContentPart | OcxAssistantContentPart): string | undefined {

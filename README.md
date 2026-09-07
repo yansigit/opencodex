@@ -11,7 +11,7 @@ Two commands, and every one of them runs any LLM you point it at.</p>
 
 ```bash
 npm install -g @yansigit/opencodex
-ocx start        # proxy + dashboard on localhost:10100
+ocx start
 ```
 
 <table>
@@ -78,19 +78,33 @@ account while existing threads stay pinned to the account that started them.
 
 ## Quick start
 
-### For humans
+### Personal install
 
 ```bash
 npm install -g @yansigit/opencodex   # Node 22+; the Bun runtime is bundled automatically
-ocx start                            # or `ocx service` to run it in the background
+ocx start                         # proxy + dashboard on localhost:10100
 ```
 
-### Docker Compose
+Use `ocx service` to run it in the background.
+
+Open **http://localhost:10100** and configure everything in the web dashboard — add providers
+(40+ built-ins, or any OpenAI-compatible endpoint), pick models, manage accounts. `ocx gui`
+re-opens the dashboard at any time.
+It can also manage a **ChatGPT account pool** for Codex auth. Add multiple ChatGPT / Codex accounts,
+refresh their 5h / weekly / 30d quota in the dashboard. Under quota routing, new sessions can use
+the lowest-usage healthy account; round-robin and fill-first use their own policies. Existing Codex
+threads normally retain affinity to the account that started them, so long SSH, tmux, or
+mobile-connected sessions do not jump accounts mid-conversation — but quota re-evaluation, failover,
+account exclusion, affinity expiry, or 401/403 and 429 recovery can rebind them. Give the accounts a
+selection order when one of them — usually your Codex Desktop login — should only be reached for
+once the others are drained.
+
+<details>
+<summary>Docker Compose</summary>
 
 The repository ships a digest-pinned, non-root Compose build. With Git and Bun installed on the
 host, generate the canonical compatibility manifest before every image build, then initialize
-the data-plane token once through stdin and start the hub. The first normal start creates a
-per-volume self-signed TLS identity; copy its public certificate out for local verification:
+the data-plane token once through stdin and start the hub:
 
 ```bash
 git clone https://github.com/yansigit/opencodex.git
@@ -109,9 +123,9 @@ The default host binding is `127.0.0.1:10100`. Remote exposure requires explicit
 `OPENCODEX_BIND_ADDRESS=<LAN-or-Tailscale-IP> docker compose up -d`; `0.0.0.0` opts into
 all host interfaces. `OPENCODEX_PORT` also updates the generated localhost `tls.publicOrigin`;
 set `OPENCODEX_PUBLIC_ORIGIN` only when installing a matching operator-managed identity. The
-generated certificate covers only `localhost` and `127.0.0.1`; keep the
-default loopback publication behind an authenticated TLS/tailnet frontend, or install a certificate
-and `tls.publicOrigin` for the exact remote name before publishing directly. Restrict either setup
+generated certificate covers only `localhost` and `127.0.0.1`; keep the default loopback
+publication behind an authenticated TLS/tailnet frontend, or install a certificate and
+`tls.publicOrigin` for the exact remote name before publishing directly. Restrict either setup
 with a firewall.
 The generated JSON stays untracked; it is copied into the image without including `.git`.
 Regenerate it after source changes, and do not change the source between generation and build.
@@ -120,10 +134,12 @@ files, and symlinks. It checks every recorded SHA-256 against the build context 
 files, including the Dockerfile, Compose/config/bootstrap/probe files, `package.json`, `bun.lock`,
 and the specifically included `scripts/model-metadata.source.json`.
 
-The token, TLS private key, and mutable state stay in the `ocx-state` named volume; no credential is
-placed in the image, Compose file, environment, or shell arguments. See the
+The token, TLS private key, and mutable state stay in the `ocx-state` named volume; no credential
+is placed in the image, Compose file, environment, or shell arguments. See the
 [Remote Hub deployment guide](https://opencodex.me/guides/remote-hub/#docker-compose) for provider
 setup, authenticated acceptance checks, remote management, and rollback.
+
+</details>
 
 <details>
 <summary>Install from source (latest dev)</summary>
@@ -152,19 +168,8 @@ they reach the npm package.
 
 </details>
 
-Open **http://localhost:10100** and configure everything in the web dashboard — add providers
-(40+ built-ins, or any OpenAI-compatible endpoint), pick models, manage accounts. `ocx gui`
-re-opens the dashboard at any time.
-It can also manage a **ChatGPT account pool** for Codex auth. Add multiple ChatGPT / Codex accounts,
-refresh their 5h / weekly / 30d quota in the dashboard. Under quota routing, new sessions can use
-the lowest-usage healthy account; round-robin and fill-first use their own policies. Existing Codex
-threads normally retain affinity to the account that started them, so long SSH, tmux, or
-mobile-connected sessions do not jump accounts mid-conversation — but quota re-evaluation, failover,
-account exclusion, affinity expiry, or 401/403 and 429 recovery can rebind them. Give the accounts a
-selection order when one of them — usually your Codex Desktop login — should only be reached for
-once the others are drained.
-
-### For agents
+<details>
+<summary>For agents</summary>
 
 ```bash
 npm install -g @yansigit/opencodex
@@ -187,6 +192,8 @@ already contain an unused version.
 > [`AGENTS_INSTALL.md`](./AGENTS_INSTALL.md). An interactive `ocx start` may ask once whether to
 > star this repository — that is the user's decision, never an agent's. The CLI suppresses the
 > prompt for agent-driven runs and the API refuses them with `403 agent_consent_required`.
+
+</details>
 
 ## Supported platforms
 
@@ -341,8 +348,7 @@ and key file paths plus the client-visible HTTPS `publicOrigin`, then restart th
 clients must trust the operator-managed certificate and send the credential as `x-opencodex-api-key`.
 Remote dashboard access additionally requires the separate admin token
 (`OPENCODEX_ADMIN_AUTH_TOKEN` or the generated admin-token file); a data-plane API key does not grant
-management access.
-SSH port forwarding remains the simpler loopback-only alternative. Details:
+management access. SSH port forwarding remains the simpler loopback-only alternative. Details:
 [configuration reference](https://opencodex.me/reference/configuration/).
 
 ## Documentation

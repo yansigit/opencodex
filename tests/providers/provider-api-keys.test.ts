@@ -53,17 +53,14 @@ beforeEach(() => {
 afterEach(async () => {
   globalThis.fetch = originalUpstreamFetch;
   clearProviderQuotaCache();
-  try {
-    await flushConfigDirHardeningForTests();
-  } finally {
-    setIcaclsRunnerForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
-    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
-    else process.env.OPENCODEX_HOME = previousHome;
-    isolatedCodexHome?.restore();
-    isolatedCodexHome = null;
-    if (testDir) removeTreeWithRetry(testDir);
-  }
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+  if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = previousHome;
+  isolatedCodexHome?.restore();
+  isolatedCodexHome = null;
+  if (testDir) removeTreeWithRetry(testDir);
 });
 
 describe("provider API key pool", () => {
@@ -93,7 +90,8 @@ describe("provider API key pool", () => {
     const before = structuredClone(config.providers["opencode-go"]);
     rmSync(join(testDir, "config.json"));
 
-    expect(addProviderApiKey(config, "opencode-go", "key-second-444555666777")).toEqual({ error: "config is unavailable" });
+    expect(addProviderApiKey(config, "opencode-go", "key-second-444555666777"))
+      .toEqual({ error: "provider selection unavailable" });
     expect(config.providers["opencode-go"]).toEqual(before);
   });
 
@@ -109,16 +107,21 @@ describe("provider API key pool", () => {
     expect(addProviderApiKey(config, "opencode-go", key)).toEqual({ id: "legacy-slot" });
     expect(config.providers["opencode-go"]?.apiKeyPool).toHaveLength(1);
 
-    const collisionId = apiKeyPoolEntryId("colliding-new-key");
+    const collisionKey = "provider-key-collision-58449";
+    const existingKey = "provider-key-collision-56847";
+    const collisionId = apiKeyPoolEntryId(collisionKey);
+    expect(collisionId).toBe(apiKeyPoolEntryId(existingKey));
     config.providers["opencode-go"] = {
       ...config.providers["opencode-go"]!,
-      apiKey: "existing-key",
-      apiKeyPool: [{ id: collisionId, key: "existing-key" }],
+      apiKey: existingKey,
+      apiKeyPool: [{ id: collisionId, key: existingKey }],
     };
     replacePersistedConfig(config);
-    const before = readFileSync(join(testDir, "config.json"), "utf8");
-    expect(addProviderApiKey(config, "opencode-go", "colliding-new-key")).toEqual({ error: "key id collision" });
-    expect(readFileSync(join(testDir, "config.json"), "utf8")).toBe(before);
+    const liveBefore = structuredClone(config.providers["opencode-go"]);
+    const diskBefore = readFileSync(join(testDir, "config.json"), "utf8");
+    expect(addProviderApiKey(config, "opencode-go", collisionKey)).toEqual({ error: "key id collision" });
+    expect(config.providers["opencode-go"]).toEqual(liveBefore);
+    expect(readFileSync(join(testDir, "config.json"), "utf8")).toBe(diskBefore);
   });
 
   test("key POST preserves a legacy ID and rejects an ID collision with another key", async () => {
@@ -196,8 +199,6 @@ describe("provider API key pool", () => {
     replacePersistedConfig(config);
     const server = startServer(0);
     try {
-      // Startup normalizes the loaded config; capture the persisted baseline only
-      // after that one-time normalization, before exercising the pool routes.
       const before = readFileSync(join(testDir, "config.json"), "utf-8");
       const requests: Array<Promise<Response>> = [
         fetch(new URL("/api/providers/keys?name=azure-identity", server.url)),

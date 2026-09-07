@@ -255,3 +255,4 @@ Stale in-tree number to fix when the workflow is touched: `ci.yml:450-452` still
 - Shard helper: [`scripts/ci/run-bun-test-batches.sh`](scripts/ci/run-bun-test-batches.sh) (round-robin `196-210`)
 - Sample: 10 successful `dev` push runs of `ci.yml` on 2026-09-04, ids listed in §1
 - Dispatch sample: 5 latest `ci.yml` `workflow_dispatch` runs in §5, including in-progress `33894541984` on `9c0e3ca80`
+

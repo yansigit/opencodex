@@ -201,13 +201,11 @@ function isAiStudioHtmlSignIn(text: string): boolean {
 async function probeAiStudioLiveSession(
   name: string,
   prov: OcxProviderConfig,
-): Promise<{ ok: boolean; latencyMs: number; authState?: "connected" | "checking" | "needs_reauth" | "unsupported"; message?: string; error?: string }> {
-  const credentials = resolveAiStudioCredentials(prov);
-  if (credentials.kind !== "ready") {
-    return { ok: false, latencyMs: 0, error: AI_STUDIO_REAUTH_ERROR };
-  }
+): Promise<{ ok: boolean; latencyMs: number; authState?: "connected"; message?: string; error?: string }> {
   const base = (prov.baseUrl || "https://alkalimakersuite-pa.clients6.google.com").replace(/\/+$/, "");
   const url = base + "/v1internal:generateContent";
+  const credentials = resolveAiStudioCredentials(prov, undefined, url);
+  if (credentials.kind !== "ready") return { ok: false, latencyMs: 0, error: AI_STUDIO_REAUTH_ERROR };
   const jar = parseGoogleCookieJar(credentials.cookieHeader);
   const headers = await buildAiStudioHeaders(jar, AI_STUDIO_ORIGIN);
   const body = JSON.stringify({
@@ -215,43 +213,24 @@ async function probeAiStudioLiveSession(
     contents: [{ role: "user", parts: [{ text: "ping" }] }],
     generationConfig: { maxOutputTokens: 1 },
   });
-
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), AI_STUDIO_PROBE_TIMEOUT_MS);
   const started = Date.now();
   try {
-    const outboundProvider = aiStudioProbeFetchForTests
-      ? { ...prov, fetch: aiStudioProbeFetchForTests }
-      : prov;
-    const response = await providerOutboundPost(name, outboundProvider, url, {
-      headers,
-      body,
-      signal: controller.signal,
-    });
+    const outboundProvider = aiStudioProbeFetchForTests ? { ...prov, fetch: aiStudioProbeFetchForTests } : prov;
+    const response = await providerOutboundPost(name, outboundProvider, url, { headers, body, signal: controller.signal });
     const latencyMs = Date.now() - started;
     const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
     const text = await response.text().catch(() => "");
-
     if ((response.status >= 300 && response.status < 400) || response.status === 401 || response.status === 403) {
       return { ok: false, latencyMs, error: AI_STUDIO_REAUTH_ERROR };
     }
     if (contentType.includes("text/html") || isAiStudioHtmlSignIn(text)) {
       return { ok: false, latencyMs, error: AI_STUDIO_REAUTH_ERROR };
     }
-    if (response.status !== 200) {
-      return { ok: false, latencyMs, error: "AI Studio connection probe failed" };
-    }
-    try {
-      JSON.parse(text);
-    } catch {
-      return { ok: false, latencyMs, error: "AI Studio connection probe failed" };
-    }
-    return {
-      ok: true,
-      latencyMs,
-      authState: "connected",
-      message: "AI Studio session verified",
-    };
+    if (response.status !== 200) return { ok: false, latencyMs, error: "AI Studio connection probe failed" };
+    try { JSON.parse(text); } catch { return { ok: false, latencyMs, error: "AI Studio connection probe failed" }; }
+    return { ok: true, latencyMs, authState: "connected", message: "AI Studio session verified" };
   } catch (error) {
     if (error instanceof ProviderOutboundPolicyError && /\breturned 3\d\d redirect\b/.test(error.message)) {
       return { ok: false, latencyMs: Date.now() - started, error: AI_STUDIO_REAUTH_ERROR };
@@ -511,6 +490,10 @@ function applyProviderPatchFields(
         credential.managedIdentityClientId = credential.managedIdentityClientId.trim();
       }
       next.azureCredential = credential as OcxProviderConfig["azureCredential"];
+      // Selecting Azure identity is an explicit credential replacement. A stale key or
+      // pool must not survive underneath the new keyless identity mode.
+      delete next.apiKey;
+      delete next.apiKeyPool;
     }
     touched = true;
   }
@@ -614,6 +597,28 @@ function applyProviderPatchFields(
       // `upstreamHttpVersionConfigError` is the shared write boundary; the assertion is
       // explicit because the incoming value is an unknown JSON scalar.
       next.upstreamHttpVersion = value as OcxProviderConfig["upstreamHttpVersion"];
+    }
+    touched = true;
+  }
+  if (Object.hasOwn(rawBody, "wsUpstream")) {
+    const value = rawBody.wsUpstream;
+    if (value === null) {
+      delete next.wsUpstream;
+    } else {
+      const error = wsUpstreamConfigError(value);
+      if (error) return { error };
+      next.wsUpstream = value as boolean;
+    }
+    touched = true;
+  }
+  if (Object.hasOwn(rawBody, "maxWsFrameBytes")) {
+    const value = rawBody.maxWsFrameBytes;
+    if (value === null) {
+      delete next.maxWsFrameBytes;
+    } else {
+      const error = maxWsFrameBytesConfigError(value);
+      if (error) return { error };
+      next.maxWsFrameBytes = value as number;
     }
     touched = true;
   }
@@ -1106,6 +1111,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     if (prov && prov.upstreamHttpVersion === null) delete prov.upstreamHttpVersion;
     if (prov && prov.wsUpstream === null) delete prov.wsUpstream;
     if (prov && (prov as unknown as Record<string, unknown>).upstreamWebsocket === null) delete (prov as unknown as Record<string, unknown>).upstreamWebsocket;
+    if (prov && (prov as unknown as Record<string, unknown>).maxWsFrameBytes === null) delete prov.maxWsFrameBytes;
     if (!name || !prov?.adapter || !prov?.baseUrl) {
       return jsonResponse({ error: "name, provider.adapter and provider.baseUrl are required" }, 400);
     }
@@ -1280,6 +1286,9 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const canonicalBudgetOnly = name === "openai"
       && keys.length === 1
       && keys[0] === "modelAutoCompactTokenLimits";
+    const canonicalEmptyToolOutputOnly = name === "openai"
+      && keys.length === 1
+      && keys[0] === "annotateEmptyToolOutputs";
 
     // codexAccountMode keeps its dedicated side-effect path (quota cache clear, thread map
     // clear, pool prime) and is mutually exclusive with every other patch field.
@@ -1360,15 +1369,17 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
 
     const pacingOnly = keys.every(key => key === "requestPacing");
     if (applied.editorTouched && !pacingOnly) {
-      const providerError = canonicalBudgetOnly
-        ? canonicalOpenAiBudgetPatchError(next, rawBody, keys, config)
-        : providerManagementConfigError(
+      const providerError = canonicalEmptyToolOutputOnly
+        ? providerEmptyToolOutputConfigError(name, next)
+        : canonicalBudgetOnly
+          ? canonicalOpenAiBudgetPatchError(next, rawBody, keys, config)
+          : providerManagementConfigError(
             name,
             providerTransportValidationCandidate(next as unknown as Record<string, unknown>),
           )
-          ?? providerEmptyToolOutputConfigError(name, next);
+            ?? providerEmptyToolOutputConfigError(name, next);
       if (providerError) return jsonResponse({ error: providerError }, 400);
-      if (!canonicalBudgetOnly) {
+      if (!canonicalBudgetOnly && !canonicalEmptyToolOutputOnly) {
         const serviceTierError = providerServiceTierConfigError(name, next);
         if (serviceTierError) return jsonResponse({ error: serviceTierError }, 400);
         // Same DNS gate as POST and re-enable: the canonical built-in OpenAI forward
@@ -1404,17 +1415,19 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         return { changed: false, value: { error: replay.error, status: 409 } };
       }
       if (replay.editorTouched && !pacingOnly) {
-        const syncError = canonicalBudgetOnly
-          ? canonicalOpenAiBudgetPatchError(replay.next, rawBody, keys, fresh)
-          : providerManagementConfigError(
+        const syncError = canonicalEmptyToolOutputOnly
+          ? providerEmptyToolOutputConfigError(name, replay.next)
+          : canonicalBudgetOnly
+            ? canonicalOpenAiBudgetPatchError(replay.next, rawBody, keys, fresh)
+            : providerManagementConfigError(
               name,
               providerTransportValidationCandidate(replay.next as unknown as Record<string, unknown>),
             )
-            ?? providerEmptyToolOutputConfigError(name, replay.next);
+              ?? providerEmptyToolOutputConfigError(name, replay.next);
         if (syncError) {
           return { changed: false, value: { error: syncError, status: 409 } };
         }
-        if (!canonicalBudgetOnly) {
+        if (!canonicalBudgetOnly && !canonicalEmptyToolOutputOnly) {
           const serviceTierError = providerServiceTierConfigError(name, replay.next);
           if (serviceTierError) {
             return { changed: false, value: { error: serviceTierError, status: 409 } };

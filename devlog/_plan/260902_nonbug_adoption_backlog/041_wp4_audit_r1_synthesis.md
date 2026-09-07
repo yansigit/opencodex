@@ -27,3 +27,4 @@ Reviewer: grok-4.6 subagent (Feynman), read-only, 7 questions on 040. Verdict: *
 ## Disposition
 
 All three blockers are additive edits inside the already-planned files plus one file (`auth-cors.ts`). No scope change. Proceed to B.
+

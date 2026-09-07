@@ -66,3 +66,4 @@ opencodex 참조는 정지 후 0건이었다. 계약은 지켜졌다.
 | 포트/임시파일 | free / none | free / none |
 
 증거: `.codexclaw/evidence/<sid>/qa/{lidge,intmb}-*/`
+

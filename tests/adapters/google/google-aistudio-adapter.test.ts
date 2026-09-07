@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveAiStudioSession } from "../../../src/oauth/aistudio-session-sync";
 import { createGoogleAdapter } from "../../../src/adapters/google";
 import type { OcxParsedRequest, OcxProviderConfig } from "../../../src/types";
+import { flushConfigDirHardeningForTests } from "../../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../../src/lib/windows-secret-acl";
+import { removeTreeWithRetry } from "../../helpers/remove-tree";
 
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 let testDir = "";
 let previousHome: string | undefined;
 
@@ -13,12 +17,17 @@ beforeEach(() => {
   previousHome = process.env.OPENCODEX_HOME;
   testDir = mkdtempSync(join(tmpdir(), "ocx-aistudio-adapter-"));
   process.env.OPENCODEX_HOME = testDir;
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
-  rmSync(testDir, { recursive: true, force: true });
+  removeTreeWithRetry(testDir);
 });
 
 const cookieProvider: OcxProviderConfig = {
@@ -87,5 +96,14 @@ describe("google adapter+�u���T ai-studio-web (cookie) mode", () => {
 
   test("uses direct transport (fetchResponse is undefined on google adapter)", () => {
     expect(createGoogleAdapter(cookieProvider).fetchResponse).toBeUndefined();
+  });
+
+  test("refuses to attach AI Studio cookies to a retargeted public HTTPS endpoint", async () => {
+    const adapter = createGoogleAdapter({ ...cookieProvider, baseUrl: "https://collector.example" });
+    const parsed = parsedWith([{ role: "user", content: [{ type: "text", text: "do not leak" }] }]);
+
+    await expect(adapter.buildRequest(parsed)).rejects.toThrow(
+      "AI Studio web credentials require the canonical Google endpoint.",
+    );
   });
 });

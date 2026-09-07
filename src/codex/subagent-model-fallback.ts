@@ -61,6 +61,10 @@ export type SubagentModelEligibleAccountIds = (
 ) => ReadonlySet<string> | undefined;
 /** Additional resolved routes that a restricted fallback caller has independently approved. */
 export type SubagentFallbackRouteEligibility = (route: RouteResult) => boolean;
+export type ResolvedSubagentSelectionContext = {
+  kind: "candidate-overwrite" | "fallback";
+  chain: readonly string[];
+};
 let subagentQuotaPrimeForTests: SubagentQuotaPrimeFn | null = null;
 let quotaPrimeInFlight: Promise<void> | null = null;
 
@@ -422,7 +426,6 @@ function isSubagentCandidateFailureMessage(message: string): boolean {
   if (lower.includes("fetch failed") || lower.includes("network error")) return true;
   if (lower.includes("provider error 503") || lower.includes("service unavailable")) return true;
   if (lower.includes("internal server error")) return true;
-  // Connection-refused is a legacy transport signal and is intentionally not a cooldown.
   if (/provider error 5\d\d/.test(lower)) return true;
   return false;
 }
@@ -441,30 +444,42 @@ export function resolveSubagentSpawnRoleFromHeaders(headers: Headers): string | 
   }
 }
 
-export function selectAvailableSubagentCandidate(
-  candidates: readonly string[],
+/** Resolve the one ordered model-selection policy that applies to this spawn. */
+export function resolveSubagentSelectionContext(
+  parsed: OcxParsedRequest,
+  headers: Headers,
   config: OcxConfig,
-  accountId?: string | null,
-  now = Date.now(),
-  nativeFallbackOnly = false,
-  accountUsabilityOptions?: CodexAccountUsabilityOptions,
-): { model: string | null; skipped: string[] } {
-  const skipped: string[] = [];
-  for (const candidate of candidates) {
-    if (nativeFallbackOnly) {
-      const route = tryRouteFallbackModel(config, candidate);
-      if (!route || !isCanonicalOpenAiForwardProvider(route.provider)) {
-        skipped.push(candidate);
-        continue;
-      }
+  resolvedFallbackChain?: readonly string[] | null,
+): ResolvedSubagentSelectionContext | null {
+  if (config.subagentCandidates !== undefined) {
+    const role = resolveSubagentSpawnRoleFromHeaders(headers);
+    const candidates = resolveSubagentCandidates(config, role ?? parsed.modelId);
+    if (candidates.length > 0) {
+      return { kind: "candidate-overwrite", chain: candidates };
     }
-    if (isSubagentModelUnavailable(candidate, config, accountId, now, accountUsabilityOptions)) {
-      skipped.push(candidate);
-      continue;
-    }
-    return { model: candidate, skipped };
   }
-  return { model: null, skipped };
+  const fallbackChain = resolvedFallbackChain === undefined
+    ? resolveSubagentFallbackChain(parsed, config)
+    : resolvedFallbackChain;
+  return fallbackChain ? { kind: "fallback", chain: fallbackChain } : null;
+}
+
+/** Whether selection can leave an exact selector for the unqualified native Pool. */
+export function subagentSelectionNeedsPoolQuotaPrime(
+  context: ResolvedSubagentSelectionContext | null,
+  config: OcxConfig,
+): boolean {
+  // A fallback chain retains its exact-selector primary, so probing Pool before that
+  // primary is evaluated would breach selector isolation. Candidate overwrite is
+  // unconditional and can replace the selector before auth, so only it needs this.
+  if (context?.kind !== "candidate-overwrite") return false;
+  return context?.chain.some((model) => {
+    const route = tryRouteFallbackModel(config, model);
+    return !!route
+      && route.codexAccountId === undefined
+      && isPoolCodexRoute(route)
+      && isCanonicalOpenAiForwardProvider(route.provider);
+  }) === true;
 }
 
 export function noteSubagentModelFailure(
@@ -679,6 +694,7 @@ export function recordSubagentQuotaFailureForThreadSpawn(
   noteSubagentModelFailure(model, String(message), config, accountId, now, pollIntervalMs(config));
 }
 
+/** Backwards-compatible name retained for the candidate-overwrite API. */
 export const recordSubagentFailureForThreadSpawn = recordSubagentQuotaFailureForThreadSpawn;
 
 export function applySubagentModelFallback(
@@ -693,37 +709,12 @@ export function applySubagentModelFallback(
   modelEligibleAccountIdsForModel?: SubagentModelEligibleAccountIds,
   resolvedFallbackChain?: readonly string[] | null,
   restrictedRouteEligible?: SubagentFallbackRouteEligibility,
+  resolvedSelectionContext?: ResolvedSubagentSelectionContext | null,
 ): { from?: string; to?: string; skipped?: string[] } | null {
   if (!isThreadSpawnRequest(headers)) return null;
-
-  if (config.subagentCandidates !== undefined) {
-    const role = resolveSubagentSpawnRoleFromHeaders(headers);
-    const candidates = resolveSubagentCandidates(config, role ?? parsed.modelId);
-    if (candidates.length > 0) {
-      const requested = parsed.modelId;
-      const selection = selectAvailableSubagentCandidate(
-        candidates,
-        config,
-        accountId,
-        now,
-        nativeFallbackOnly,
-        accountUsabilityOptions,
-      );
-      if (selection.model && !slugsEquivalent(selection.model, requested)) {
-        rewriteParsedModel(parsed, selection.model);
-        return { from: requested, to: selection.model, skipped: selection.skipped };
-      }
-      if (selection.skipped.length > 0) {
-        return { from: requested, to: requested, skipped: selection.skipped };
-      }
-      return null;
-    }
-  }
-
-  const fallbackChain = resolvedFallbackChain === undefined
-    ? resolveSubagentFallbackChain(parsed, config)
-    : resolvedFallbackChain;
-  if (!fallbackChain) return null;
+  const selectionContext = resolvedSelectionContext
+    ?? resolveSubagentSelectionContext(parsed, headers, config, resolvedFallbackChain);
+  if (!selectionContext) return null;
   const selection = selectAvailableSubagentModel(
     parsed.modelId,
     config,
@@ -735,7 +726,7 @@ export function applySubagentModelFallback(
     [],
     poolAccountPreview,
     modelEligibleAccountIdsForModel,
-    fallbackChain,
+    selectionContext.chain,
     restrictedRouteEligible,
   );
   if (!selection.rewritten) return selection.skipped.length > 0

@@ -1094,3 +1094,4 @@ squash. Fix 1 narrows an over-eager cooldown reset; regression test guards it.
 **PR skeleton.** Title `feat(combos): per-combo cooldownMs and waitForCooldownMs (carry of #3329)`;
 body: Summary, Verification (the five verifiers + CI run), Checklist, stack table
 (E7 independent, base `dev`), `Co-authored-by` trailer, "Supersedes #3329".
+

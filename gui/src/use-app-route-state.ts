@@ -27,6 +27,11 @@ const STALE_VIEW_KEYS = [
   "ocx-dashboard-view",
 ];
 
+function navigateToPage(id: Page, subPath?: string): void {
+  const target = subPath ? `${id}/${subPath}` : id;
+  navigateHash(target);
+}
+
 /**
  * One-shot cleanup of the layout-preference keys. There is a single layout now, so these
  * would otherwise sit in every user's storage forever.
@@ -38,11 +43,6 @@ function clearStaleViewKeys(): void {
   } catch {
     /* private mode / quota — nothing to clean up */
   }
-}
-
-function navigateToPage(id: Page, subPath?: string): void {
-  const target = subPath ? `${id}/${subPath}` : id;
-  navigateHash(target);
 }
 
 /**

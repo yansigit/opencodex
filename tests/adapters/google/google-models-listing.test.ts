@@ -125,7 +125,7 @@ describe("Antigravity live model discovery", () => {
       expect(seen[0]?.url).toBe("https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels");
       expect(seen[0]?.init?.method).toBe("POST");
       expect((seen[0]?.init?.headers as Record<string, string>).Authorization).toBe("Bearer access-token");
-      expect(JSON.parse(String(seen[0]?.init?.body))).toEqual({ project: "project-id" });
+      expect(JSON.parse(String(seen[0]?.init?.body))).toEqual({ project: "configured-project" });
       expect(live.map(model => model.id).sort()).toEqual([
         "future-agent-model",
         "future-flash-high",
@@ -137,15 +137,11 @@ describe("Antigravity live model discovery", () => {
       ]);
       expect(live.find(model => model.id === "gemini-3.1-pro-low")).toMatchObject({
         contextWindow: 1_048_576,
-        metadataSource: "live",
-        metadataFieldSources: { contextWindow: "live" },
         inputModalities: ["text", "image"],
         reasoningEfforts: [],
       });
       expect(live.find(model => model.id === "future-agent-model")).toMatchObject({
         contextWindow: 333_333,
-        metadataSource: "live",
-        metadataFieldSources: { contextWindow: "live" },
         inputModalities: ["text"],
         reasoningEfforts: [],
       });

@@ -2,13 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { AdapterRequest } from "../../../src/adapters/base";
 import { fetchAntigravityWithRetry, fetchDirectGeminiWithRetry, fetchVertexWithRetry } from "../../../src/adapters/google-http";
 import { safeVertexHttpErrorMessage, retryableGoogleStatus } from "../../../src/adapters/google-errors";
-import { clearAntigravityAccountCooldown, isAntigravityAccountInCooldown } from "../../../src/oauth/antigravity-routing";
 
 const realFetch = globalThis.fetch;
-afterEach(() => {
-  globalThis.fetch = realFetch;
-  clearAntigravityAccountCooldown("account-http-geo");
-});
+afterEach(() => { globalThis.fetch = realFetch; });
 
 const request: AdapterRequest = {
   url: "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models/gemini-3-pro:streamGenerateContent?alt=sse",
@@ -129,16 +125,6 @@ describe("vertex retry fetch", () => {
     expect(rate.calls).toHaveLength(2);
   });
 
-  test("Antigravity leaves the single 429 retry budget to Responses recovery", async () => {
-    const mock = mockFetch([
-      new Response(vertexError(429, "RESOURCE_EXHAUSTED", "rate limit, try again"), { status: 429, headers: { "Retry-After": "1" } }),
-      new Response("unexpected replay", { status: 200 }),
-    ]);
-    const res = await fetchAntigravityWithRetry(request, { timeoutMs: 5_000 });
-    expect(res.status).toBe(429);
-    expect(mock.calls).toHaveLength(1);
-  });
-
   test("does not retry a non-retryable 400 and classifies the body", async () => {
     const mock = mockFetch([new Response(vertexError(400, "INVALID_ARGUMENT", "bad model"), { status: 400 })]);
     const res = await fetchVertexWithRetry(request, { timeoutMs: 5_000 });
@@ -166,141 +152,6 @@ describe("vertex retry fetch", () => {
     ]);
 
     const res = await fetchAntigravityWithRetry(repairableRequest, { timeoutMs: 5_000 });
-
-    expect(res.status).toBe(200);
-    expect(mock.calls).toHaveLength(2);
-    const replay = JSON.parse(mock.calls[1].body as string);
-    expect(replay.request.tools[0].functionDeclarations[0].parameters).toEqual({
-      type: "object",
-      properties: {},
-    });
-  });
-
-  test("repairs schema instead of stripping builtin when the 400 only echoes both tool names", async () => {
-    const mixedSchemaRequest: AdapterRequest = {
-      ...request,
-      body: JSON.stringify({
-        request: {
-          contents: [{ role: "user", parts: [{ text: "hi" }] }],
-          tools: [
-            { functionDeclarations: [{ name: "shell", parameters: { type: "object", properties: { path: { type: "string" } } } }] },
-            { google_search: {} },
-          ],
-        },
-      }),
-    };
-    const mock = mockFetch([
-      new Response(
-        vertexError(400, "INVALID_ARGUMENT", "google_search is enabled but function_declarations.0: JSON schema is invalid"),
-        { status: 400 },
-      ),
-      new Response("ok", { status: 200 }),
-    ]);
-
-    const res = await fetchAntigravityWithRetry(mixedSchemaRequest, { timeoutMs: 5_000 });
-
-    expect(res.status).toBe(200);
-    expect(mock.calls).toHaveLength(2);
-    const replay = JSON.parse(mock.calls[1].body as string);
-    expect(replay.request.tools).toEqual([
-      { functionDeclarations: [{ name: "shell", parameters: { type: "object", properties: {} } }] },
-      { google_search: {} },
-    ]);
-  });
-
-  test("replays once stripping google_search after a mixed-tool 400", async () => {
-    const mixedRequest: AdapterRequest = {
-      ...request,
-      body: JSON.stringify({
-        request: {
-          contents: [{ role: "user", parts: [{ text: "hi" }] }],
-          tools: [
-            { functionDeclarations: [{ name: "shell", parameters: { type: "object", properties: {} } }] },
-            { google_search: {} },
-            { url_context: {} },
-          ],
-        },
-      }),
-    };
-    const mock = mockFetch([
-      new Response(
-        vertexError(400, "INVALID_ARGUMENT", "cannot mix google_search with function_declarations"),
-        { status: 400 },
-      ),
-      new Response("ok", { status: 200 }),
-    ]);
-
-    const res = await fetchAntigravityWithRetry(mixedRequest, { timeoutMs: 5_000 });
-
-    expect(res.status).toBe(200);
-    expect(mock.calls).toHaveLength(2);
-    const replay = JSON.parse(mock.calls[1].body as string);
-    expect(replay.request.tools).toEqual([
-      { functionDeclarations: [{ name: "shell", parameters: { type: "object", properties: {} } }] },
-    ]);
-  });
-
-  test.each([
-    ["cannot use `google_search` and `function_declarations` together", { google_search: {} }],
-    ["google_search cannot be combined with other tools", { google_search: {} }],
-    ["google_search alongside function_declarations is not supported", { google_search: {} }],
-    ["code_execution and function declarations cannot coexist", { code_execution: {} }],
-  ])("strips the named built-in after a mixed-tool 400: %s", async (message, builtin) => {
-    const mixedRequest: AdapterRequest = {
-      ...request,
-      body: JSON.stringify({
-        request: {
-          contents: [{ role: "user", parts: [{ text: "hi" }] }],
-          tools: [
-            { functionDeclarations: [{ name: "shell", parameters: { type: "object" } }] },
-            builtin,
-          ],
-        },
-      }),
-    };
-    const mock = mockFetch([
-      new Response(vertexError(400, "INVALID_ARGUMENT", message), { status: 400 }),
-      new Response("ok", { status: 200 }),
-    ]);
-
-    const res = await fetchAntigravityWithRetry(mixedRequest, { timeoutMs: 5_000 });
-
-    expect(res.status).toBe(200);
-    expect(mock.calls).toHaveLength(2);
-    const replay = JSON.parse(mock.calls[1].body as string);
-    expect(replay.request.tools).toEqual([
-      { functionDeclarations: [{ name: "shell", parameters: { type: "object" } }] },
-    ]);
-  });
-
-  test("falls through to schema repair when mixed-tool language has no built-in to strip", async () => {
-    const schemaRequest: AdapterRequest = {
-      ...request,
-      body: JSON.stringify({
-        request: {
-          contents: [{ role: "user", parts: [{ text: "hi" }] }],
-          tools: [{
-            functionDeclarations: [{
-              name: "shell",
-              parameters: { type: "object", properties: { path: { type: "string" } } },
-            }],
-          }],
-        },
-      }),
-    };
-    const mock = mockFetch([
-      new Response(
-        vertexError(
-          400,
-          "INVALID_ARGUMENT",
-          "cannot mix google_search with function_declarations; tools.0.custom.input_schema: JSON schema is invalid",
-        ),
-        { status: 400 },
-      ),
-      new Response("ok", { status: 200 }),
-    ]);
-
-    const res = await fetchAntigravityWithRetry(schemaRequest, { timeoutMs: 5_000 });
 
     expect(res.status).toBe(200);
     expect(mock.calls).toHaveLength(2);
@@ -367,24 +218,6 @@ describe("vertex retry fetch", () => {
     expect(await res403.text()).toContain("Vertex AI access denied");
   });
 
-  test("records an Antigravity geo-block cooldown from its HTTP response", async () => {
-    const mock = mockFetch([
-      new Response(
-        vertexError(403, "PERMISSION_DENIED", "User location is not supported for the API use"),
-        { status: 403 },
-      ),
-    ]);
-
-    const res = await fetchAntigravityWithRetry(request, {
-      timeoutMs: 5_000,
-      accountId: "account-http-geo",
-    });
-
-    expect(res.status).toBe(403);
-    expect(mock.calls).toHaveLength(1);
-    expect(isAntigravityAccountInCooldown("account-http-geo")).toBe(true);
-  });
-
   test("aborts promptly when the caller signal fires", async () => {
     mockFetch([new Response(vertexError(503, "UNAVAILABLE", "x"), { status: 503, headers: { "Retry-After": "30" } }), new Response("ok", { status: 200 })]);
     const controller = new AbortController();
@@ -410,7 +243,7 @@ describe("vertex retry fetch", () => {
       new Response(raw, { status: 400, headers: { "x-provider-error": "raw" } }),
       new Response("ok", { status: 200 }),
     ]);
-    const res = await fetchDirectGeminiWithRetry(request, { timeoutMs: 5_000 });
+    const res = await fetchDirectGeminiWithRetry(request, { timeoutMs: 5_000 }, { replayTransientFailures: true });
     expect(res.status).toBe(400);
     expect(res.headers.get("x-provider-error")).toBe("raw");
     expect(await res.text()).toBe(raw);

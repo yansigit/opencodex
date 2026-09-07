@@ -69,7 +69,7 @@ OAuth запускается через `POST /api/oauth/login`. Если callba
 Манифест аутентифицирует `Dockerfile`, `compose.yaml`, `.dockerignore`, каждый отслеживаемый управляющий файл в `docker/`, исходники в `src/` и обязательные файлы пакета, включая `package.json`, `bun.lock` и `scripts/model-metadata.source.json`. Сборка сверяет каждый SHA-256 с контекстом и затем образом; отсутствующие или изменённые файлы, любой лишний исходник или управляющий файл Docker и символические ссылки запрещены.
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun scripts/generate-compatibility-version.ts
 docker compose build

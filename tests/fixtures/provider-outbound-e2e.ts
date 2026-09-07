@@ -2,13 +2,20 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { saveConfig } from "../../src/config";
 import { fetchProviderModels } from "../../src/codex/catalog/provider-fetch";
+import { DestinationDnsResolutionError } from "../../src/lib/destination-policy";
 import { providerOutboundGet } from "../../src/lib/provider-outbound";
 import { PROXY_ENV_KEYS } from "../../src/lib/proxy-env";
 import { handleManagementAPI } from "../../src/server/management-api";
 import type { OcxConfig } from "../../src/types";
 import { ManagementRequest as Request } from "../helpers/management-auth";
 
-const proxyKeys = PROXY_ENV_KEYS.flatMap(key => [key, key.toLowerCase()]);
+const proxyKeyNames = new Set(PROXY_ENV_KEYS.map(key => key.toLowerCase()));
+
+function clearProxyEnvironment(): void {
+  for (const key of Object.keys(process.env)) {
+    if (proxyKeyNames.has(key.toLowerCase())) delete process.env[key];
+  }
+}
 
 async function listen(server: ReturnType<typeof createServer>): Promise<number> {
   await new Promise<void>((resolve, reject) => {
@@ -57,6 +64,36 @@ const provider = createServer((request, response) => {
 try {
   const [proxyPort, providerPort] = await Promise.all([listen(proxy), listen(provider)]);
   const proxyUrl = `http://127.0.0.1:${proxyPort}`;
+
+  // Prove the ALL_PROXY-only route before installing a scheme proxy in this
+  // process. Environment-key casing and mutation semantics differ on Windows;
+  // reusing this process after HTTP_PROXY was installed made the negative route
+  // depend on whether that earlier value was fully removed.
+  process.env.ALL_PROXY = proxyUrl;
+  let allProxy: { status?: number; body?: string; error?: string };
+  try {
+    const allProxyResponse = await providerOutboundGet(
+      "all-proxy",
+      { baseUrl: "http://all-proxy-only.invalid/v1", allowPrivateNetwork: false },
+      "http://all-proxy-only.invalid/v1/models",
+      {},
+      {
+        // Keep this negative route independent of platform DNS/search-domain behavior.
+        // If ALL_PROXY were incorrectly selected, the typed failure would still degrade
+        // into a real fetch; the result and proxy-request assertions below catch that.
+        resolveAddresses: async () => {
+          throw new DestinationDnsResolutionError(
+            "provider URL hostname all-proxy-only.invalid could not be resolved",
+          );
+        },
+      },
+    );
+    allProxy = { status: allProxyResponse.status, body: await allProxyResponse.text() };
+  } catch (error) {
+    allProxy = { error: error instanceof Error ? error.message : String(error) };
+  }
+
+  clearProxyEnvironment();
   process.env.HTTP_PROXY = proxyUrl;
   process.env.http_proxy = proxyUrl;
   process.env.NO_PROXY = "localhost,127.0.0.1,::1,[::1]";
@@ -77,7 +114,6 @@ try {
       proxied: {
         adapter: "openai-chat",
         baseUrl: "http://connection-proxy.invalid/v1",
-        apiKey: "sk-x",
       },
     },
   } as OcxConfig, "proxied");
@@ -85,7 +121,6 @@ try {
   const proxyModels = await fetchProviderModels("proxy-discovery-e2e", {
     baseUrl: "http://proxy-models.invalid/v1",
     adapter: "openai-chat",
-    apiKey: "sk-test",
     models: [],
   }, 0);
 
@@ -106,7 +141,7 @@ try {
   process.env.no_proxy = "localhost,127.0.0.1,::1,[::1]";
   const managementNoProxy = await probe(localConfig, "local");
 
-  for (const key of proxyKeys) delete process.env[key];
+  clearProxyEnvironment();
   const managementDirect = await probe(localConfig, "local");
   const directModels = await fetchProviderModels("direct-discovery-e2e", {
     baseUrl: `http://127.0.0.1:${providerPort}/v1`,
@@ -118,6 +153,7 @@ try {
 
   console.log(JSON.stringify({
     outbound,
+    allProxy,
     managementProxy,
     proxyModels: proxyModels.map(model => model.id),
     managementNoProxy,

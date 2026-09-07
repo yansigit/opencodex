@@ -1,5 +1,4 @@
 import type { CodexAccountMode, OcxProviderConfig } from "../types";
-import { isAzureIdentityProvider } from "../config/provider-validation";
 import { cloneFastWire } from "./fastwire";
 import {
   PROVIDER_REGISTRY,
@@ -470,7 +469,6 @@ function refreshLegacyGoogleAiStudioModels(name: string, prov: OcxProviderConfig
 }
 
 export function enrichProviderFromRegistry(name: string, prov: OcxProviderConfig): void {
-  if (isAzureIdentityProvider(prov)) prov.liveModels = false;
   const entry = PROVIDER_REGISTRY.find(row => row.id === name);
   if (!entry || !providerMatchesRegistryTransportWithStaticGuards(name, prov)) {
     // Name lookup failed, but the row may still point at a vendor route we know. #1100 was
