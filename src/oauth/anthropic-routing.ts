@@ -657,17 +657,18 @@ export function rotateAnthropicAccountOn429(
   const resetCandidates = rateLimitHeaders ? (["5h", "7d"] as const).flatMap(window => {
     if (rateLimitHeaders.get(`anthropic-ratelimit-unified-${window}-status`)?.trim() !== "rejected") return [];
     const seconds = Number(rateLimitHeaders.get(`anthropic-ratelimit-unified-${window}-reset`)?.trim());
-    return Number.isFinite(seconds) && seconds > 0 ? [seconds * 1000] : [];
+    const deadline = seconds * 1000;
+    return Number.isFinite(deadline) && deadline > now && deadline <= 8.64e15 ? [deadline] : [];
   }) : [];
   const resetUntil = resetCandidates.length > 0
     ? Math.max(...resetCandidates)
     : undefined;
   const usableResetUntil = resetUntil !== undefined && resetUntil > now ? resetUntil : undefined;
   const retryText = retryAfterHeader?.trim();
-  const retryValid = retryText !== undefined && retryText !== ""
-    && (/^\d+(?:\.\d+)?$/.test(retryText)
-      ? Number.isFinite(Number(retryText)) && Number(retryText) > 0
-      : Number.isFinite(Date.parse(retryText)) && Date.parse(retryText) > now);
+  const retryUntil = retryText
+    ? /^\d+(?:\.\d+)?$/.test(retryText) ? now + Math.ceil(Number(retryText) * 1000) : Date.parse(retryText)
+    : NaN;
+  const retryValid = Number.isFinite(retryUntil) && retryUntil > now && retryUntil <= 8.64e15;
   const effectiveRetry = retryValid
     ? retryText
     : usableResetUntil !== undefined ? String(Math.max(1, Math.ceil((usableResetUntil - now) / 1000))) : retryAfterHeader;
@@ -678,6 +679,14 @@ export function rotateAnthropicAccountOn429(
     effectiveRetry,
     now,
   );
+  // Provider-stated windows are authoritative; the shared guessed-backoff cap
+  // must not make a drained account eligible before its announced reset.
+  const statedUntil = retryValid ? retryUntil : usableResetUntil;
+  if (statedUntil !== undefined) {
+    getPoolCooldownRegistry(POOL_KEY_ANTHROPIC).set(failedAccountId, statedUntil, {
+      source: retryValid ? "retry-after" : "reset-derived", reason: "rate_limit",
+    });
+  }
   clearSessionAffinityForAccount(POOL_KEY_ANTHROPIC, failedAccountId);
   if (!retryValid && usableResetUntil !== undefined) anthropicResetDerivedUntil.set(failedAccountId, usableResetUntil);
   else anthropicResetDerivedUntil.delete(failedAccountId);

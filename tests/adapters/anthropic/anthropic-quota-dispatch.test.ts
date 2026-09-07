@@ -121,7 +121,9 @@ function configFor(reply: (body: Record<string, unknown>) => Response | Promise<
   };
   return {
     port: 0, defaultProvider: "anthropic",
-    anthropicAccountPool: { enabled: false, strategy: "round-robin" },
+    // Physical-response accounting exercises authorized failover. Explicit
+    // enabled:false is an opt-out in the fork and must never permit a retry.
+    anthropicAccountPool: { enabled: true, strategy: "round-robin" },
     providers: { anthropic: provider },
   };
 }

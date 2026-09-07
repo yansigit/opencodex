@@ -124,7 +124,7 @@ async function exerciseSpawnReporter(path: ReporterPath): Promise<void> {
     defaultProvider: "openai",
     openaiProviderTierVersion: 2,
     streamMode: "legacy-tee",
-    providers: { openai: { ...provider, codexAccountMode: "pool" } },
+    providers: { openai: { ...provider, codexAccountMode: "pool", wsUpstream: path === "guarded-ws" } },
     codexAccounts: [{
       id: accountId, email: "quota@example.test", isMain: false,
       chatgptAccountId: "acct-quota-endpoint",

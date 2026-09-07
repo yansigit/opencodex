@@ -128,7 +128,7 @@ describe("handleAiStudioLogin uses native login without bridge fallback", () => 
     const errors: string[] = [];
     const openSpy = spyOn(openUrlMod, "openUrl").mockImplementation((url: string) => { opened.push(url); });
     const findSpy = spyOn(proxyLivenessMod, "findLiveProxy").mockResolvedValue(null as any);
-    const loadSpy = spyOn(configMod, "loadConfig").mockReturnValue({ providers: {} } as any);
+    const loadSpy = spyOn(configMod, "loadConfig").mockReturnValue({ ...configMod.getDefaultConfig(), port: 19346 });
     const saveSpy = spyOn(configMod, "saveConfig").mockImplementation(() => {});
     const rlClose = () => {};
     const rlMock = { close: rlClose } as any;

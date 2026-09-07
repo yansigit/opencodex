@@ -714,7 +714,7 @@ describe("codexWsUpstreamFetch", () => {
         return rawCodexWsUpstreamFetch(url, streamingInit(), (async () => {
           fallbacks++;
           throw new Error("a sent create must not be resent over HTTP");
-        }) as typeof fetch, BOUNDED_WS_RUNTIME, onQuota);
+        }) as typeof fetch, BOUNDED_WS_RUNTIME, { wsUpstream: true }, onQuota);
       }, {});
       const ws = FakeWebSocket.instances.at(-1)!;
       expect(attempts).toBe(1);
@@ -903,7 +903,7 @@ describe("codexWsUpstreamFetch", () => {
             ws.emit("open", {});
           });
           const response = await rawCodexWsUpstreamFetch(url, { ...streamingInit(), signal: abort.signal },
-            (async () => { fallbacks++; throw new Error("unexpected fallback"); }) as typeof fetch, BOUNDED_WS_RUNTIME);
+            (async () => { fallbacks++; throw new Error("unexpected fallback"); }) as typeof fetch, BOUNDED_WS_RUNTIME, { wsUpstream: true });
           const ws = FakeWebSocket.instances.at(-1)!;
           abort.abort(new Error("late abort"));
           ws.emit("error", {});

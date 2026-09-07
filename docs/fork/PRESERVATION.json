@@ -243,6 +243,23 @@
     }
   },
   "releases": {
+    "v2.46.0": {
+      "tag": "v2.46.0",
+      "tagSha": "bba63222d3eeb5c8e397edae35798225e4fa1a6f",
+      "baseSha": "07b48da8fd63881e848d26e0bd50087864f5573e",
+      "decisions": {
+        "src/cli/init.ts": {
+          "upstreamIntent": "Existing valid config makes init an idempotent no-op; preserve existing and concurrently created config bytes.",
+          "forkInvariant": "Non-interactive init and setup refuse existing config with exit 2 unless --yes explicitly authorizes replacement; interactive replacement requires confirmation.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Operator explicitly approved retaining the fork refusal contract on 2026-09-07. runInit retains decideInitOverwrite, explicit replacement, and initializePersistedConfigIfMissing for race-safe fresh publication. The upstream EOF tests retain byte and backup preservation assertions but expect the approved exit code and refusal guidance.",
+          "exactTests": [
+            "bun test tests/service/init-eof.test.ts tests/service/init-overwrite-confirmation.test.ts tests/service/init-backup-cleanup.test.ts"
+          ]
+        }
+      }
+    },
     "v2.40.0": {
       "tag": "v2.40.0",
       "tagSha": "35ff3a462e786bd5efc394dfb1a8a5cc946e454f",

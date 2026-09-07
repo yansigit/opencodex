@@ -238,6 +238,8 @@ export function responsesSseToAnthropicSse(
   let bufferBytes = 0;
   let started = false;
   let terminated = false;
+  // Closing a block can still overflow before a terminal is delivered.
+  let terminalDelivered = false;
   let cancelled = false;
   let blockIndex = 0;
   let open: OpenBlock | null = null;
@@ -352,6 +354,7 @@ export function responsesSseToAnthropicSse(
           usage: anthropicUsage(usage, webSearchRequests),
         });
         emit("message_stop", { type: "message_stop" });
+        terminalDelivered = true;
       };
       // upstreamDerived: transient upstream statuses become overloaded_error so the
       // Anthropic-SDK client retries with backoff; proxy-internal exceptions stay
@@ -360,12 +363,13 @@ export function responsesSseToAnthropicSse(
       // resets reach the reader catch (no failed-tail relay) and stay api_error —
       // same as today, deliberate residual.
       const fail = (status: number, message: string, upstreamDerived = false, code?: string) => {
-        if (terminated) return;
+        if (terminated && (code !== "translation_buffer_limit" || terminalDelivered)) return;
         terminated = true;
         if (code === "translation_buffer_limit") {
           releaseThinkingBuffer(open);
           if (open?.callId) translatorBudget.closeCall(open.callId);
           open = null;
+          terminalDelivered = true;
           // No normal close frames are valid after overflow. Emit exactly one bounded
           // typed terminal without consulting the exhausted budget.
           controller.enqueue(encoder.encode(sseFrame("error", anthropicErrorBody(
@@ -382,10 +386,12 @@ export function responsesSseToAnthropicSse(
           // Do not manufacture message_start before the terminal error. Earlier transport-only
           // pings remain valid and do not turn the failure into a partial message.
           emit("error", anthropicErrorBody(status, message, type, code));
+          terminalDelivered = true;
           return;
         }
         closeOpenBlock();
         emit("error", anthropicErrorBody(status, message, type, code));
+        terminalDelivered = true;
       };
 
       const handleFrame = (eventName: string, data: Rec) => {
@@ -589,6 +595,23 @@ export function responsesSseToAnthropicSse(
               }
               closeOpenBlock();
               break;
+            }
+            if (item.type === "reasoning") {
+              const encrypted = typeof item.encrypted_content === "string" ? item.encrypted_content : undefined;
+              const envelope = encrypted ? decodeReasoningEnvelope(encrypted) : null;
+              if (envelope?.sig && open?.kind !== "thinking") ensureBlock("thinking");
+              if (open?.kind !== "thinking") {
+                if (envelope?.red?.length) {
+                  ensureStarted();
+                  closeOpenBlock();
+                  for (const data of envelope.red) {
+                    const index = blockIndex++;
+                    emit("content_block_start", { type: "content_block_start", index, content_block: { type: "redacted_thinking", data } });
+                    emit("content_block_stop", { type: "content_block_stop", index });
+                  }
+                }
+                break;
+              }
             }
             if (!open) break;
             // Close the matching open block (message/reasoning items close implicitly on
@@ -907,12 +930,12 @@ export function responsesJsonToAnthropicMessage(json: unknown, model: string): R
           if (env?.sig) sig = env.sig;
           if (env?.red && env.red.length > 0) red = env.red;
         }
-        if (parts.length > 0) {
-          const derivedSig = sig ?? encodeReasoningEnvelope({ txt: parts.join("\n\n") });
-          content.push({ type: "thinking", thinking: parts.join("\n\n"), signature: derivedSig });
-        }
         if (red && red.length > 0) {
           for (const data of red) content.push({ type: "redacted_thinking", data });
+        }
+        if (parts.length > 0 || sig) {
+          const derivedSig = sig ?? encodeReasoningEnvelope({ txt: parts.join("\n\n") });
+          content.push({ type: "thinking", thinking: parts.join("\n\n"), signature: derivedSig });
         }
         break;
       }

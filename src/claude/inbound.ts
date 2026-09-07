@@ -474,7 +474,7 @@ function assistantMessageToItems(
         if (signature.startsWith(OCX_REASONING_PREFIX)) {
           const owned = decodeReasoningEnvelope(signature);
           if (!owned) throw new AnthropicRequestError("malformed ocxr1 reasoning signature");
-          if (owned.sig) throw new AnthropicRequestError("OpenCodex reasoning continuity cannot be replayed as an Anthropic signature");
+          if (Object.hasOwn(owned, "sig")) throw new AnthropicRequestError("OpenCodex reasoning continuity cannot be replayed as an Anthropic signature");
         }
         // Preserve order with interleaved tool_use: each thinking block becomes its own reasoning item.
         const encrypted = signature.length === 0

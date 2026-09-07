@@ -104,7 +104,9 @@ describe("ocx init piped stdin (#754)", () => {
     }
   }, 30_000);
 
-  test.each(["init", "setup"])("%s preserves existing config before asking for input", async command => {
+  // Fork policy, explicitly retained for v2.46: a non-interactive invocation
+  // refuses existing state unless --yes authorizes replacement.
+  test.each(["init", "setup"])("%s refuses existing config before asking for input", async command => {
     const home = makeHome();
     const bytes = '\uFEFF{ "port":21002, "providers":{}, "defaultProvider":"openai", "customNote":"keep" }\n';
     writeFileSync(join(home, "config.json"), bytes);
@@ -112,8 +114,9 @@ describe("ocx init piped stdin (#754)", () => {
     const stdout = remainingOutput(proc.stdout);
     const stderr = new Response(proc.stderr).text();
     try {
-      expect(await proc.exited).toBe(0);
-      expect(await stdout).toContain("Keeping existing config");
+      expect(await proc.exited).toBe(2);
+      expect(await stdout).not.toContain("Select default provider");
+      expect(await stderr).toContain("ocx init --yes");
       expect(await stderr).not.toContain("fixture-init-key");
       expect(readFileSync(join(home, "config.json"), "utf8")).toBe(bytes);
       expect(readdirSync(home).filter(name => name.startsWith("config.json"))).toEqual(["config.json"]);
@@ -127,9 +130,9 @@ describe("ocx init piped stdin (#754)", () => {
     const stdout = remainingOutput(proc.stdout);
     const stderr = new Response(proc.stderr).text();
     try {
-      expect(await proc.exited).toBe(1);
+      expect(await proc.exited).toBe(2);
       expect(await stdout).not.toContain("Select default provider");
-      expect(await stderr).toContain("preserved");
+      expect(await stderr).toContain("ocx init --yes");
       expect(readFileSync(join(home, "config.json"), "utf8")).toBe(bytes);
       expect(readdirSync(home).filter(name => name.startsWith("config.json"))).toEqual(["config.json"]);
     } finally { await stop(proc); }
@@ -149,7 +152,7 @@ describe("ocx init piped stdin (#754)", () => {
       await proc.stdin.flush();
       const stdout = remainingOutput(proc.stdout);
       expect(await proc.exited).toBe(1);
-      expect(await stderr).toContain("keeping it");
+      expect(await stderr).toContain("keeping that config");
       const rest = await stdout;
       expect(rest).not.toMatch(/Inject into|autostart shim|Setup complete/);
       expect(readFileSync(join(home, "config.json"), "utf8")).toBe(winner);
