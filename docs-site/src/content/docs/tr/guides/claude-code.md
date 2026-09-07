@@ -609,11 +609,13 @@ dönüştürür:
 | Asistan metni | `output_text` |
 | Asistan `tool_use` | `function_call` (`input` → JSON dizgeleştirilmiş `arguments`) |
 | Kullanıcı `tool_result` | `function_call_output` (`is_error` → `[tool error]` öneki) |
-| `thinking` / `redacted_thinking` tekrarı | Bırakılır |
+| `thinking` / `redacted_thinking` tekrarı | İmzaları ve gizli yükleri sınırlı `ocxr1` zarflarında taşıyan `reasoning` öğeleri |
 | Fonksiyon araçları | `{type: "function"}` (`web_search*` → `{type: "web_search"}`) |
 | `tool_choice` | `auto`→`auto`, `none`→`none`, `any`→`required`, adlandırılmış fonksiyon→`{type:"function",name}`, barındırılan WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
 | `stop_sequences` | `stop` |
+
+Hedeflenen Anthropic adaptöründe gizlenmemiş imzalı bloklar (boş thinking dahil) ve opak redacted blokları korunur. `hideThinkingSummary` değişmez: yerel olarak gizlenen imzalı metin Claude istemcilerine gösterilmez; bu sınır üzerinden kayıpsız yeniden oynatma doğrulanmamıştır. Eski birleşik zarflarda metin akışla gönderildikten sonra özgün blok sırası geri getirilemez. `claudeCode.compatibility: "enforce"` thinking yeniden oynatmasını hâlâ reddeder. Bu, gerçek Anthropic kabulünü veya önbellek iyileşmesini kanıtlamaz; [#3719](https://github.com/lidge-jun/opencodex/issues/3719) açık kalır.
 
 **Hata durumları (400):** hatalı biçimlendirilmiş JSON; eksik/boş `model`;
 eksik/boş `messages`; desteklenmeyen rol; `tool_use_id` içermeyen `tool_result`;
@@ -626,7 +628,8 @@ kimlik/ad içermeyen `tool_use`; ad içermeyen adlandırılmış `tool_choice`.
 | `response.created` | `message_start` + `ping` |
 | Kalp atışı (Heartbeat) | `ping` |
 | Metin farkları | `content_block_start` → `content_block_delta` (metin) → `content_block_stop` |
-| Akıl yürütme özeti/metni | Sentetik imzalı `thinking` bloğu |
+| Akıl yürütme özeti/metni | Tekrarlanan imzayı veya sınırlı bir `ocxr1` yedeğini taşıyan `thinking` bloğu |
+| Gizli akıl yürütme | Akıl yürütme zarfından yeniden oynatılan `redacted_thinking` blokları |
 | Fonksiyon çağrısı çerçeveleri | `input_json_delta` ile `tool_use` bloğu |
 | Terminal olayı | `message_delta` → `message_stop` |
 | Terminalden önce EOF | 502 tarzı `api_error` |

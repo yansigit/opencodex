@@ -131,7 +131,7 @@ yeniden sıralamaktır. Kontrol panelinin **Alt Ajanlar** sayfası yalın yerel 
 yönlendirilen kimlikleri yeniden sıralayabilir. Tam
 `<seçici>/<yerel-openai-modeli>` seçimleri için `ocx agent subagents set`
 kullanın veya opencodex yapılandırmasını düzenleyin; kontrol paneli bu seçimleri
-listelemez ve kadroyu kaydederse bunları atlar. En fazla beş yapılandırılmış
+önceden kaydedilen kimlikleri, kullanılamasalar bile korur. En fazla beş yapılandırılmış
 kimlik kullanın. Hesap seçicileriyle tek bir yalın yerel seçenek birden çok
 seçici nitelikli katalog satırına genişleyebilir, bu nedenle yapılandırılmış
 seçimler ve tanıtılan satırlar birebir olmak zorunda değildir.
@@ -181,3 +181,11 @@ tanıttığı listeyi yeniden sıralamaz.
 
 `disabledModels` ve her sağlayıcının `selectedModels` alanı
 görünürlüğü denetler. Ayrı bir `modelOrder`, `providerOrder` veya öncelik haritası ayarı yoktur.
+
+## Kontrol paneli sıra önayarları
+
+**Models** sayfasında Varsayılan, Model adına göre A–Z, Sağlayıcıya göre veya Kullanım anlık görüntüsünü seçip sırayı uygulayın. Kullanılabilir yönlendirilmiş kimlikler ve `modelPickerOrderMode` (`alphabetical`, `provider`, `most-used`) kaydedilir. Saklanan tüm kullanım yalnızca uygulamada bir kez okunur; yeniden yükleme veya model değişiklikleri yeniden hesaplamaz. Özel ve tam yerel sıra açıkça değiştirilene kadar korunur. Varsayılan, kullanılabilir model yokken bile iki alanı temizler.
+
+`GET/PUT /api/subagent-models`, devre dışı veya eksik kayıtlı seçimleri `chosen` ve `available` içinde korur; `pickerAvailable` uygun yönlendirilmiş kimliklerdir. Models yalnızca `pickerOrder` ve `pickerOrderMode` gönderir, `models` göndermez. Yalnız kadroyu kaydetmek sırayı değiştirmez. Geçersiz giriş veya kayıt hatası önceki durumu korur.
+
+Öne çıkan ve yerel öncelik aralıkları korunur. Sıra Codex kataloğu ve Claude keşfinin yönlendirilmiş gruplarına uygulanır; Claude yerel öneki, açık Desktop profilleri ve alias sahipliği korunur. OpenCodex rehberlik sıraları ve fallback ayarları değişmez; yerel Codex aracının sunduğu ilk beş seçenek ve önerilen varsayılan değişebilir. Kayıt istemcileri yeniden başlatmaz; katalog yenilemesi bekleyebilir ve eski kataloğu gösteren istemcinin yeniden açılması gerekebilir.

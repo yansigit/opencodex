@@ -46,6 +46,9 @@ beforeEach(() => {
   }));
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
+    if (url.endsWith("/api/subagent-models") && init?.method !== "PUT") {
+      return Response.json({ pickerAvailable: ["anthropic/claude-sonnet-5", "anthropic/claude-opus-4-5"], pickerOrder: [], pickerOrderMode: null });
+    }
     if (url.endsWith("/api/models")) {
       return Response.json([
         { provider: "anthropic", id: "claude-sonnet-5", namespaced: "anthropic/claude-sonnet-5", disabled: false },
@@ -452,4 +455,257 @@ test.each(["preset", "visibility"] as const)("an in-flight %s mutation blocks th
   expect(writes).toEqual(expectedWrites);
   expect(container.querySelector(".models-integration-warning")).toBeNull();
   expect(container.querySelector(".action-toast.notice-ok")).not.toBeNull();
+});
+
+
+function pickerApply(): HTMLButtonElement {
+  return [...container.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "Apply order")!;
+}
+async function choosePickerOrder(label: string): Promise<void> {
+  const selector = container.querySelector<HTMLButtonElement>('[role="combobox"][aria-label="Picker order"]')!;
+  await act(async () => { selector.click(); });
+  const option = [...testWindow.document.querySelectorAll('[role="option"]')].find(node => node.textContent === label)!;
+  await act(async () => { (option as unknown as HTMLButtonElement).click(); });
+}
+
+test("picker applies only picker fields, keeps Most used on reload, and surfaces refresh pending", async () => {
+  const baseFetch = globalThis.fetch;
+  const available = ["anthropic/claude-sonnet-5", "anthropic/claude-opus-4-5"];
+  let saved: { pickerOrder: string[]; pickerOrderMode: string | null } = { pickerOrder: [], pickerOrderMode: null };
+  let usageCalls = 0;
+  const writes: unknown[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/api/subagent-models")) {
+      if (init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)); writes.push(body); saved = body;
+        return Response.json({ ok: true, ...saved, catalogRefresh: { status: "skipped", reason: "busy", retryable: true } });
+      }
+      return Response.json({ pickerAvailable: available, ...saved });
+    }
+    if (url.includes("/api/usage?")) { usageCalls++; return Response.json({ models: [
+      { provider: "anthropic", model: "claude-sonnet-5", requests: 8 },
+    ] }); }
+    return baseFetch(input, init);
+  }) as typeof fetch;
+  await mountModelsForRefreshWarning();
+  await waitForModelsFeedback(() => !!pickerApply() && !pickerApply().disabled);
+  expect(usageCalls).toBe(0);
+  await choosePickerOrder("Most used snapshot");
+  await act(async () => { pickerApply().click(); });
+  await waitForModelsFeedback(() => writes.length === 1 && !!container.querySelector(".action-toast"));
+  expect(writes).toEqual([{ pickerOrder: available, pickerOrderMode: "most-used" }]);
+  expect(container.querySelector(".action-toast")?.textContent).toContain("catalog refresh is pending");
+  expect(usageCalls).toBe(1);
+  await act(async () => { root!.unmount(); });
+  root = null;
+  await mountModelsForRefreshWarning();
+  await waitForModelsFeedback(() => container.querySelector('[aria-label="Picker order"]')?.textContent?.includes("Most used snapshot") === true);
+  expect(usageCalls).toBe(1);
+});
+
+test("picker Default clears saved order with truly empty model and provider inventories", async () => {
+  const baseFetch = globalThis.fetch;
+  let written: unknown;
+  testWindow.sessionStorage.removeItem("ocx.models.catalog.v1:http://localhost");
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).endsWith("/api/models") || String(input).endsWith("/api/providers")) return Response.json([]);
+    if (String(input).endsWith("/api/subagent-models")) {
+      if (init?.method === "PUT") {
+        written = JSON.parse(String(init.body));
+        return Response.json({ ok: true, pickerOrder: [], pickerOrderMode: null,
+          catalogRefresh: { status: "committed", degraded: false, changed: true, notices: [] } });
+      }
+      return Response.json({ pickerAvailable: [], pickerOrder: ["gone/model"], pickerOrderMode: "most-used" });
+    }
+    return baseFetch(input, init);
+  }) as typeof fetch;
+  clearClientResourceStoresForTests();
+  testWindow.localStorage.setItem("ocx-lang", "en");
+  const { createRoot } = await import("react-dom/client");
+  await act(async () => {
+    root = createRoot(container);
+    root.render(<LanguageProvider><Models apiBase="http://localhost" /></LanguageProvider>);
+  });
+  await waitForModelsFeedback(() => container.querySelector<HTMLButtonElement>('[aria-label="Picker order"]')?.disabled === false);
+  expect([...container.querySelectorAll("button")].some(button => button.textContent === "All off")).toBe(false);
+  await choosePickerOrder("Default");
+  expect(pickerApply().disabled).toBe(false);
+  await act(async () => { pickerApply().click(); });
+  await waitForModelsFeedback(() => written !== undefined);
+  expect(written).toEqual({ pickerOrder: null, pickerOrderMode: null });
+});
+
+test("malformed picker save remains retryable and never publishes success", async () => {
+  const baseFetch = globalThis.fetch;
+  globalThis.fetch = (async (input, init) => String(input).endsWith("/api/subagent-models") && init?.method === "PUT"
+    ? Response.json({ ok: true }) : baseFetch(input, init)) as typeof fetch;
+  await mountModelsForRefreshWarning();
+  await waitForModelsFeedback(() => !!pickerApply() && !pickerApply().disabled);
+  await choosePickerOrder("Group by provider");
+  await act(async () => { pickerApply().click(); });
+  await waitForModelsFeedback(() => !!container.querySelector(".action-toast") && !pickerApply().disabled);
+  expect(container.querySelector(".action-toast.notice-ok")).toBeNull();
+  expect(container.querySelector('[aria-label="Picker order"]')?.textContent).toContain("Group by provider");
+});
+
+
+test("a late picker GET cannot overwrite a saved order or its session cache", async () => {
+  const baseFetch = globalThis.fetch;
+  const available = ["anthropic/claude-sonnet-5", "anthropic/claude-opus-4-5"];
+  const old = { pickerAvailable: available, pickerOrder: [], pickerOrderMode: null };
+  testWindow.sessionStorage.setItem("ocx.models.catalog.v1:http://localhost:picker-order", JSON.stringify(old));
+  let releaseGet!: (response: Response) => void;
+  let writes = 0;
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).endsWith("/api/subagent-models")) {
+      if (init?.method === "PUT") {
+        writes++;
+        return Response.json({ ok: true, ...JSON.parse(String(init.body)),
+          catalogRefresh: { status: "committed", changed: true, degraded: false, notices: [] } });
+      }
+      return new Promise<Response>(resolve => { releaseGet = resolve; });
+    }
+    return baseFetch(input, init);
+  }) as typeof fetch;
+  await mountModelsForRefreshWarning();
+  await waitForModelsFeedback(() => !!releaseGet && !!pickerApply() && !pickerApply().disabled);
+  await choosePickerOrder("Group by provider");
+  const button = pickerApply();
+  await act(async () => { button.click(); button.click(); });
+  await waitForModelsFeedback(() => writes === 1 && !!container.querySelector(".action-toast.notice-ok"));
+  await act(async () => { releaseGet(Response.json(old)); });
+  expect(container.querySelector('[aria-label="Picker order"]')?.textContent).toContain("Group by provider");
+  const cached = JSON.parse(testWindow.sessionStorage.getItem("ocx.models.catalog.v1:http://localhost:picker-order")!);
+  expect(cached.pickerOrderMode).toBe("provider");
+  expect(cached.pickerOrder).toEqual(["anthropic/claude-opus-4-5", "anthropic/claude-sonnet-5"]);
+});
+
+test("leaving Models aborts its pending picker save", async () => {
+  const baseFetch = globalThis.fetch;
+  let signal: AbortSignal | null | undefined;
+  let finish!: (response: Response) => void;
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).endsWith("/api/subagent-models") && init?.method === "PUT") {
+      signal = init.signal;
+      return new Promise<Response>(resolve => { finish = resolve; });
+    }
+    return baseFetch(input, init);
+  }) as typeof fetch;
+  await mountModelsForRefreshWarning();
+  await waitForModelsFeedback(() => !!pickerApply() && !pickerApply().disabled);
+  await act(async () => { pickerApply().click(); });
+  await waitForModelsFeedback(() => !!finish);
+  await act(async () => { root!.unmount(); });
+  root = null;
+  expect(signal?.aborted).toBe(true);
+  await act(async () => { finish(Response.json({ ok: true, pickerOrder: [], pickerOrderMode: null })); });
+  expect(container.querySelector(".action-toast")).toBeNull();
+});
+
+
+function holdPostSaveAppServerRead() {
+  const baseFetch = globalThis.fetch;
+  let aReads = 0;
+  let heldSignal: AbortSignal | null | undefined;
+  let release: ((response: Response) => void) | undefined;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/api/system/codex-app-server")) {
+      if (url.startsWith("http://proxy-b/")) return Response.json({ state: "stale", runningCount: 1 });
+      aReads++;
+      if (aReads === 2) {
+        heldSignal = init?.signal;
+        return new Promise<Response>(resolve => { release = resolve; });
+      }
+      return Response.json({ state: "fresh", runningCount: 1 });
+    }
+    if (url.endsWith("/api/subagent-models") && init?.method === "PUT") {
+      return Response.json({ ok: true, ...JSON.parse(String(init.body)),
+        catalogRefresh: { status: "committed", changed: true, degraded: false, notices: [] } });
+    }
+    return baseFetch(input, init);
+  }) as typeof fetch;
+  return {
+    ready: () => release !== undefined,
+    signal: () => heldSignal,
+    reads: () => aReads,
+    release: (state: "fresh" | "stale") => release!(Response.json({ state, runningCount: 1 })),
+  };
+}
+
+async function savePickerWithHeldStatus(): Promise<ReturnType<typeof holdPostSaveAppServerRead>> {
+  const pending = holdPostSaveAppServerRead();
+  await mountModelsForRefreshWarning();
+  await waitForModelsFeedback(() => !!pickerApply() && !pickerApply().disabled && pending.reads() === 1);
+  await choosePickerOrder("Group by provider");
+  await act(async () => { pickerApply().click(); });
+  await waitForModelsFeedback(() => pending.ready() && !!container.querySelector(".action-toast.notice-ok")
+    && !!pickerApply() && !pickerApply().disabled);
+  // PUT has completed and released its own owner; the observational owner must remain.
+  expect(pending.signal()?.aborted).toBe(false);
+  return pending;
+}
+
+test("post-save A status cannot replace B's banner after apiBase changes", async () => {
+  const pending = await savePickerWithHeldStatus();
+  await act(async () => {
+    root!.render(<LanguageProvider><Models apiBase="http://proxy-b" /></LanguageProvider>);
+  });
+  await waitForModelsFeedback(() => !!container.querySelector(".codex-stale-banner"));
+  expect(pending.signal()?.aborted).toBe(true);
+  // The late callback must remain ineligible even when transport ignores cancellation.
+  await act(async () => { pending.release("fresh"); });
+  expect(container.querySelector(".codex-stale-banner")).not.toBeNull();
+  const savedA = JSON.parse(testWindow.sessionStorage.getItem("ocx.models.catalog.v1:http://localhost:picker-order")!);
+  expect(savedA.pickerOrderMode).toBe("provider");
+});
+
+test("same-base newer app-server reading wins over the held post-save reading", async () => {
+  const pending = await savePickerWithHeldStatus();
+  await act(async () => {
+    root!.render(<LanguageProvider><Models apiBase="http://localhost" restartEpoch={1} /></LanguageProvider>);
+  });
+  await waitForModelsFeedback(() => pending.reads() === 3);
+  expect(pending.signal()?.aborted).toBe(true);
+  await act(async () => { pending.release("stale"); });
+  expect(container.querySelector(".codex-stale-banner")).toBeNull();
+  expect(container.querySelector(".action-toast.notice-ok")).not.toBeNull();
+});
+
+test("manual deadline remains owned after PUT success and timeout cannot undo the save", async () => {
+  const pending = holdPostSaveAppServerRead();
+  await mountModelsForRefreshWarning();
+  await waitForModelsFeedback(() => !!pickerApply() && !pickerApply().disabled && pending.reads() === 1);
+  const originalAny = Object.getOwnPropertyDescriptor(AbortSignal, "any");
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const timers = new Map<number, { callback: () => void; ms: number }>();
+  let timerId = 0;
+  try {
+    Object.defineProperty(AbortSignal, "any", { configurable: true, value: undefined });
+    globalThis.setTimeout = ((callback: () => void, ms: number) => {
+      const id = ++timerId;
+      timers.set(id, { callback, ms });
+      return id;
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = ((id: number) => { timers.delete(id); }) as typeof clearTimeout;
+    await choosePickerOrder("Group by provider");
+    await act(async () => { pickerApply().click(); });
+    await waitForModelsFeedback(() => pending.ready() && !!container.querySelector(".action-toast.notice-ok")
+      && !!pickerApply() && !pickerApply().disabled);
+    const deadlines = [...timers.values()].filter(timer => timer.ms === 15_000);
+    expect(deadlines).toHaveLength(1);
+    await act(async () => { deadlines[0]!.callback(); });
+    expect(pending.signal()?.aborted).toBe(true);
+    await act(async () => { pending.release("stale"); });
+    expect(container.querySelector(".codex-stale-banner")).toBeNull();
+    expect(container.querySelector(".action-toast.notice-ok")).not.toBeNull();
+    expect(container.querySelector('[aria-label="Picker order"]')?.textContent).toContain("Group by provider");
+  } finally {
+    if (originalAny) Object.defineProperty(AbortSignal, "any", originalAny);
+    else Reflect.deleteProperty(AbortSignal, "any");
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
 });

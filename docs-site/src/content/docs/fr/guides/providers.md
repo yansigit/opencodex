@@ -124,6 +124,9 @@ ocx logout <provider>
 | `cursor` | `cursor` | `https://api2.cursor.sh` | Connexion PKCE expérimentale, transport HTTP/2 en direct et découverte de modèles filtrés par compte. |
 | `github-copilot` | `openai-chat` | `https://api.githubcopilot.com` | Expérimental. Flux d'appareil GitHub et échange `copilot_internal` (client OAuth de VS Code). Nécessite un abonnement Copilot actif ; il ne s'agit pas d'une API tierce officielle. |
 
+Les vérifications de quota Google Antigravity utilisent des points de terminaison Google fixes, y compris le repli vers la liste des modèles. Elles prennent en charge le DNS Fake-IP transparent pour ces destinations en conservant la vérification TLS, le refus des redirections et les contrôles des adresses privées. Une URL de base personnalisée ne modifie que les requêtes de modèles ; `NO_PROXY` conserve la politique de connexion directe.
+
+
 Après un échec définitif d'actualisation de Nous, exécutez `ocx login nous` pour vous réauthentifier.
 
 Pour les préréglages canoniques du forfait Kimi Coding (`kimi` pour la connexion au compte et `kimi-code`
@@ -309,6 +312,7 @@ promotionnels de Cline ne sont accessibles que dans l'IDE ou la CLI Cline, pas p
 | NVIDIA NIM | `https://integrate.api.nvidia.com/v1` |
 | Z.AI (GLM Coding) | `https://api.z.ai/api/coding/paas/v4` |
 | Zhipu AI (BigModel) | `https://open.bigmodel.cn/api/paas/v4` |
+| [BigModel Coding Plan — Responses (liste statique)](/guides/providers/#bigmodel-coding-plan-over-responses) | `https://open.bigmodel.cn/api/v1` |
 | Qwen Cloud | Forfait à jetons (par défaut) : `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` · Facturation à l'usage : `https://dashscope.aliyuncs.com/compatible-mode/v1` · ou personnalisé |
 | Tencent Cloud Coding Plan | `https://api.lkeap.cloud.tencent.com/coding/v3` |
 | SiliconFlow | `https://api.siliconflow.cn/v1` |
@@ -500,7 +504,7 @@ une barre trompeuse.
 > programmation interactifs. L'automatisation générale par API, les services applicatifs personnalisés et les
 > traitements par lots non interactifs sont interdits et peuvent entraîner la suspension de la clé du forfait.
 
-> **Deux routes GLM :** `zai` correspond à l'abonnement international Z.AI Coding Plan ; `zhipu-bigmodel`
+> **Facturation GLM :** `zai` correspond à l'abonnement international Z.AI Coding Plan ; `zhipu-bigmodel`
 > correspond au point de terminaison national BigModel de Zhipu, facturé à l'usage. Les hôtes, les clés et la
 > facturation diffèrent : une clé émise pour l'un ne permet pas de s'authentifier auprès de l'autre.
 

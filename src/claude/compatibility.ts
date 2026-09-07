@@ -28,6 +28,30 @@
 
 export type ClaudeCompatibilityMode = "shadow" | "enforce";
 
+export type ClaudeFeatureCode = string;
+
+const NORMALIZABLE_FEATURES = new Set([
+  "cache_control", "thinking_block", "signed_thinking", "documents", "unknown_content_block",
+  "web_search_tool", "code_execution", "computer_use", "mcp_tool", "server_tool", "tool_search",
+  "deferred_tools", "structured_output", "service_tier", "context_management", "input_examples",
+  "thinking_settings", "unknown_beta", "thinking_replay", "tool_reference", "strict_tools", "caller_mode",
+  "container", "inference_geo", "user_profile", "unknown_body_field",
+]);
+
+export function normalizeClaudeFeatureCodes(value: unknown): ClaudeFeatureCode[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((code): code is string =>
+    typeof code === "string" && NORMALIZABLE_FEATURES.has(code)
+  ))].sort().slice(0, 32);
+}
+
+export function claudeCompatibilityReason(codes: readonly ClaudeFeatureCode[], shadow: boolean): string | undefined {
+  const tolerated = new Set(["cache_control", "thinking_block", "thinking_settings", "unknown_beta"]);
+  const unsupported = normalizeClaudeFeatureCodes(codes).filter(code => !tolerated.has(code));
+  if (unsupported.length === 0) return undefined;
+  return `${shadow ? "shadow: would reject" : "unsupported translated Claude features"}: ${unsupported.join(", ")}`.slice(0, 512);
+}
+
 export const CLAUDE_COMPATIBILITY_MODES = ["shadow", "enforce"] as const;
 
 export function isClaudeCompatibilityMode(value: unknown): value is ClaudeCompatibilityMode {

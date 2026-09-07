@@ -569,6 +569,58 @@ describe("DeepSeek Responses endpoint contract", () => {
     }
   });
 
+  test.each([undefined, "max", "ultra"])("BigModel Turbo omits outbound effort %s and preserves summary requests", (effort) => {
+    const id = "zhipu-bigmodel-responses";
+    const config: OcxConfig = {
+      port: 10100,
+      defaultProvider: id,
+      providers: { [id]: providerConfigSeed(getProviderRegistryEntry(id)!) },
+    };
+    const route = routeModel(config, `${id}/glm-5-turbo`);
+    for (const withSummary of [false, true]) {
+      const raw = {
+        model: route.modelId,
+        input: "ping",
+        ...(effort !== undefined || withSummary ? {
+          reasoning: {
+            ...(effort !== undefined ? { effort } : {}),
+            ...(withSummary ? { summary: "auto" } : {}),
+          },
+        } : {}),
+      };
+      const before = structuredClone(raw);
+      const request = createResponsesPassthroughAdapter(route.provider).buildRequest(parseRequest(raw));
+      const wire = JSON.parse(request.body);
+      expect(request.url).toBe("https://open.bigmodel.cn/api/v1/responses");
+      if (withSummary) expect(wire.reasoning).toEqual({ summary: "auto" });
+      else expect(wire).not.toHaveProperty("reasoning");
+      expect(raw).toEqual(before);
+    }
+  });
+
+  test("a provider-wide empty ladder removes schema-valid raw effort", () => {
+    const keyed = { adapter: "openai-responses", baseUrl: "https://example.test/v1", authMode: "key" as const };
+    const raw = { model: "model", input: "ping", reasoning: { effort: "high", summary: "auto" } };
+    const wire = JSON.parse(createResponsesPassthroughAdapter({ ...keyed, reasoningEfforts: [] })
+      .buildRequest(parseRequest(raw)).body);
+    expect(wire.reasoning).toEqual({ summary: "auto" });
+    expect(raw.reasoning.effort).toBe("high");
+  });
+
+  test("empty-ladder repair preserves unknown, non-rankable and native forward effort behavior", () => {
+    const keyed = { adapter: "openai-responses", baseUrl: "https://example.test/v1", authMode: "key" as const };
+    for (const unchanged of [keyed, { ...keyed, reasoningEfforts: ["enabled"] }, { ...provider, reasoningEfforts: [] }]) {
+      const raw = { model: "gpt-5.6-sol", input: "ping", reasoning: { effort: "ultra" } };
+      const wire = JSON.parse(createResponsesPassthroughAdapter(unchanged).buildRequest(parseRequest(raw)).body);
+      expect(wire.reasoning.effort).toBe("ultra");
+    }
+    // A model-specific nonempty ladder overrides a provider-wide empty declaration.
+    const wire = JSON.parse(createResponsesPassthroughAdapter({
+      ...keyed, reasoningEfforts: [], modelReasoningEfforts: { model: ["low", "high", "max"] },
+    }).buildRequest(parseRequest({ model: "model", input: "ping", reasoning: { effort: "ultra" } })).body);
+    expect(wire.reasoning.effort).toBe("max");
+  });
+
   test("a config saved before the fix is backfilled, and a hand-set path is preserved", () => {
     const saved = { adapter: "openai-chat", baseUrl: "https://api.deepseek.com", apiKey: "sk-test" } as Parameters<typeof enrichProviderFromRegistry>[1];
     enrichProviderFromRegistry("deepseek", saved);

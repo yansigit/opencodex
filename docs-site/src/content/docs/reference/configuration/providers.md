@@ -204,6 +204,14 @@ predictions. Explicit provider/model price overrides still take precedence.
 | `unsafeAllowNativeLocalExec?` | `boolean` | Cursor legacy boolean, equivalent to `nativeLocalExec: "on"` only when the newer field is unset. |
 | `nativeLocalExec?` | `"off" \| "codex-sandbox" \| "on"` | Cursor local-exec policy. `off` is default; `codex-sandbox` currently fails closed like `off`. |
 
+Custom-model `reasoningEfforts` normally override discovered provider metadata. The bounded
+exception is an explicit Astra or Daybreak custom row on the canonical `openai` Codex-forward
+destination: its advertised list is intersected with that model's pinned native capabilities.
+An explicit empty list remains empty with no default; a nonempty incompatible list falls back
+to the native default as a single choice. Defaults must belong to the final list. This changes
+the catalog projection, not stored configuration or arbitrary gateway models sharing a GPT name.
+See [custom native catalog examples](/guides/codex-app-models/).
+
 ### Discovered model display names
 
 Use `modelDisplayNames` when a provider returns machine friendly ids but the Codex model picker
@@ -225,6 +233,16 @@ all other provider settings. The example includes the surrounding required field
 }
 ```
 
+Supported bare native GPT rows in the local Codex catalog also accept exact labels in
+`providers.openai.modelDisplayNames`, for example `"gpt-6-astra": "GPT 6 Astra"`.
+Both startup synchronization and local catalog convergence reapply these labels. Removing a label
+restores the original native name only when the row's display name still matches the applied
+override. A newer external display name is preserved subject to existing native metadata normalization;
+for example, Astra (`gpt-6-astra`) still replaces a non-pinned name with its pinned native name.
+The label overlay leaves model IDs, metadata (including capabilities), ordering,
+routed combo aliases, and account-qualified rows unchanged. This local catalog override does
+not relabel the HTTP model listings or virtual `*-pro` rows.
+
 The effective label order is operator `modelDisplayNames`, then provider catalog metadata, then the
 normal `provider/model` fallback. The routed selector remains `xai/grok-4.6`, while the upstream
 wire model remains `grok-4.6`. Labels are display only. They do not change authentication, adapter
@@ -233,6 +251,20 @@ label. A management client can set or reset one label with
 `PUT /api/providers/:provider/model-display-names` and a body of
 `{ "modelId": "grok-4.6", "displayName": "Grok 4.6" }`; send `displayName: null` to reset it.
 Provider `PATCH` does not edit this map. Use this dedicated `PUT` endpoint to change or remove labels.
+
+The dashboard exposes the same durable setting on **Models**. Expand the provider, find a
+discovered model, and choose **Name**. The dialog keeps the exact `provider/model` selector visible
+while you save a friendly label. Choose **Reset name** to return to provider metadata or the normal
+selector fallback. **Name** changes presentation only; the separate alias pencil changes the
+short routing alias and is not a display name editor. Native OpenAI and custom model rows keep their
+existing controls.
+
+If the change is saved but refreshing fails, the dialog reflects the saved override and keeps
+**Retry** available. Retry repeats catalog convergence when the server reported it failed, or
+reloads the list when only the list request failed. Reset recovery keeps the reset operation;
+it does not restore the old name. Requests have a 60-second deadline covering the write and its
+follow-up list refresh. A timeout does not undo a write: use **Retry** to check the current name
+before making another change.
 
 ## Codex catalog and root `config.toml` settings
 
@@ -432,13 +464,30 @@ rotation may trigger provider restrictions.
 | `anthropicAccountPool.enabled?` | `boolean` | `false` | Enable sticky session affinity and quota-ranked new-session selection. When this key is omitted, two or more usable accounts enable reactive 429 failover by presence. An explicit `false` disables that failover as well as the pool. |
 | `anthropicAccountPool.autoSwitchThreshold?` | `number` | `80` | For new sessions, when the active account reaches this threshold, choose the lowest known cached usage in the configured window; the account chosen does not itself have to be at or above the threshold. `0` disables **proactive** usage-based switching only — new-session selection and routing recovery after an eligible 429 still consult `quotaWindow`. |
 | `anthropicAccountPool.strategy?` | `"quota" \| "round-robin" \| "fill-first"` | `"quota"` | New-session strategy; `quota` ranks accounts by the window set by `quotaWindow`, and `fill-first` evaluates its drain threshold in that same window. |
-| `anthropicAccountPool.quotaWindow?` | `"five-hour" \| "weekly" \| "max-utilization"` | `"five-hour"` | The cached provider-reported utilization bar used for usage-aware account selection. `five-hour` keeps the original behavior. `weekly` scores the weekly bar and skips accounts whose 5-hour bar is exhausted while another eligible account remains, but falls back to exhausted candidates when none do. `max-utilization` scores the highest known bar, so it can use 5-hour usage before weekly usage is available; if neither is known, the account follows unknown-usage ordering. Known usage ranks before unknown usage under the opt-in `weekly` and `max-utilization` windows only; an omitted or explicit `five-hour` preserves the legacy ordering. If every eligible account is unknown, selection still returns one in eligible order. After the documented lower-5-hour tie-break, exact ties preserve eligible order. A healthy affinity-bound session is not proactively rebalanced. For new-session assignment and routing recovery after an eligible 429 replacement, `quota` ranks eligible candidates directly with this window; `fill-first` advances in stable order using this window's threshold and exhaustion rules; `round-robin` ignores it. Cooldown, failover limits, and reauthentication eligibility remain separate local state. Per-account weekly bars are only known once the dashboard Providers page has polled them. |
+| `anthropicAccountPool.quotaWindow?` | `"five-hour" \| "weekly" \| "max-utilization"` | `"five-hour"` | The cached provider-reported utilization bar used for usage-aware account selection. `five-hour` keeps the original behavior. `weekly` scores the weekly bar and skips accounts whose 5-hour bar is exhausted while another eligible account remains, but falls back to exhausted candidates when none do. `max-utilization` scores the highest known bar, so it can use 5-hour usage before weekly usage is available; if neither is known, the account follows unknown-usage ordering. Known usage ranks before unknown usage under the opt-in `weekly` and `max-utilization` windows only; an omitted or explicit `five-hour` preserves the legacy ordering. If every eligible account is unknown, selection still returns one in eligible order. After the documented lower-5-hour tie-break, exact ties preserve eligible order. A healthy affinity-bound session is not proactively rebalanced. For new-session assignment and routing recovery after an eligible 429 replacement, `quota` ranks eligible candidates directly with this window; `fill-first` advances in stable order using this window's threshold and exhaustion rules; `round-robin` ignores it. Cooldown, failover limits, and reauthentication eligibility remain separate local state. Per-account weekly bars come from usage probes or observed response headers. |
 | `anthropicAccountPool.stickyLimit?` | `number` | `1` | Successful new-session binds retained on one round-robin selection. Range 1–100. |
 
-When reactive failover is active, 429 records bounded cooldown from `Retry-After` or a default backoff and may rotate
-within the request. Affinity is process-local and size-bounded. Credential 401/403 marks the account
-as needing reauthentication. If all eligible accounts are cooling, clients receive 429 with
+When reactive failover is active, 429 records cooldown and may rotate within the request. The cooldown length comes
+from a usable `Retry-After`, otherwise from the latest valid reset time among rate-limit windows
+Anthropic reports as `rejected`, including weekly windows. Valid upstream deadlines are not
+shortened to a fixed cooldown ceiling; non-finite or unrepresentable deadlines are ignored.
+A refusal with no usable deadline falls back to a 60-second default backoff. Affinity is process-local
+and size-bounded. Credential 401/403 marks the account as needing reauthentication. If all eligible accounts are cooling, clients receive 429 with
 `Retry-After` when known, not an authentication error.
+
+Anthropic responses also report the serving account's 5-hour and weekly utilization, and whichever
+of those two a given response carries is recorded against that account — each window independently,
+on refusals as well as successes. Usage-aware selection therefore works from the accounts you
+actually use, without waiting for the dashboard Providers page to poll them. These readings refresh
+the existing row rather than replacing it, so the model-scoped weekly bars that only the usage
+endpoint reports are preserved until their known reset time passes. Expired measurements become
+unknown, including retained standard windows omitted by later headers. A reset-only header cannot
+extend an older utilization measurement. Values with no known reset retain their existing behavior;
+missing measurements are never replaced with zero usage.
+
+Header observations do not postpone usage probes or clear a failed
+probe's unavailable status. After restart, cached Anthropic observations remain available while
+the next quota read probes again, because the saved observations do not include the probe clock.
 
 :::caution[Experimental]
 Leave this disabled unless you understand Anthropic account policy risk. Prefer manual
@@ -771,6 +820,12 @@ When not to opt in: a proxy running as a headless service (systemd, launchd, Tas
 container usually has no unlocked keychain session, so requests would fail closed. Use an
 `${ENV_VAR}` reference in the service environment there instead. Env references are left untouched
 by `store`.
+
+The `zhipu-bigmodel-responses` preset seeds `glm-5.3` and `glm-5-turbo` with
+`liveModels: false` for `https://open.bigmodel.cn/api/v1`. Its static roster and
+per-model context, effort, and summary metadata come from the
+[BigModel Responses guide](/guides/providers/#bigmodel-coding-plan-over-responses).
+The official local `models.json` example does not establish a live `/models` API.
 
 With `liveModels: false`, an empty or omitted `models` list seeds the configured `defaultModel`
 first, followed by `retainModels`; duplicate ids are removed while preserving first occurrence.

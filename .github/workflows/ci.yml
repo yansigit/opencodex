@@ -482,6 +482,7 @@ jobs:
         run: |
           bun x tsc --noEmit
           bun x tsc --noEmit -p tests/tsconfig.doctor-service-memory-contract.json
+          bun x tsc --ignoreConfig --noEmit --strict --target ESNext --module ESNext --moduleResolution bundler --types bun-types --skipLibCheck scripts/ci/docker-smoke.ts
 
       - name: Install replit-gateway companion
         run: cd integrations/replit-gateway && bun install --frozen-lockfile
@@ -878,6 +879,28 @@ jobs:
             bun run scripts/keyring-smoke.ts
           '
 
+  # Exercise the source-build Compose contract, including real volume reuse.
+  # Host fixtures cannot prove image construction or container recreation.
+  docker-smoke:
+    name: docker smoke
+    needs: changes
+    if: >-
+      (github.event_name != 'pull_request' && github.event_name != 'merge_group') ||
+      needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+
+      - name: Build, start, and recreate the container
+        run: bun scripts/ci/docker-smoke.ts
+
   npm-global-smoke:
     name: npm-global ${{ matrix.os }}
     needs: changes
@@ -944,7 +967,7 @@ jobs:
     name: ci
     if: always()
     # Every producer, including the ones that only feed other jobs.
-    needs: [changes, test, storage-policy, api-usage, serial-load-sensitive, publish-test-timings, gates, platform-macos, platform-windows, keyring-smoke, npm-global-smoke]
+    needs: [changes, test, storage-policy, api-usage, serial-load-sensitive, publish-test-timings, gates, platform-macos, platform-windows, keyring-smoke, docker-smoke, npm-global-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

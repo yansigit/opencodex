@@ -60,6 +60,30 @@ Döndürme sırasında eski ve yeni anahtar aynı `apiKeyId` altında en fazla o
 
 ## Docker ve sorun giderme
 
+Geri alırken iki volume'u ve bağlama yollarını koruyun. Mevcut volume sahipliği ve izinleri otomatik düzeltilmez. Compose dışındaki adlandırılmış bağlamalar ve özel durum yolları için [ana kılavuza](/guides/remote-hub/#docker-compose) bakın.
+
+Durum iki ayrı kalıcı volume'da tutulur: `ocx-state`,
+`OPENCODEX_HOME=/home/bun/.opencodex` yoluna; `codex-state` ise
+`CODEX_HOME=/home/bun/.codex` yoluna bağlanır. İki ürünün `auth.json` biçimleri
+uyumsuzdur; bu dizinleri birleştirmeyin. Kök dosya sistemi salt okunur olsa da
+bu iki volume yazılabilir durumda kalır.
+
+Katalog otomatik oluşturulmaz. Kimlik doğrulamalı `/v1/catalog` kontrolünden önce
+`/home/bun/.codex/opencodex-catalog.json` konumunda geçerli bir katalog oluşturun
+veya içe aktarın. Boş dizinde 404 `catalog_not_found` beklenen sonuçtur. Güncelleme
+mevcut `ocx-state` volume'unu korur ve `codex-state` ekler; dosyaları otomatik taşımaz.
+Önceden `.opencodex` içine konmuş kataloğu yedekleyin ve yalnızca katalog dosyasını,
+sadece sahibine erişim veren izinlerle taşıyın. Bir ürünün `auth.json` dosyasını
+diğerininkiyle değiştirmeyin. `CODEX_HOME` özelleştirilirse bu dizinin tam yolunu
+yazılabilir bir volume'a bağlayın ve varsayılan kataloğu
+`${CODEX_HOME}/opencodex-catalog.json` konumuna koyun. `model_catalog_json` başka
+bir dosya seçiyorsa çözümlenen yol da kalıcı olmalıdır. Açık bir taşıma tamamlanana
+kadar mevcut özel ortam ve volume eşlemesini koruyun.
+`docker compose down` iki volume'u da korur; `docker compose down --volumes` hem
+`ocx-state` hem `codex-state` ile birlikte kimlik bilgilerini, kullanım geçmişini,
+veri anahtarını ve Codex durumunu/kataloğunu siler. Güncelleme veya yeniden başlatma
+yerine kullanılmamalıdır.
+
 Resmî Docker imajı yoktur; ancak depo, digest ile sabitlenmiş Bun imajını yerelde oluşturmak için bakımı yapılan bir `Dockerfile` ve `compose.yaml` sağlar. İlk normal başlatma, volume başına kendinden imzalı bir TLS kimliği oluşturur; herkese açık sertifika `/home/bun/.opencodex/container-tls/cert.pem`, özel anahtar ise aynı dizindedir ve yalnızca sahibi tarafından okunabilir. Veri anahtarını ilk başlatmadan önce stdin üzerinden bir kez başlatın. Yardımcı en fazla 512 baytlık tek satır kabul eder, anahtarı yazdırmaz ve `ocx-state` volume içindeki owner-only `service-api-token` dosyasını değiştirmeyi reddeder.
 
 Host üzerinde Git ve Bun gereklidir. Her imaj derlemesinden önce Git tarafından izlenen kaynaklardan kanonik manifesti üretin ve derleme bitene kadar kaynakları değiştirmeyin. Üretilen JSON dosyasını Git'e eklemeyin; `.git` Docker bağlamının dışında kalır. HTTPS host portu varsayılan olarak `127.0.0.1:10100` adresine bağlanır. `OPENCODEX_PORT=10190` hem yayınlanan host portunu hem de yönetilen `tls.publicOrigin` değerini `https://localhost:10190` yapar; konteyner içindeki port yine `10100` kalır.

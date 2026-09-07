@@ -2564,6 +2564,37 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     // yields an empty picker at runtime.
     note: "Domestic BigModel Coding Plan endpoint (open.bigmodel.cn)",
   },
+  // Narrowed carry of #3641: the official Codex example declares a local static catalog,
+  // not an HTTP /models contract. Keep Responses separate from the Chat endpoint above.
+  // Source: https://docs.bigmodel.cn/cn/coding-plan/tool/codex.md (checked 2026-09-07).
+  {
+    id: "zhipu-bigmodel-responses",
+    label: "Zhipu AI — BigModel Coding Plan (Responses)",
+    baseUrl: "https://open.bigmodel.cn/api/v1",
+    adapter: "openai-responses",
+    authKind: "key",
+    dashboardUrl: "https://bigmodel.cn/console/usercenter/apikeys",
+    defaultModel: "glm-5.3",
+    models: ["glm-5.3", "glm-5-turbo"],
+    liveModels: false,
+    // The local Codex catalog does not establish an authenticated HTTP /models contract.
+    apiKeyValidation: "unknown",
+    jawcodeBundle: "zai",
+    // A pre-existing same-named custom provider must retain its destination and key boundary.
+    preserveCustomDestination: true,
+    modelContextWindows: { "glm-5.3": 1_048_576, "glm-5-turbo": 204_800 },
+    modelInputModalities: { "glm-5.3": ["text"], "glm-5-turbo": ["text"] },
+    modelReasoningEfforts: {
+      "glm-5.3": ZAI_GLM_53_REASONING_EFFORTS,
+      // Explicitly empty: Turbo must not inherit the generic selectable effort ladder.
+      "glm-5-turbo": [],
+    },
+    modelDefaultReasoningEfforts: { "glm-5.3": "max", "glm-5-turbo": "max" },
+    modelSupportsReasoningSummaries: { "glm-5.3": true, "glm-5-turbo": true },
+    // Responses replay uses this provider-level flag, not the Chat-path model list.
+    preserveResponsesReasoningContent: true,
+    note: "Domestic BigModel Coding Plan Responses endpoint; static model roster",
+  },
   { id: "nanogpt", label: "NanoGPT", baseUrl: "https://nano-gpt.com/api/v1", adapter: "openai-chat", authKind: "key", dashboardUrl: "https://nano-gpt.com/api" },
   { id: "synthetic", label: "Synthetic", baseUrl: "https://api.synthetic.new/openai/v1", adapter: "openai-chat", authKind: "key", dashboardUrl: "https://synthetic.new" },
   // SiliconFlow publishes an OpenAI-compatible chat endpoint and a dynamic model catalog. Do not

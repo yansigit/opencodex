@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, constants as fsConstants, copyFileSync, existsSync, linkSync, mkdirSync, readFileSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, constants as fsConstants, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
 import * as z from "zod/v4";
@@ -2978,6 +2978,16 @@ export function readConfigDiagnostics(): ConfigDiagnostics {
   return readConfigFileSnapshot().diagnostics;
 }
 
+/** Read-only init preflight. Occupied unsafe entries are never treated as absence. */
+export function observeInitialConfigState(): "missing" | "exists" | "invalid" {
+  try {
+    if (!lstatSync(getConfigPath()).isFile()) return "invalid";
+  } catch (error) {
+    return isMissingPathError(error) ? "missing" : "invalid";
+  }
+  return readConfigFileSnapshot().diagnostics.source === "file" ? "exists" : "invalid";
+}
+
 /**
  * The persisted config, plus a digest of the EXACT bytes it was parsed from.
  *
@@ -3504,6 +3514,11 @@ export function initializePersistedConfigIfMissing(
       readRawConfigJson(),
       projectConfigRebaseProvenance(config),
     );
+    // Validate before creating the private staging inode so an invalid
+    // candidate cannot leave any publication residue or alter the target.
+    if (!validateConfigCandidate(projected).ok) {
+      throw new Error("Initial configuration is invalid.");
+    }
     if (!publishInitialConfigNoReplace(projected, io)) {
       const winner = readConfigFileSnapshot();
       return winner.diagnostics.source === "file" ? "exists" : "invalid";

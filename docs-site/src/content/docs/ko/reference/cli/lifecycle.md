@@ -82,6 +82,19 @@ dedicated-provider history도 포함됩니다. 상태를 백업하고 이 전체
 
 ### `ocx status [--json]`
 
+status와 `ocx doctor`는 현재 CLI와 실행 중인 프록시의 버전을 비교합니다. CLI가 더 새로우면
+원하는 최신 설치로 프록시를 재시작하십시오. 백그라운드 서비스라면 `ocx service repair`를
+실행합니다(`ocx service restart`는 별칭). 프록시가 더 새로우면 CLI를 업그레이드하거나
+`PATH`가 원하는 설치를 가리키도록 수정하십시오. 이 진단은 서비스를 복구하거나 요청 허용
+여부를 바꾸지 않습니다.
+
+버전 문자열이 같거나 어느 쪽이 `unknown` / `0.0.0`이면 경고하지 않으며, 프록시 버전이 없어도
+경고하지 않습니다. doctor는 placeholder를 버전 일치로 확정하지 않습니다. 엄격한 SemVer로
+해석할 수 없는 서로 다른 문자열이나 build metadata만 다른 버전은 어느 쪽이 오래됐다고
+단정하지 않는 중립 경고를 표시합니다. 공백을 제거하거나 앞의 `v`를 정규화하지 않습니다.
+JSON의 `versionSkew`에도 같은 안내가 들어가며 필드는 `cliVersion`, `proxyVersion`, `skewed`,
+`warning` 그대로입니다.
+
 읽기 전용 진단 요약을 출력합니다. 프록시 PID, `/healthz` 도달 가능 여부, 대시보드 URL,
 설정 경로, 기본 공급자, Codex 자동 시작 설정, 서비스 상태, shim 상태, 그리고 마스킹된
 실제로 적용되는 Codex 홈이 포함됩니다. 명시적이고 높은 신뢰도의 Windows Orca 런타임 홈 시그니처만
