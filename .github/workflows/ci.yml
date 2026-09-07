@@ -531,23 +531,19 @@ jobs:
       - name: CLI help smoke
         run: bun run src/cli/index.ts help
 
-  # macOS is focused on dev pushes and relevant pull requests, while main,
-  # preview, and dispatch retain the full unsharded control. This keeps Darwin
-  # process coverage on the fast path without dropping the release control.
+  # Dev pushes and relevant pull requests keep a focused Darwin/process lane.
+  # Release refs and main-targeting changes use the timing-balanced full-suite
+  # matrix below; nightly-macos retains the unsharded scheduler/load control.
   platform-macos:
     name: macos
     needs: changes
     if: >-
-      (github.event_name != 'pull_request' && github.event_name != 'merge_group') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/dev') ||
       (github.event_name == 'pull_request' && github.base_ref == 'main') ||
       (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/main') ||
-      needs.changes.outputs.macos == 'true'
+      ((github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.macos == 'true')
     runs-on: macos-latest
-    # The unsharded control for the sharded Linux lane: the only place the whole
-    # suite runs in one pool, so it is the place that catches what sharding
-    # hides. The flakes it keeps surfacing are timing, not logic, and the fix
-    # is the tests, not a fourth lane.
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -619,15 +615,84 @@ jobs:
             tests/storage/storage-worker-teardown-isolate.test.ts \
             tests/ci-workflows/test-runner.test.ts
 
-      - name: Full macOS suite
-        if: >-
-          github.event_name == 'workflow_dispatch' ||
-          (github.event_name == 'pull_request' && github.base_ref == 'main') ||
-          (github.event_name == 'merge_group' &&
-           github.event.merge_group.base_ref == 'refs/heads/main') ||
-          (github.event_name == 'push' &&
-           (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/preview'))
-        run: bash scripts/ci/run-bun-with-crash-retry.sh -- bun scripts/test.ts --timeout 60000
+      - name: CLI help smoke
+        run: bun run src/cli/index.ts help
+
+  # Full macOS coverage is split by measured file duration. Every test remains
+  # in exactly one platform lane; load-sensitive files run one per fresh Bun
+  # process, matching the full-suite planner. The daily nightly job deliberately
+  # stays unsharded so it can still expose whole-pool scheduling interactions.
+  platform-macos-full:
+    name: macos full ${{ matrix.shard }}/2
+    needs: changes
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name == 'merge_group' &&
+       github.event.merge_group.base_ref == 'refs/heads/main') ||
+      (github.event_name == 'push' &&
+       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/preview'))
+    runs-on: macos-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          fetch-tags: true
+
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+
+      - name: Install dependencies
+        run: |
+          bun install --frozen-lockfile
+          cd gui
+          bun install --frozen-lockfile
+
+      - name: Build GUI
+        run: |
+          cd gui
+          bun run build
+
+      - name: Restore canonical test timings
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: .bun-timings.json
+          key: ocx-test-timings-dev-${{ github.sha }}
+          restore-keys: |
+            ocx-test-timings-dev-
+
+      - name: Validate restored timing data
+        if: hashFiles('.bun-timings.json') != ''
+        run: bun scripts/ci/validate-timings.ts .bun-timings.json --discard-invalid
+
+      - name: Full macOS shard with isolated load-sensitive files
+        shell: bash
+        env:
+          TEST_SHARD: ${{ matrix.shard }}/2
+        run: |
+          set -euo pipefail
+          main_list="$(mktemp -t ocx-macos-main.XXXXXX)"
+          serial_list="$(mktemp -t ocx-macos-serial.XXXXXX)"
+          cleanup() { rm -f -- "$main_list" "$serial_list"; }
+          trap cleanup EXIT
+          bun scripts/ci/test-lanes.ts --lane platform-main --timings .bun-timings.json --shard "$TEST_SHARD" > "$main_list"
+          bun scripts/ci/test-lanes.ts --lane platform-serial --timings .bun-timings.json --shard "$TEST_SHARD" > "$serial_list"
+          main_files=()
+          while IFS= read -r file; do main_files+=("$file"); done < "$main_list"
+          test "${#main_files[@]}" -gt 0
+          bash scripts/ci/run-bun-with-crash-retry.sh -- bun scripts/test.ts --isolate --timeout 60000 "${main_files[@]}"
+          serial_files=()
+          while IFS= read -r file; do serial_files+=("$file"); done < "$serial_list"
+          test "${#serial_files[@]}" -gt 0
+          for file in "${serial_files[@]}"; do
+            bash scripts/ci/run-bun-with-crash-retry.sh -- bun scripts/test.ts --isolate --parallel=1 --timeout 60000 "$file"
+          done
 
       - name: CLI help smoke
         run: bun run src/cli/index.ts help
@@ -944,7 +1009,7 @@ jobs:
     name: ci
     if: always()
     # Every producer, including the ones that only feed other jobs.
-    needs: [changes, test, storage-policy, api-usage, serial-load-sensitive, publish-test-timings, gates, platform-macos, platform-windows, keyring-smoke, npm-global-smoke]
+    needs: [changes, test, storage-policy, api-usage, serial-load-sensitive, publish-test-timings, gates, platform-macos, platform-macos-full, platform-windows, keyring-smoke, npm-global-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
