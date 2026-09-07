@@ -420,7 +420,7 @@
         "forkInvariant": "Fork adds TLS-aware status URL suite (selectListenTarget https and canonical public origin, IPv6 bracketing, 0.0.0.0 mapping, non-TLS http fallback) at end of file.",
         "equivalentOrBetter": false,
         "disposition": "preserve",
-        "implementationEvidence": "Worktree has both suites: upstream version-skew describe at line 33, fork TLS-aware describe at line 804 with selectListenTarget https assertions. Zero-context fork-to-merge worktree diff adds only upstream imports and version-skew block; fork block untouched.",
+        "implementationEvidence": "Both upstream status version-skew and fork TLS-aware status URL suites remain, with all assertions preserved. The stale-record end-to-end fixtures allocate a fresh refused port per case; the fallback-port case allocates its recorded port only after binding the configured-port listener and asserts the ports differ, preventing the OS from reusing the earlier free-port number for that listener. No production status predicate or assertion was relaxed.",
         "exactTests": [
           "bun test tests/cli/cli-status-json.test.ts"
         ],
