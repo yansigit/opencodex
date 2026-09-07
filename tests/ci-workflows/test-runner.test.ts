@@ -243,9 +243,8 @@ describe("bun test argv", () => {
     expect(plan.find(lane => lane.label === "codex-shim.test.ts")?.timeoutMs).toBe(3 * 60 * 1000);
   });
 
-  test("account pool management keeps every assertion in one fresh-process lane", () => {
+  test.each(["account-pool-management-api.test.ts", "api-debug.test.ts"])("%s keeps every assertion in one fresh-process lane", (name) => {
     const plan = resolveBunTestPlan([]);
-    const name = "account-pool-management-api.test.ts";
     expect(SERIAL_TEST_FILES).toContain(`tests/server/${name}`);
     expect(plan[0]?.args).toContain(`**/${name}`);
     expect(plan.filter(lane => lane.label === name)).toHaveLength(1);

@@ -68,6 +68,10 @@ export const SERIAL_TEST_FILES = [
   // all 21 tests pass in a fresh process and in the server-only suite. Preserve
   // the lifecycle assertions and deadlines; give this file its own process.
   "tests/server/account-pool-management-api.test.ts",
+  // A reused Bun 1.4 macOS worker can spin during this file's first server
+  // lifecycle (sampled at 99% CPU); contain its debug/server globals in a fresh
+  // process while retaining every endpoint assertion and original deadline.
+  "tests/server/api-debug.test.ts",
   "tests/server/server-auth.test.ts",
   // Proves heartbeats cover a real 1.5s retry wait inside a 5s test budget.
   // The loaded macOS pool consumed that margin without a product failure.
