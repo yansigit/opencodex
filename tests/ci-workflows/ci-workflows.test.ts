@@ -889,7 +889,7 @@ describe("GitHub Actions hardening", () => {
       scripts?: Record<string, string>;
     };
     expect(packageJson.scripts?.["audit:high"]).toBe(
-      "bun audit --audit-level=high && cd gui && bun audit --audit-level=high",
+      "bun run scripts/ci/audit-high.ts",
     );
     expect(workflow).toContain("run: bun run audit:high");
     expect(workflow).not.toContain("run: bun audit --audit-level=high");
@@ -1621,7 +1621,7 @@ describe("GitHub Actions hardening", () => {
    *     await github.rest.pulls.update({ ...{ base: "main" }, owner, … })
    *     Object.assign(pr.base, { ref: EXPECTED_BASE })
    *     if (false) { …the entire body… }
-   *     try { …the entire body… } catch {}
+   *     try { …the entire body… } catch { /* no-op */ }
    *
    * A recording client does not care how the call was spelled. It records what
    * came out. `if (false)` and a swallowed exception show up as an empty call
