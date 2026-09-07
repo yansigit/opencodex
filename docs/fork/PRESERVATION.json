@@ -1300,7 +1300,7 @@
           "forkInvariant": "Retain token bounds, TLS public-origin publication, non-root/read-only container and compatibility snapshot checks.",
           "equivalentOrBetter": false,
           "disposition": "preserve",
-          "implementationEvidence": "Reviewed fork-to-worktree zero-context diff for tests/service/container-bootstrap.test.ts: it is strictly additive, with zero removed lines. All pre-existing fork test bodies and assertions remain byte-for-byte; added regression cases exercise the stated upstream behavior. Full-suite success remains a separate gate, not inferred from this source review.",
+          "implementationEvidence": "All pre-existing fork and upstream container test bodies remain. Additive regressions cover the source smoke harness's explicit HTTPS public-origin override with ephemeral host publication, real verified loopback HTTPS admission, unsafe-target refusal, and certificate/key persistence hashes. scripts/ci/docker-smoke.ts now preserves the fork TLS bootstrap contract without relaxing chain or hostname verification. Full hosted Docker build/start/recreate acceptance remains a separate required CI gate.",
           "exactTests": [
             "bun test tests/service/container-bootstrap.test.ts"
           ],

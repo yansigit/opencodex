@@ -1,6 +1,6 @@
 /** Hosted Linux Docker acceptance only; never uses provider credentials or inference. */
 import { spawn } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, X509Certificate } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, rmdirSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -128,6 +128,7 @@ const replacement = randomBytes(32).toString("hex");
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 let seededConfigHash = "";
 let readyConfigHash = "";
+export const smokePublicOrigin = "https://localhost:19346";
 
 // Check the loader, including its schema-repair/default-provider fallback, before server startup
 // and again in each running container. This isolates synthetic inference, not all process egress.
@@ -178,7 +179,8 @@ async function inspect() {
     return mount.Name;
   });
   check(volumes[0] !== volumes[1], "homes share a volume");
-  return { id, volumes, url: `http://127.0.0.1:${port}` };
+  check(port !== 10100, "production host port is not a smoke target");
+  return { id, volumes, url: `https://127.0.0.1:${port}` };
 }
 
 // This runs as the image's user. Only hashes/metadata leave the container, never file bytes.
@@ -202,9 +204,11 @@ const stateProbe = `
   try { writeFileSync('/home/bun/app/.smoke-root-write', 'x'); throw new Error('writable root'); }
   catch (e) { if (e.code !== 'EROFS') throw e; }
   const paths = [homes[0] + '/config.json', homes[0] + '/service-api-token', homes[1] + '/opencodex-catalog.json'];
+  if (phase !== 'seed') paths.push(homes[0] + '/container-tls/cert.pem', homes[0] + '/container-tls/key.pem');
   const hashes = paths.map(path => {
     const s = statSync(path);
-    if (s.uid !== uid || (s.mode & 0o777) !== 0o600 || s.size > 65536) throw new Error('file permissions/size');
+    const expectedMode = path.endsWith('/container-tls/cert.pem') ? 0o644 : 0o600;
+    if (s.uid !== uid || (s.mode & 0o777) !== expectedMode || s.size > 65536) throw new Error('file permissions/size');
     return createHash('sha256').update(readFileSync(path)).digest('hex');
   });
   // The immutable shipped config was byte-verified before fixture creation. Reconstruct only
@@ -226,6 +230,11 @@ const stateProbe = `
     openaiProviderTierVersion: 2,
     subagentModels: ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5'],
     subagentModelsVersion: 1,
+    ...(phase === 'seed' ? {} : { tls: {
+      certFile: '/home/bun/.opencodex/container-tls/cert.pem',
+      keyFile: '/home/bun/.opencodex/container-tls/key.pem',
+      publicOrigin: ${JSON.stringify(smokePublicOrigin)},
+    } }),
   };
   for (const config of [persisted, loaded]) {
     if (Object.keys(config).some(key => !Object.hasOwn(seed, key) && !Object.hasOwn(additions, key))) throw new Error('unexpected startup config addition');
@@ -242,7 +251,7 @@ const stateProbe = `
 async function state(phase: "seed" | "first-ready" | "steady" = "steady") {
   const invocation = phase === "seed" ? ["run", "--rm", "-T", "--no-deps"] : ["exec", "-T"];
   const hashes = JSON.parse(await compose([...invocation, "hub", "bun", "-e", stateProbe], phase)) as string[];
-  check(hashes.length === 3 && hashes.every(hash => /^[a-f0-9]{64}$/.test(hash)), "invalid state evidence");
+  check(hashes.length === (phase === "seed" ? 3 : 5) && hashes.every(hash => /^[a-f0-9]{64}$/.test(hash)), "invalid state evidence");
   check(hashes[1] === sha256(`${token}\n`) && hashes[2] === sha256(fixture), "token/catalog changed");
   if (phase === "first-ready") {
     check(!readyConfigHash, "post-start config baseline already established");
@@ -255,7 +264,14 @@ async function state(phase: "seed" | "first-ready" | "steady" = "steady") {
   return JSON.stringify(hashes);
 }
 
-async function request(url: string, path: string, secret?: string) {
+export async function smokeRequest(url: string, path: string, certificate: string, secret?: string) {
+  const target = new URL(url);
+  check(target.protocol === "https:" && target.hostname === "127.0.0.1"
+    && target.port !== "10100" && target.port !== "0" && target.port !== ""
+    && !target.username && !target.password && target.pathname === "/" && !target.search && !target.hash,
+  "smoke requires isolated loopback HTTPS");
+  check(["/healthz", "/readyz", "/v1/catalog", "/v1/responses", "/v1/responses/compact"].includes(path), "unexpected smoke path");
+  check(certificate.length <= 65536 && new X509Certificate(certificate).checkIP("127.0.0.1"), "invalid smoke certificate");
   const controller = new AbortController();
   const abort = () => controller.abort();
   cancelled.signal.throwIfAborted();
@@ -265,6 +281,9 @@ async function request(url: string, path: string, secret?: string) {
     const post = path !== "/healthz" && path !== "/readyz" && path !== "/v1/catalog";
     const response = await fetch(`${url}${path}`, {
       method: post ? "POST" : "GET", redirect: "error", signal: controller.signal,
+      // Trust only the public certificate read from this owned disposable container.
+      // Keep certificate-chain and hostname verification enabled.
+      tls: { ca: certificate, rejectUnauthorized: true },
       headers: { ...(secret ? { "x-opencodex-api-key": secret } : {}), ...(post ? { "content-type": "application/json" } : {}) },
       // Never send an authorized inference request, even with synthetic input.
       body: post ? '{"model":"smoke/synthetic","input":[]}' : undefined,
@@ -288,11 +307,11 @@ async function request(url: string, path: string, secret?: string) {
   }
 }
 
-async function acceptance(url: string) {
-  check((await request(url, "/healthz")).status === 200, "liveness failed");
+async function acceptance(url: string, certificate: string) {
+  check((await smokeRequest(url, "/healthz", certificate)).status === 200, "liveness failed");
   const deadline = Date.now() + 60_000;
   while (true) {
-    const ready = await request(url, "/readyz");
+    const ready = await smokeRequest(url, "/readyz", certificate);
     const body = JSON.parse(ready.body) as { status?: string };
     if (ready.status === 200 && body.status === "ready") break;
     check(ready.status === 503 && body.status === "pending" && Date.now() < deadline, "readiness failed");
@@ -300,11 +319,11 @@ async function acceptance(url: string) {
   }
   for (const path of ["/v1/catalog", "/v1/responses", "/v1/responses/compact"]) {
     for (const secret of [undefined, replacement]) {
-      const result = await request(url, path, secret);
+      const result = await smokeRequest(url, path, certificate, secret);
       check(result.status === 401, `${path} ${secret ? "wrong" : "missing"} token returned ${result.status}, expected 401`);
     }
   }
-  const catalog = await request(url, "/v1/catalog", token);
+  const catalog = await smokeRequest(url, "/v1/catalog", certificate, token);
   check(catalog.status === 200 && catalog.body === fixture, "catalog not served exactly");
 }
 
@@ -344,6 +363,9 @@ async function main() {
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", TMPDIR: scratch,
     DOCKER_CONFIG: join(scratch, "docker"), DOCKER_HOST: "unix:///var/run/docker.sock",
     COMPOSE_DISABLE_ENV_FILE: "1", OPENCODEX_BIND_ADDRESS: "127.0.0.1", OPENCODEX_PORT: "0",
+    // Public-origin override is independent of Docker's ephemeral host-port allocation.
+    // Exercise the explicit operator origin while connecting to the inspected host binding.
+    OPENCODEX_PUBLIC_ORIGIN: smokePublicOrigin,
   };
   composeArgs = ["compose", "--project-name", project, "--project-directory", root,
     "--env-file", join(scratch, "empty.env"), "-f", join(root, "compose.yaml"), "-f", join(scratch, "override.json")];
@@ -400,39 +422,43 @@ async function main() {
   progress("start and check admission");
   await compose(["up", "--no-build", "--wait", "--wait-timeout", "120", "hub"], undefined, 150_000);
   const first = await inspect();
-  await acceptance(first.url);
+  const certificate = await compose(["exec", "-T", "hub", "bun", "-e",
+    "const p='/home/bun/.opencodex/container-tls/cert.pem'; const s=require('node:fs').lstatSync(p); if(!s.isFile() || s.size>65536) process.exit(1); process.stdout.write(require('node:fs').readFileSync(p,'utf8'));"]);
+  await acceptance(first.url, certificate);
   const before = await state("first-ready");
   progress("refuse token replacement");
   const refused = await run(["docker", ...composeArgs, "run", "--rm", "-T", "--no-deps", "hub",
     "bun", "run", "docker/bootstrap-token.ts"], `${replacement}\n`);
   check(refused.code === 1, "bootstrap did not refuse replacement");
   check(await state() === before, "state changed after refused bootstrap");
-  await acceptance(first.url);
+  await acceptance(first.url, certificate);
   progress("replace container and verify persistence");
   await compose(["up", "--no-build", "--force-recreate", "--wait", "--wait-timeout", "120", "hub"], undefined, 150_000);
   const second = await inspect();
   check(second.id !== first.id && JSON.stringify(second.volumes) === JSON.stringify(first.volumes), "replacement/volume identity failed");
   check(await state() === before, "persistent state changed");
-  await acceptance(second.url);
+  await acceptance(second.url, certificate);
 }
 
-const abort = () => cancelled.abort();
-process.once("SIGINT", abort);
-process.once("SIGTERM", abort);
-const deadline = setTimeout(abort, 16 * 60_000);
-try {
-  await main();
-} catch (error) {
-  const reason = error instanceof SmokeFailure ? error.message : "unexpected failure; details suppressed";
-  console.error(`docker-smoke: failed at ${stage}: ${reason}`);
-  process.exitCode = 1;
-} finally {
-  clearTimeout(deadline);
-  try { await cleanup(); } catch {
-    console.error("docker-smoke: cleanup incomplete");
+if (import.meta.main) {
+  const abort = () => cancelled.abort();
+  process.once("SIGINT", abort);
+  process.once("SIGTERM", abort);
+  const deadline = setTimeout(abort, 16 * 60_000);
+  try {
+    await main();
+  } catch (error) {
+    const reason = error instanceof SmokeFailure ? error.message : "unexpected failure; details suppressed";
+    console.error(`docker-smoke: failed at ${stage}: ${reason}`);
     process.exitCode = 1;
+  } finally {
+    clearTimeout(deadline);
+    try { await cleanup(); } catch {
+      console.error("docker-smoke: cleanup incomplete");
+      process.exitCode = 1;
+    }
+    process.removeListener("SIGINT", abort);
+    process.removeListener("SIGTERM", abort);
   }
-  process.removeListener("SIGINT", abort);
-  process.removeListener("SIGTERM", abort);
+  if (!process.exitCode) console.log("docker-smoke: build/start/recreate acceptance passed; cleanup complete");
 }
-if (!process.exitCode) console.log("docker-smoke: build/start/recreate acceptance passed; cleanup complete");

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
@@ -14,6 +14,52 @@ import {
 import type { SerializedCatalog } from "../../src/server/catalog-download";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoPath } from "../helpers/repo-root";
+import { smokePublicOrigin, smokeRequest } from "../../scripts/ci/docker-smoke";
+
+describe("container smoke TLS contract", () => {
+  test("uses an explicit HTTPS origin independently of the ephemeral host port", () => {
+    expect(smokePublicOrigin).toBe("https://localhost:19346");
+    const smoke = readFileSync(repoPath("scripts/ci/docker-smoke.ts"), "utf8");
+    expect(smoke).toContain('OPENCODEX_PORT: "0"');
+    expect(smoke).toContain("OPENCODEX_PUBLIC_ORIGIN: smokePublicOrigin");
+    expect(smoke).toContain("publicOrigin: ${JSON.stringify(smokePublicOrigin)}");
+    expect(smoke).toContain("phase === \"seed\" ? 3 : 5");
+    expect(smoke).toContain("check(await state() === before, \"persistent state changed\")");
+  });
+
+  test("verifies the disposable certificate over real HTTPS and preserves admission headers", async () => {
+    const certificate = readFileSync(repoPath("tests/fixtures/network-tls-test-cert.pem"), "utf8");
+    const server = Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      tls: { cert: certificate, key: Bun.file(repoPath("tests/fixtures/network-tls-test-key.pem")) },
+      fetch: request => new Response(request.headers.get("x-opencodex-api-key") === "synthetic" ? "catalog" : "denied",
+        { status: request.headers.has("x-opencodex-api-key") ? 200 : 401 }),
+    });
+    try {
+      const url = `https://127.0.0.1:${server.port}`;
+      expect(await smokeRequest(url, "/v1/catalog", certificate)).toEqual({ status: 401, body: "denied" });
+      expect(await smokeRequest(url, "/v1/catalog", certificate, "synthetic")).toEqual({ status: 200, body: "catalog" });
+      // A corrupt trust anchor must not silently disable certificate verification.
+      await expect(smokeRequest(url, "/healthz", "not a certificate")).rejects.toThrow();
+    } finally { server.stop(true); }
+  });
+
+  test.each(["http://127.0.0.1:19346", "https://127.0.0.1:10100", "https://example.com:19346",
+    "https://127.0.0.1:0", "https://user@127.0.0.1:19346"])("refuses unsafe smoke target %s before transport", async url => {
+    await expect(smokeRequest(url, "/healthz", "unused")).rejects.toThrow("isolated loopback HTTPS");
+  });
+
+  test("does not disable TLS verification or follow redirects when sending the throwaway token", async () => {
+    const certificate = readFileSync(repoPath("tests/fixtures/network-tls-test-cert.pem"), "utf8");
+    const transport = spyOn(globalThis, "fetch").mockResolvedValue(new Response("fixture"));
+    try {
+      await smokeRequest("https://127.0.0.1:19346", "/v1/catalog", certificate, "synthetic");
+      expect(transport).toHaveBeenCalledWith("https://127.0.0.1:19346/v1/catalog", expect.objectContaining({
+        redirect: "error", tls: { ca: certificate, rejectUnauthorized: true },
+      }));
+    } finally { transport.mockRestore(); }
+  });
+});
 
 function input(...chunks: string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
