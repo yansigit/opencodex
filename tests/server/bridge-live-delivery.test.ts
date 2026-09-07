@@ -129,6 +129,7 @@ describe("bridge live SSE delivery (issue #114 coalescing regression)", () => {
             groups.set(readIndex, (groups.get(readIndex) ?? 0) + 1);
           }
         } catch {
+          continue;
         }
       }
 
