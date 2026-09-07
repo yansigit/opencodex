@@ -13,6 +13,7 @@ import {
   TRANSLATOR_MAX_CALL_ARGUMENT_BYTES,
   type TranslatorBudget,
 } from "../../src/lib/translator-budget";
+import { decodeReasoningEnvelope, encodeReasoningEnvelope } from "../../src/responses/reasoning-envelope";
 
 const streamBudgets = new WeakMap<ReadableStream<Uint8Array>, TranslatorBudget>();
 
@@ -274,6 +275,8 @@ describe("claude outbound SSE", () => {
       "**A**\n\nOne.\n\n**B**\n\nTwo.",
       "Three.",
     ]);
+    expect(decodeReasoningEnvelope(thinkingBlocks[0].signature)?.txt)
+      .toBe("**A**\n\nOne.\n\n**B**\n\nTwo.");
 
     // Parity: the non-streaming translator joins the same summary parts identically.
     const json = responsesJsonToAnthropicMessage({
@@ -285,6 +288,152 @@ describe("claude outbound SSE", () => {
     const jsonThinking = json.content.find((b: Record<string, unknown>) => b.type === "thinking");
     expect(jsonThinking.thinking).toBe("**A**\n\nOne.\n\n**B**\n\nTwo.");
   });
+
+  test("reasoning fallback buffering is bounded and releases its retained budget", async () => {
+    const budget = createTestTranslatorBudget({ maxTurnBytes: 8 * 1024 });
+    let reasoningCommitted = 0;
+    let reasoningReleased = 0;
+    const trackedBudget: TranslatorBudget = {
+      openCall: id => budget.openCall(id),
+      closeCall: id => budget.closeCall(id),
+      reserveTransient(bytes, scope) {
+        const reservation = budget.reserveTransient(bytes, scope);
+        return {
+          commitRetained() {
+            reservation.commitRetained();
+            if (scope.kind === "reasoning") reasoningCommitted += bytes;
+          },
+          release: () => reservation.release(),
+        };
+      },
+      chargeRetained(bytes, scope) {
+        budget.chargeRetained(bytes, scope);
+        if (scope.kind === "reasoning") reasoningCommitted += bytes;
+      },
+      releaseRetained(bytes, scope) {
+        budget.releaseRetained(bytes, scope);
+        if (scope.kind === "reasoning") reasoningReleased += bytes;
+      },
+      observeAcceptedRequestCopy: bytes => budget.observeAcceptedRequestCopy(bytes),
+      observeExternallyCapped: (kind, bytes) => budget.observeExternallyCapped(kind, bytes),
+      snapshot: () => budget.snapshot(),
+      dispose: () => budget.dispose(),
+    };
+    const frames = [
+      sse("response.created", { response: { id: "resp_1", status: "in_progress" } }),
+      ...Array.from({ length: 32 }, (_, index) => sse("response.reasoning_text.delta", {
+        item_id: "rs_1",
+        content_index: 0,
+        delta: `${index}:` + "x".repeat(512),
+      })),
+    ];
+    const events = await collectEvents(responsesSseToAnthropicSse(
+      streamFromChunks(frames),
+      "m",
+      { translatorBudget: trackedBudget },
+    ));
+
+    expect(events.at(-1)).toMatchObject({
+      name: "error",
+      data: { error: { type: "request_too_large", code: "translation_buffer_limit" } },
+    });
+    expect(budget.snapshot().overflows).toBe(1);
+    expect(reasoningCommitted).toBeGreaterThan(0);
+    expect(reasoningReleased).toBe(reasoningCommitted);
+  });
+
+  for (const terminal of ["eof", "failed", "completed", "incomplete"] as const) {
+    for (const buffered of [false, true]) {
+      test(`closure-only reasoning overflow: ${terminal}, ${buffered ? "collector" : "stream"}`, async () => {
+        // All small deltas fit, including replacement reservations. Closing needs
+        // the retained 32 KiB text PLUS its base64 signature frame. Capture the
+        // generated stream before collection: concurrent collector retention can
+        // exceed a shared budget during ingestion instead of exercising closure.
+        // Collection below reuses this SAME budget, without resetting it.
+        const budget = createTestTranslatorBudget({ maxTurnBytes: 70 * 1024 });
+        let reasoningBytes = 0;
+        let maxReasoningBytes = 0;
+        let reasoningBytesAtOverflow = -1;
+        const trackedBudget: TranslatorBudget = {
+          openCall: id => budget.openCall(id),
+          closeCall: id => budget.closeCall(id),
+          reserveTransient(bytes, scope) {
+            let reservation: ReturnType<TranslatorBudget["reserveTransient"]>;
+            try { reservation = budget.reserveTransient(bytes, scope); }
+            catch (error) { reasoningBytesAtOverflow = reasoningBytes; throw error; }
+            return {
+              commitRetained() {
+                reservation.commitRetained();
+                if (scope.kind === "reasoning") {
+                  reasoningBytes += bytes;
+                  maxReasoningBytes = Math.max(maxReasoningBytes, reasoningBytes);
+                }
+              },
+              release: () => reservation.release(),
+            };
+          },
+          chargeRetained: (bytes, scope) => budget.chargeRetained(bytes, scope),
+          releaseRetained(bytes, scope) {
+            if (scope.kind === "reasoning") reasoningBytes -= bytes;
+            budget.releaseRetained(bytes, scope);
+          },
+          observeAcceptedRequestCopy: bytes => budget.observeAcceptedRequestCopy(bytes),
+          observeExternallyCapped: (kind, bytes) => budget.observeExternallyCapped(kind, bytes),
+          snapshot: () => budget.snapshot(),
+          dispose: () => budget.dispose(),
+        };
+        const text = "x".repeat(32 * 1024);
+        const frames = Array.from({ length: 128 }, () => sse("response.reasoning_text.delta", {
+          item_id: "rs_closure", content_index: 0, delta: text.slice(0, 256),
+        }));
+        if (terminal !== "eof") {
+          frames.push(sse(`response.${terminal}`, { response: terminal === "failed"
+            ? { error: { message: "upstream failure", status: 502 } }
+            : terminal === "incomplete"
+              ? { status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, usage: {} }
+              : { status: "completed", usage: {} } }));
+          // Neither a repeated completion nor a later failure may add a terminal.
+          frames.push(sse("response.completed", { response: { status: "completed", usage: {} } }));
+          frames.push(sse("response.failed", { response: { error: { message: "late failure" } } }));
+        }
+        const stream = responsesSseToAnthropicSse(streamFromChunks(frames), "m", {
+          translatorBudget: trackedBudget, pingIntervalMs: 0,
+        });
+        const captured = buffered ? await new Response(stream).text() : undefined;
+        const capturedFrames = captured?.split("\n\n").filter(Boolean).map(frame => `${frame}\n\n`);
+        const events = await collectEvents(capturedFrames ? streamFromChunks(capturedFrames) : stream);
+        const deltas = events.filter(event => event.data.delta?.type === "thinking_delta");
+        expect(deltas.map(event => event.data.delta.thinking).join("")).toBe(text);
+        expect(events.filter(event => event.name === "error")).toHaveLength(1);
+        expect(events.at(-1)).toMatchObject({ name: "error", data: { type: "error", error: {
+          type: "request_too_large", code: "translation_buffer_limit",
+        } } });
+        expect(JSON.stringify(events.at(-1)).length).toBeLessThan(1024);
+        expect(events.some(event => event.name === "message_stop" || event.name === "message_delta" || event.name === "content_block_stop")).toBe(false);
+        expect(events.some(event => event.data.delta?.type === "signature_delta")).toBe(false);
+        if (capturedFrames) {
+          expect(capturedFrames.join("")).toBe(captured);
+          expect(reasoningBytesAtOverflow).toBe(text.length);
+          expect(reasoningBytes).toBe(0);
+          expect(budget.snapshot().overflows).toBe(1);
+          // Feed the actual generated frames, without inventing an error event or
+          // collecting one huge chunk that introduces a different buffer limit.
+          const message = await collectAnthropicMessage(streamFromChunks(capturedFrames), "m", trackedBudget);
+          expect(message).toMatchObject({ type: "error", error: {
+            type: "request_too_large", code: "translation_buffer_limit",
+          } });
+          expect(message).not.toHaveProperty("content");
+          expect(message).not.toHaveProperty("stop_reason");
+        }
+        // These prove failure happened after all text was retained, not while
+        // ingesting a delta, and the error path released the thinking reservation.
+        expect(reasoningBytesAtOverflow).toBe(text.length);
+        expect(maxReasoningBytes).toBeGreaterThanOrEqual(text.length);
+        expect(reasoningBytes).toBe(0);
+        expect(budget.snapshot().overflows).toBe(1);
+      });
+    }
+  }
 
   test("same-part deltas and index-free reasoning frames never get a separator", async () => {
     const samePart = [
@@ -1140,4 +1289,49 @@ describe("sanitizeWebSearchInput (#381)", () => {
       data: { error: { type: "request_too_large", code: "translation_buffer_limit" } },
     });
   }, 60_000);
+
+  test("redacted-only reasoning emits a standalone redacted_thinking block", async () => {
+    const events = await collectEvents(responsesSseToAnthropicSse(streamFrom([
+      sse("response.output_item.done", {
+        item: { type: "reasoning", id: "rs_red", encrypted_content: encodeReasoningEnvelope({ red: ["opaque"] }) },
+      }),
+      sse("response.completed", { response: { status: "completed", usage: {} } }),
+    ].join("")), "m"));
+    expect(events.map(event => event.name)).toEqual([
+      "message_start", "ping", "content_block_start", "content_block_stop", "message_delta", "message_stop",
+    ]);
+    expect(events[2].data.content_block).toEqual({ type: "redacted_thinking", data: "opaque" });
+  });
+
+  test("redacted reasoning closes an open text block before opening its opaque block", async () => {
+    const events = await collectEvents(responsesSseToAnthropicSse(streamFrom([
+      sse("response.output_text.delta", { delta: "text" }),
+      sse("response.output_item.done", {
+        item: { type: "reasoning", id: "rs_red", encrypted_content: encodeReasoningEnvelope({ red: ["opaque"] }) },
+      }),
+      sse("response.completed", { response: { status: "completed", usage: {} } }),
+    ].join("")), "m"));
+    expect(events.filter(event => event.name === "content_block_start" || event.name === "content_block_stop")
+      .map(event => ({ name: event.name, index: event.data.index }))).toEqual([
+      { name: "content_block_start", index: 0 },
+      { name: "content_block_stop", index: 0 },
+      { name: "content_block_start", index: 1 },
+      { name: "content_block_stop", index: 1 },
+    ]);
+  });
+
+  test("signature-only reasoning emits an empty thinking block with the genuine signature", async () => {
+    const events = await collectEvents(responsesSseToAnthropicSse(streamFrom([
+      sse("response.output_item.done", {
+        item: { type: "reasoning", id: "rs_sig", encrypted_content: encodeReasoningEnvelope({ sig: "sig-only" }) },
+      }),
+      sse("response.completed", { response: { status: "completed", usage: {} } }),
+    ].join("")), "m"));
+    expect(events.map(event => event.name)).toEqual([
+      "message_start", "ping", "content_block_start", "content_block_delta", "content_block_stop",
+      "message_delta", "message_stop",
+    ]);
+    expect(events[2].data.content_block).toEqual({ type: "thinking", thinking: "", signature: "" });
+    expect(events[3].data.delta).toEqual({ type: "signature_delta", signature: "sig-only" });
+  });
 });

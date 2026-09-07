@@ -392,11 +392,13 @@ Claude Code の `/effort` 設定はアダプターでも維持されます。
 | Assistant テキスト | `output_text` |
 | Assistant `tool_use` | `function_call`(`input` → JSON 文字列に変換した `arguments`) |
 | ユーザー `tool_result` | `function_call_output`(`is_error` → `[tool error]` 接頭辞) |
-| `thinking` / `redacted_thinking` 再生 | 破棄 |
+| `thinking` / `redacted_thinking` 再生 | シグネチャと秘匿ペイロードを境界付き `ocxr1` エンベロープに保持した `reasoning` 項目 |
 | Function ツール | `{type: "function"}`(`web_search*` → `{type: "web_search"}`) |
 | `tool_choice` | `auto`→`auto`、`none`→`none`、`any`→`required`、名前指定関数→`{type:"function",name}`、ホスト型 WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
 | `stop_sequences` | `stop` |
+
+意図した Anthropic アダプターでは、非表示でない署名付きブロック（空の thinking を含む）と不透明な redacted ブロックを保持します。`hideThinkingSummary` は変更しません。ローカルで隠した署名付きテキストは Claude クライアントに公開せず、この非表示境界での無損失再生は未確認です。旧形式の結合エンベロープは、テキスト送信後に元のブロック順を復元できません。`claudeCode.compatibility: "enforce"` は引き続き thinking 再生を拒否します。実際の Anthropic 受理やキャッシュ改善の証明ではなく、[#3719](https://github.com/lidge-jun/opencodex/issues/3719) は未解決です。
 
 **エラー条件(400):** 不正な JSON、欠落または空の `model`、欠落または空の `messages`、未サポートの
 role、`tool_use_id` のない `tool_result`、id/name のない `tool_use`、name のない名前指定 `tool_choice` です。
@@ -408,7 +410,8 @@ role、`tool_use_id` のない `tool_result`、id/name のない `tool_use`、na
 | `response.created` | `message_start` + `ping` |
 | Heartbeat | `ping` |
 | テキスト delta | `content_block_start` → `content_block_delta`(text) → `content_block_stop` |
-| 推論要約/テキスト | 合成シグネチャ付きの `thinking` ブロック |
+| 推論要約/テキスト | 再生されたシグネチャ、または境界付き `ocxr1` フォールバックを持つ `thinking` ブロック |
+| 秘匿化された推論 | 推論エンベロープから再生される `redacted_thinking` ブロック |
 | Function-call フレーム | `input_json_delta` を持つ `tool_use` ブロック |
 | 終了イベント | `message_delta` → `message_stop` |
 | 終了前に EOF | 502 形式 `api_error` |

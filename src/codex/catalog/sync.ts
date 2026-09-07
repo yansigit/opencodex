@@ -307,6 +307,11 @@ function routedDisplayName(slug: string, model?: CatalogModel, config?: Pick<Ocx
   return slug;
 }
 
+/**
+ * Cria uma entrada nativa ou roteada a partir do snapshot upstream, de um clone
+ * do template ou de campos mínimos. Aplica os metadados e limites pertinentes
+ * sem alterar o template nem herdar sua marca de nome ou histórico de prioridade.
+ */
 export function deriveEntry(
   template: RawEntry | null,
   slug: string,
@@ -332,6 +337,7 @@ export function deriveEntry(
   }
   if (template || codexForwardNativeCapabilityAlias) {
     const e = JSON.parse(JSON.stringify(codexForwardNativeCapabilityAlias ?? template)) as RawEntry;
+    delete e.opencodex_native_display_name;
     // A cached template may carry display-order history; each new row owns its natural rank.
     delete e[SPAWN_PRIORITY_FIELD];
     e.slug = slug;
@@ -471,12 +477,14 @@ export function buildCatalogEntries(
   accountNativeSlugs?: readonly string[],
   accountNativeSlugsBySelector?: ReadonlyMap<string, readonly string[]>,
   keepNativeChatGptOnV1 = false,
+  modelPickerOrder: readonly string[] = [],
 ): RawEntry[] {
-  return buildCatalogEntriesFromObservedState({
+  const entries = buildCatalogEntriesFromObservedState({
     template,
     gptSlugs,
     goModels,
     featured,
+    modelPickerOrder,
     wsEnabled,
     multiAgentMode,
     exactComboSlugs,
@@ -489,6 +497,8 @@ export function buildCatalogEntries(
     accountNativeSlugs,
     accountNativeSlugsBySelector,
   });
+  applyFullModelPickerOrder(entries, modelPickerOrder);
+  return entries;
 }
 
 /** Build entries solely from caller-observed inputs, with no feature-state filesystem read. */
@@ -720,6 +730,30 @@ export function orderForSubagents(goModels: CatalogModel[], featured?: string[])
   });
 }
 
+/** Routed discovery projection; native groups and alias ownership belong to the caller. */
+export function orderForModelPicker(
+  models: readonly CatalogModel[],
+  order: readonly string[] = [],
+  featured: readonly string[] = [],
+): CatalogModel[] {
+  const pickerOrder = normalizeModelPickerOrder(order);
+  if (pickerOrder.length === 0) return [...models];
+  const pickerRank = modelPickerRank(pickerOrder);
+  const featuredRank = modelPickerRank(featured);
+  const complete = pickerOrder.some(slug => !slug.includes("/"));
+  const rank = (model: CatalogModel): number => {
+    const slug = catalogModelSlug(model);
+    const featuredIndex = featuredRank(slug) ?? featuredRank(`${model.provider}/${model.id}`);
+    const natural = featuredIndex ?? 5;
+    const index = pickerRank(slug) ?? pickerRank(`${model.provider}/${model.id}`);
+    if (complete) return index ?? pickerOrder.length + natural;
+    // Preserve the legacy featured/alias bands, including unlisted rows before listed rows.
+    if (featuredIndex !== undefined || model.nativeAlias === true) return natural;
+    return index === undefined ? natural : PICKER_ORDER_PRIORITY_BASE + index;
+  };
+  return [...models].sort((a, b) => rank(a) - rank(b));
+}
+
 /**
  * True when an existing catalog row was authored by OpenCodex routing (#855).
  * Every generated routed row — current full-slug form, the June–July 2026
@@ -743,6 +777,20 @@ function recoverableNativeSlug(entry: RawEntry): string | null {
     && entry.owned_by !== COMBO_NAMESPACE
     ? slug
     : null;
+}
+
+/** Undo our display overlay before native metadata normalization and template reuse. */
+function restoreNativeDisplayName(entry: RawEntry): RawEntry {
+  const saved = entry.opencodex_native_display_name;
+  delete entry.opencodex_native_display_name;
+  if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+    const label = saved as Record<string, unknown>;
+    if (recoverableNativeSlug(entry) === label.slug
+      && typeof label.original === "string" && entry.display_name === label.applied) {
+      entry.display_name = label.original;
+    }
+  }
+  return entry;
 }
 
 /** Append missing supported native rows from trusted catalog sources only. */
@@ -834,6 +882,8 @@ export interface ObservedCatalogMergeInput {
   readonly suppressedBareNativeSlugs?: ReadonlySet<string>;
   readonly policy: ObservedCatalogMergePolicy;
   readonly openaiContextCap?: NativeContextLimitsInput;
+  /** Exact display-only labels for bare native OpenAI models. */
+  readonly nativeDisplayNames?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -868,13 +918,19 @@ export function mergeCatalogEntriesFromObservedState({
   suppressedBareNativeSlugs = new Set(),
   policy,
   openaiContextCap,
+  nativeDisplayNames,
 }: ObservedCatalogMergeInput): RawEntry[] {
   // Raw catalog rows contain nested arrays/objects that normalization mutates. Detach every row at
   // the observed-core boundary so callers can safely retain evidence objects or repeat the merge.
-  const detachedCatalogModels = catalogModels.map(entry => structuredClone(entry) as RawEntry);
+  const detachedCatalogModels = catalogModels
+    .map(entry => restoreNativeDisplayName(structuredClone(entry) as RawEntry));
   const detachedBaselineCatalogModels = baselineCatalogModels
-    .map(entry => structuredClone(entry) as RawEntry);
+    .map(entry => restoreNativeDisplayName(structuredClone(entry) as RawEntry));
   const detachedRoutedEntries = routedEntries.map(entry => structuredClone(entry) as RawEntry);
+  // Track this invocation's generated custom rows, not ownership markers read from disk.
+  // Their builder already finalized exact native ladders and ordinary routed mock tiers.
+  const freshCustomEntries = new Set(detachedRoutedEntries.filter(entry =>
+    entry.opencodex_catalog_kind === CODEX_CUSTOM_MODEL_CATALOG_KIND));
   const detachedAccountBoundEntries = accountBoundEntries
     .map(entry => structuredClone(entry) as RawEntry);
   const disabledModelKeys = new Set([...disabledModels].map(slugEquivalenceKey));
@@ -1195,7 +1251,7 @@ export function mergeCatalogEntriesFromObservedState({
     // Mock-max universality (260709): preserved routed entries from disk may predate
     // the max rung — ensure it here so subagent max spawns validate on every
     // reasoning-capable entry. max only: 5.6 exact ladders (luna: no ultra) stay intact.
-    if (!exactCombo && !reserveProjection && !String(e.slug ?? "").startsWith("opencode-go/")) {
+    if (!freshCustomEntries.has(m) && !exactCombo && !reserveProjection && !String(e.slug ?? "").startsWith("opencode-go/")) {
       const levels = Array.isArray(e.supported_reasoning_levels)
         ? e.supported_reasoning_levels as Array<{ effort?: string }>
         : [];
@@ -1224,6 +1280,17 @@ export function mergeCatalogEntriesFromObservedState({
   );
   applyFullModelPickerOrder(versionedEntries, modelPickerOrder);
   for (const entry of versionedEntries) {
+    // Templates and account clones must not inherit the native row's overlay marker.
+    delete entry.opencodex_native_display_name;
+    const slug = recoverableNativeSlug(entry);
+    if (slug !== null) {
+      const label = nativeDisplayNames && Object.hasOwn(nativeDisplayNames, slug)
+        ? nativeDisplayNames[slug]?.trim() : undefined;
+      if (label && label !== entry.display_name) {
+        entry.opencodex_native_display_name = { slug, original: entry.display_name, applied: label };
+        entry.display_name = label;
+      }
+    }
     const kind = entry.opencodex_catalog_kind;
     if (trustedAccountBoundNativeCatalogSlug(entry) === undefined
       && kind !== CODEX_CUSTOM_MODEL_CATALOG_KIND
@@ -1627,6 +1694,12 @@ export function finalizeAutoReviewModelOverride(
   return applyAutoReviewModelOverride(models, readConfiguredAutoReviewModel(), sourceModels);
 }
 
+/**
+ * Mescla o catálogo retido com os modelos visíveis e as configurações atuais,
+ * incluindo os nomes nativos. Tenta preservar o backup original e usa a permissão
+ * de escrita para publicar o resultado apenas se os bytes mudarem, retornando
+ * a contagem de entradas roteadas e por conta, o caminho e o estado da gravação.
+ */
 function writeRetainedCatalogSync({
   config,
   goModels,
@@ -1848,6 +1921,7 @@ function writeRetainedCatalogSync({
     accountBoundEntries,
     suppressedBareNativeSlugs,
     openaiContextCap,
+    nativeDisplayNames: config.providers[OPENAI_CODEX_PROVIDER_ID]?.modelDisplayNames,
     policy: {
       ...CANONICAL_NATIVE_CATALOG_CONTENT_POLICY,
       nativeBackfillSlugs: [...availableBareNativeSlugs, ...observedNativeSlugs],

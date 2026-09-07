@@ -121,24 +121,12 @@ ocx logout <provider>
 | `kimi` | `openai-chat` | `https://api.kimi.com/coding/v1` | Kimi K2.7/K2.6/K2.5 coding models. |
 | `nous` | `openai-chat` | `https://inference-api.nousresearch.com/v1` | Nous Research subscription gateway (same backend Hermes Agent uses). Device-grant login against `portal.nousresearch.com`; the access token is the per-request inference JWT. Mixed paid + `:free` model catalog (`tencent/hy3:free`, `stepfun/step-3.7-flash:free`, ...) discovered live from the signed-in account. Refresh tokens are single-use and rotated on every refresh. |
 | `kiro` | `kiro` | `https://runtime.us-east-1.kiro.dev` | Initial login imports the installed, signed-in `kiro-cli` session (on Unix, install with `curl -fsSL https://cli.kiro.dev/install` &#124; `bash`; on Windows PowerShell, use `irm 'https://cli.kiro.dev/install.ps1'` &#124; `iex`; then run `kiro-cli login`). **Add account** logs `kiro-cli` out, starts a fresh browser login that switches the account used by `kiro-cli`, and stores account-scoped profile metadata. Existing OpenCodex accounts are preserved, and cancellation or failure restores the previous `kiro-cli` session. |
-| `google-antigravity` | `google` | `https://daily-cloudcode-pa.googleapis.com` | Google OAuth over the Cloud Code Assist wire. Live discovery uses CCA's authenticated `v1internal:fetchAvailableModels` endpoint and publishes the agent models available to the signed-in account; the maintained catalog remains the fallback. Quota is probed live via `retrieveUserQuota` and `retrieveUserQuotaSummary` (8-second timeout). CCA chat/adapter requests use SSE (`v1internal:streamGenerateContent?alt=sse`) and buffer that stream for unary callers. Built-in image generation uses the separate unary `v1internal:generateContent` endpoint. The adapter retries its maintained daily/production peer at most once after a first-host transport failure, empty stream, 404, or `UNAVAILABLE`; authentication, geoblock, invalid-request, and exhausted-quota responses do not trigger host failover. See [Claude on Antigravity](#claude-on-antigravity-cloud-code-assist) below. |
+| `google-antigravity` | `google` | `https://daily-cloudcode-pa.googleapis.com` | Google OAuth over the Cloud Code Assist wire. Live discovery uses CCA's authenticated `v1internal:fetchAvailableModels` endpoint and publishes the agent models available to the signed-in account; the maintained catalog remains the fallback. |
 | `cursor` | `cursor` | `https://api2.cursor.sh` | Experimental PKCE login, live HTTP/2 transport with an opt-in HTTP/1.1 compatibility path, and account-filtered model discovery. |
 | `github-copilot` | `openai-chat` | `https://api.githubcopilot.com` | Experimental. GitHub device flow + `copilot_internal` exchange (VS Code OAuth client). Requires an active Copilot subscription; not an official third-party API. |
 
-### Antigravity pacing and TLS profile
+Google Antigravity account and provider quota probes use fixed Google accounting endpoints, including the models fallback. They support transparent Fake-IP DNS for those destinations while retaining TLS verification, redirect rejection and private-address checks. A custom provider base URL changes model requests, not quota destinations; `NO_PROXY` continues to select the direct-route policy.
 
-The built-in `google-antigravity` provider uses conservative request pacing by default: 30 RPM,
-at least 2,000 ms between request starts, and up to 500 ms of positive jitter. Existing explicit
-`requestPacing` settings remain authoritative; `jitterMs` may be set from 0 through 60,000 ms and
-only delays a start. Model rules can make the provider slower, never faster.
-
-The dashboard can explicitly enable `tlsProfile: "antigravity-browser"` for this provider. This is
-an experimental, unofficial compatibility mechanism, not a compliance feature.
-It may make traffic more distinctive, and initialization failures fall back to Bun; requests that
-already reached the native transport are not replayed. The profile is limited to canonical Cloud
-Code Assist hosts, keeps certificate and hostname verification enabled, and leaves OAuth/token/
-onboarding requests on standard Bun TLS. Users who prioritize account-policy safety should use the
-official Gemini API-key, Vertex, or documented Gemini Code Assist routes.
 
 After a terminal Nous refresh failure, run `ocx login nous` to reauthenticate.
 
@@ -234,23 +222,6 @@ cat accounts.json | ocx account import google-antigravity --format cockpit-tools
 
 Inline JSON and extra positional arguments are rejected. Keep exported files private and delete or store them securely after import.
 
-### Claude on Antigravity (Cloud Code Assist)
-
-The `google-antigravity` provider routes Claude models through Google's Cloud Code Assist (Antigravity)
-wire rather than Anthropic's native API. opencodex translates requests and responses at the Gemini
-format envelope: tool use/result pairing follows Anthropic semantics (including stable `functionCall.id`
-/ `functionResponse.id` fields), and Claude thinking blocks keep their `thoughtSignature` values across
-turns.
-
-CCA Claude models reject histories that end with an assistant (model) turn — upstream treats that as
-prefill. opencodex strips trailing model turns when safe and appends a `(continue)` user nudge when the
-history would otherwise end on model output (for example after context compaction or interrupted-turn
-replay). Histories that already end on a user message or tool result are left unchanged.
-
-Antigravity exposes only SSE transport. Unary (non-streaming) callers still go through the same
-`parseStream` path; plain JSON bodies without `data:` framing are rejected as truncated SSE rather
-than parsed as a separate JSON response format.
-
 ### OAuth reliability
 
 opencodex coordinates token refresh and Codex pool routing so concurrent requests do not race the
@@ -339,25 +310,6 @@ from the live CLI store, or when an existing primary CLI database has no recogni
 Repair or remove the unreadable database under the normal `kiro-cli` data path, unset those import
 selectors, then retry. Signing in from a machine with no existing `kiro-cli` session is unaffected.
 
-## Azure OpenAI identity
-
-Azure OpenAI can use the Azure SDK's default credential chain instead of an API
-key. Configure `adapter: "azure-openai"` (or `"azure"`), a real resource
-`baseUrl`, and `azureCredential: { "type": "default-azure-credential" }`.
-For a user-assigned managed identity, add the non-secret
-`managedIdentityClientId`; it selects only that managed-identity leg. Identity
-uses the exact scope `https://cognitiveservices.azure.com/.default`, sends one
-`Authorization: Bearer` header, and reports credential/import failures only as
-`Azure identity credential unavailable` without returning SDK diagnostics or
-tokens.
-
-Set `models` and `liveModels: false` for the supported static catalog; Azure
-identity does not use generic `/models` discovery. Do not combine
-`azureCredential` with `apiKey`, `apiKeyPool`, or a non-key `authMode`. API-key
-mode remains supported separately and uses the adapter's `api-key` header.
-See the [Azure OpenAI authentication configuration reference](/reference/configuration/providers/#azure-openai-authentication)
-for copyable identity and API-key examples.
-
 ## 3. API-key catalog
 
 opencodex ships 79 built-in presets: 67 key-based, eight OAuth, three local, and one default
@@ -415,6 +367,7 @@ free-experimentation model.
 | NVIDIA NIM | `https://integrate.api.nvidia.com/v1` |
 | Z.AI (GLM Coding) | `https://api.z.ai/api/coding/paas/v4` |
 | Zhipu AI (BigModel) | `https://open.bigmodel.cn/api/paas/v4` |
+| BigModel Coding Plan (Responses, static roster) | `https://open.bigmodel.cn/api/v1` |
 | Qwen Cloud | Token plan (default): `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` · Pay as you go: `https://dashscope.aliyuncs.com/compatible-mode/v1` · or Custom |
 | Tencent Cloud Coding Plan | `https://api.lkeap.cloud.tencent.com/coding/v3` |
 | SiliconFlow | `https://api.siliconflow.cn/v1` |
@@ -552,13 +505,6 @@ account bearer; the Provider-API key preset (`commandcode`) uses the active conf
 key. A user-edited lookalike base URL is never probed. Remaining monthly, purchased, and
 free credits are shown as a USD window when Command Code also reports period spend.
 
-**Command Code project context.** Optional `projectContext: "on"` on the OAuth `command-code` provider
-only (not the API-key `commandcode` preset) fills `/alpha/generate` `memory`, `taste`, and `skills`
-from the proxy working directory. Set it on `providers.command-code` via **Providers → Command Code →
-Edit JSON**, start the proxy from the trusted Codex project, and restart after saving. Absent or
-`"off"` keeps the empty envelope even when `AGENTS.md` or taste files exist. See
-[Adapters](/reference/adapters/#command-code) for file paths, caps, and fail-soft behavior.
-
 **SambaNova Cloud discovery.** The preset reads SambaNova Cloud's public `/v1/models` list from the fixed API
 host, preserves provider-native ids, and caps discovery at 128 KiB and 128 raw rows. Because the
 catalog is unauthenticated, the CLI login flow reports the key as unverifiable instead of treating
@@ -637,9 +583,43 @@ negative, or internally inconsistent billing totals produce no report rather tha
 > interactive coding tools only. General API automation, custom application backends, and
 > non-interactive batch use are prohibited and may cause the plan key to be suspended.
 
-> **Two GLM routes:** `zai` is the Z.AI international coding-plan subscription; `zhipu-bigmodel`
+> **GLM billing routes:** `zai` is the Z.AI international coding-plan subscription; `zhipu-bigmodel`
 > is Zhipu's domestic BigModel pay-as-you-go endpoint. Different hosts, different keys, different
 > billing — a key issued for one will not authenticate against the other.
+
+### BigModel Coding Plan over Responses
+
+Select **Zhipu AI — BigModel Coding Plan (Responses)** (`zhipu-bigmodel-responses`)
+for the `openai-responses` endpoint `https://open.bigmodel.cn/api/v1`. This is separate
+from `zhipu-bigmodel-coding`, which uses Chat Completions at `/api/coding/paas/v4`.
+
+The preset uses a **static roster** (`liveModels: false`) taken from the
+[official BigModel Codex example](https://docs.bigmodel.cn/cn/coding-plan/tool/codex.md):
+
+| Model | Context tokens | Upstream selectable effort | Default effort | Reasoning summaries |
+| --- | ---: | --- | --- | --- |
+| `glm-5.3` | 1,048,576 | `low`, `high`, `max` | `max` | Supported |
+| `glm-5-turbo` | 204,800 | None (empty list) | `max` | Supported |
+
+Both entries declare upstream text-only input. The Codex catalog advertises text and
+image because opencodex's existing vision sidecar can describe images for text-only
+models. Image handling requires an available, enabled vision sidecar; this does not
+declare native BigModel image support.
+
+The default model is `glm-5.3`; Responses reasoning content is preserved on replay.
+The existing Codex export adds its compatibility
+`ultra` tier to GLM-5.3 and omits Turbo's default-effort field because Turbo has no
+selectable ladder; the provider metadata still records `max` for both models.
+For Turbo, outgoing Responses requests omit `reasoning.effort`, including a caller's
+`max` or `ultra`, while preserving requested reasoning summaries. This leaves effort
+selection to the upstream default; opencodex does not inject a selectable or wire `max`.
+
+The example's `models.json` is a local catalog file, not a documented HTTP model-list
+response. This preset does not perform live model discovery. `glm-5.3-flash` is not
+seeded here because its exact Responses metadata is not verified. An existing custom
+provider with the same name keeps its configured destination and metadata.
+CLI key login also skips the undocumented `/models` probe and reports validation as
+unknown; successful key authentication is established by a subsequent inference request.
 
 ### Multiple API keys
 

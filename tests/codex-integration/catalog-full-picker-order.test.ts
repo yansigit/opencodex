@@ -16,7 +16,7 @@ import { resetCodexModelEntitlementCacheForTests } from "../../src/codex/model-e
 import { resolveCodexCatalogSerializationDatabasePath, resolveEffectiveUserIdentity } from "../../src/codex/user-identity";
 import { CODEX_FORWARD_BASE_URL } from "../../src/providers/openai-tiers";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
-import { effectiveSubagentRoster } from "../../src/codex/catalog/sync";
+import { buildCatalogEntries, effectiveSubagentRoster } from "../../src/codex/catalog/sync";
 import { buildCatalogEntriesFromObservedState, mergeCatalogEntriesFromObservedState, CANONICAL_NATIVE_CATALOG_CONTENT_POLICY, applyFullModelPickerOrder, deriveEntry, mergeCatalogEntriesForSync, SPAWN_PRIORITY_FIELD } from "../../src/codex/catalog/sync";
 
 test("native-first picker order preserves Go subagent ranks and is repeatable", () => {
@@ -424,4 +424,23 @@ describe("picker ordering through production catalog writers", () => {
       expect(await writeCatalog(writer, next, true)).toEqual(retained);
     }, 30_000);
   }
+});
+
+
+test("public catalog wrapper applies saved full order while preserving guidance ranks", () => {
+  const routed = ["a", "b", "c", "d", "e", "f"].map(id => ({ provider: "p", id }));
+  const featured = ["p/a", "p/b", "p/c", "p/d", "p/e"];
+  const build = (order: string[]) => buildCatalogEntries(
+    null, ["gpt-5.5"], routed, featured, false, "default", new Set(), [],
+    new Set(), new Set(), undefined, undefined, undefined, false, order,
+  );
+  const natural = build([]);
+  const order = ["gpt-5.5", "p/f", "p/e", "p/d", "p/c", "p/b", "p/a"];
+  const ordered = build(order);
+  expect(ordered.toSorted((a, b) => Number(a.priority) - Number(b.priority)).map(row => row.slug)).toEqual(order);
+  expect(effectiveSubagentRoster(featured, "v1", ordered)).toEqual(effectiveSubagentRoster(featured, "v1", natural));
+  // Independently mirror the upstream description's visible-priority window, not the OCX helper.
+  const nativeDescription = ordered.toSorted((a, b) => Number(a.priority) - Number(b.priority))
+    .filter(row => row.visibility === "list").slice(0, 5).map(row => row.slug);
+  expect(nativeDescription).toEqual(["gpt-5.5", "p/f", "p/e", "p/d", "p/c"]);
 });

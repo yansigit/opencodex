@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync, readlinkSync, realpathSync, statSync, type Stats } from "node:fs";
+import { lstatSync, readFileSync, readlinkSync, realpathSync, statSync, type BigIntStats } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { IntegrationIO } from "../integrations/config-io";
@@ -14,7 +14,7 @@ export interface AsideProfile {
 }
 
 const MAX_PROFILES = 128;
-const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
+const MAX_MANIFEST_BYTES = 4n * 1024n * 1024n;
 const MAX_LEAF_LINKS = 40;
 
 function refuse(message: string): never {
@@ -30,9 +30,10 @@ function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function inspect(path: string, follow = false): Stats | null {
+function inspect(path: string, follow = false): BigIntStats | null {
   try {
-    return follow ? statSync(path) : lstatSync(path);
+    // File IDs can exceed Number's exact integer range; never round identities.
+    return follow ? statSync(path, { bigint: true }) : lstatSync(path, { bigint: true });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     return refuse("a filesystem boundary could not be inspected.");
@@ -110,10 +111,10 @@ export function listAsideProfiles(env: NodeJS.ProcessEnv = process.env, home: st
   return readProfiles(root);
 }
 
-type DirectoryIdentity = { path: string; dev: number; ino: number };
+type DirectoryIdentity = { path: string; dev: bigint; ino: bigint };
 type Boundary = Array<DirectoryIdentity | null>;
 
-function sameIdentity(a: Pick<Stats, "dev" | "ino">, b: Pick<Stats, "dev" | "ino">): boolean {
+function sameIdentity(a: Pick<BigIntStats, "dev" | "ino">, b: Pick<BigIntStats, "dev" | "ino">): boolean {
   return a.dev === b.dev && a.ino === b.ino;
 }
 
@@ -162,7 +163,7 @@ function boundary(profile: AsideProfile, profiles: AsideProfile[], mutation: boo
   }
   if (absent) return identities;
   const leaf = inspect(profile.configPath);
-  if (leaf && (leaf.isSymbolicLink() || !leaf.isFile() || leaf.nlink > 1)) {
+  if (leaf && (leaf.isSymbolicLink() || !leaf.isFile() || leaf.nlink > 1n)) {
     refuse("the model catalog is a link, shared file or non-regular file.");
   }
   if (leaf && canonical(profile.configPath) !== join(parent!, "models.json")) {

@@ -4,16 +4,17 @@ import { logsFromApiBody } from "../helpers/logs-api";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { replacePersistedConfig, saveConfig } from "../../src/config";
+import { loadConfig, saveConfig } from "../../src/config";
+import { readRecentUsageEntries } from "../../src/usage/log";
 import { buildDesktop3pRegistry } from "../../src/claude/desktop-3p";
 import type { DesktopProfile } from "../../src/claude/desktop-profile";
 import { createAnthropicAdapter } from "../../src/adapters/anthropic";
-import { getOrCreateDirectiveSigningKey } from "../../src/claude/directive-key";
-import { signDirective } from "../../src/claude/directive-sign";
 import { clearableDeadline } from "../../src/lib/abort";
 import {
   clearRequestLogsForTests,
+  addRequestLog,
   getRequestLogEntries,
+  hydrateRequestLogsFromDisk,
   type RequestLogContext,
 } from "../../src/server/request-log";
 import { startServer } from "../../src/server";
@@ -21,7 +22,6 @@ import { ownedServiceHomeInspection } from "../helpers/owned-service-home-inspec
 import {
   estimateClaudeRequestTokens,
   fetchWithHeaderDeadline,
-  handleClaudeCountTokens,
   handleClaudeMessages,
   readBoundedPassthroughBody,
   resolvePassthroughBodyGuard,
@@ -108,7 +108,6 @@ function mockConfig(baseUrl: string, claudeCode?: OcxConfig["claudeCode"]): OcxC
     providers: {
       mock: { adapter: "openai-chat", baseUrl, apiKey: "k", allowPrivateNetwork: true },
     },
-    subagentModels: ["mock/test-model"],
     ...(claudeCode ? { claudeCode } : {}),
   } as OcxConfig;
 }
@@ -204,56 +203,6 @@ test("non-streaming /v1/messages returns an Anthropic message JSON", async () =>
     expect(typeof json.usage.input_tokens).toBe("number");
   } finally {
     await server.stop(true);
-    upstream.stop(true);
-  }
-});
-
-test("benchmark usage observer is one-shot, isolated from mutation, and non-disruptive", async () => {
-  const upstream = mockChatUpstream();
-  const config = mockConfig(`${upstream.url.toString().replace(/\/$/, "")}/v1`);
-  const observations: Array<{ adapterKind: string; modelId: string; inputTokens?: number }> = [];
-  const request = () => new Request("http://localhost/v1/messages", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: "mock/test-model",
-      max_tokens: 8,
-      stream: false,
-      messages: [{ role: "user", content: "observer isolation" }],
-    }),
-  });
-  try {
-    const mutated = await handleClaudeMessages(
-      request(),
-      config,
-      { model: "test-model", provider: "mock", surface: "claude" },
-      undefined,
-      config,
-      { onRawUsage: observation => {
-        observations.push({
-          adapterKind: observation.adapterKind,
-          modelId: observation.modelId,
-          inputTokens: observation.usage?.inputTokens,
-        });
-        if (observation.usage) observation.usage.inputTokens = 999_999;
-      } },
-    );
-    expect(mutated.status).toBe(200);
-    const body = await mutated.json() as { usage: { input_tokens: number } };
-    expect(body.usage.input_tokens).toBe(12);
-    expect(observations).toEqual([{ adapterKind: "openai-chat", modelId: "test-model", inputTokens: 12 }]);
-
-    const throwing = await handleClaudeMessages(
-      request(),
-      config,
-      { model: "test-model", provider: "mock", surface: "claude" },
-      undefined,
-      config,
-      { onRawUsage: () => { throw new Error("observer failure"); } },
-    );
-    expect(throwing.status).toBe(200);
-    expect((await throwing.json() as { usage: { input_tokens: number } }).usage.input_tokens).toBe(12);
-  } finally {
     upstream.stop(true);
   }
 });
@@ -1024,7 +973,7 @@ test("Claude replay owns optional main enrichment while routed work survives dra
     completeNativeMainRecovery(recoveryHomeId);
     recoveryHomeId = null;
     await server.stop(true);
-    replacePersistedConfig({
+    saveConfig({
       port: 0,
       openaiProviderTierVersion: 2,
       defaultProvider: "openai",
@@ -1258,38 +1207,6 @@ test("count_tokens returns a positive estimate in the exact contract shape", asy
   }
 });
 
-test("routed count_tokens stays local and does not invoke provider transport or benchmark observation", async () => {
-  const raw = {
-    model: "mock/test-model",
-    system: "be brief",
-    messages: [{ role: "user", content: "count this routed request" }],
-    tools: [{ name: "Read", input_schema: { type: "object" } }],
-  };
-  const expected = estimateClaudeRequestTokens(raw, raw.model);
-  // The count_tokens handler has no benchmark observer parameter; keep this
-  // sentinel to make the no-observation invariant explicit in the regression.
-  const observerCalls: unknown[] = [];
-  const previousFetch = globalThis.fetch;
-  globalThis.fetch = (() => {
-    throw new Error("provider transport must not be reached by routed count_tokens");
-  }) as typeof fetch;
-  try {
-    const response = await handleClaudeCountTokens(
-      new Request("http://localhost/v1/messages/count_tokens", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(raw),
-      }),
-      mockConfig("http://127.0.0.1:1/v1"),
-    );
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ input_tokens: expected });
-    expect(observerCalls).toHaveLength(0);
-  } finally {
-    globalThis.fetch = previousFetch;
-  }
-});
-
 /** Minimal PNG header (signature + IHDR) so the attachment sniffer can read real dimensions. */
 function countTokensPngBase64(width: number, height: number): string {
   const u32be = (n: number): number[] => [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff];
@@ -1471,6 +1388,232 @@ test("claudeCode.enabled=false -> 403 permission_error on both routes", async ()
   }
 });
 
+test("compatibility is uniform across translated adapters and rejects before inference", async () => {
+  let sends = 0;
+  const upstream = Bun.serve({ port: 0, fetch() { sends++; return new Response("unexpected inference", { status: 500 }); } });
+  const baseUrl = new URL("/v1", upstream.url).href;
+  const features: Array<Record<string, unknown>> = [
+    { messages: [{ role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "private-fixture" } }] }] },
+    { messages: [{ role: "assistant", content: [{ type: "thinking", thinking: "private-fixture", signature: "opaque-fixture" }] }] },
+    { messages: [{ role: "assistant", content: [{ type: "redacted_thinking", data: "opaque-fixture" }] }] },
+    { messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "document" }] }] }] },
+    { messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "tool_reference", tool_name: "lookup" }] }] }] },
+    { tools: [{ type: "tool_search_tool_regex_20251119", name: "tool_search" }] },
+    { tools: [{ name: "lookup", input_schema: { type: "object" }, defer_loading: true }] },
+    { tools: [{ name: "lookup", input_schema: { type: "object" }, strict: true }] },
+    { tools: [{ name: "lookup", input_schema: { type: "object" }, allowed_callers: ["code_execution_20260120"] }] },
+    { tools: [{ type: "web_search_20250305", name: "web_search", allowed_domains: ["example.invalid"] }] },
+    { output_config: { format: { type: "json_schema", schema: { type: "object" } } } },
+    { service_tier: "standard_only" },
+    { mcp_servers: [{ type: "url", name: "mcp", url: "https://example.invalid", authorization_token: "private-fixture" }] },
+    { tools: [{ type: "mcp_toolset", mcp_server_name: "mcp" }] },
+    { tools: [{ type: "code_execution_20260120", name: "code_execution" }] },
+    { tools: [{ type: "computer_20250124", name: "computer" }] },
+    { context_management: { edits: [] } }, { container: "private-fixture" },
+    { inference_geo: "us" }, { user_profile_id: "private-fixture" },
+    { future_option: true },
+    { messages: [{ role: "user", content: [{ type: "future_block" }] }] },
+  ];
+  try {
+    for (const adapter of ["anthropic", "openai-responses", "openai-chat"] as const) {
+      const config = mockConfig(baseUrl, { compatibility: "enforce" });
+      config.providers.mock.adapter = adapter;
+      saveConfig(config);
+      const server = startServer(0);
+      try {
+        clearRequestLogsForTests();
+        for (const [index, feature] of features.entries()) {
+          const response = await fetch(new URL("/v1/messages?beta=true", server.url), {
+            method: "POST", headers: {
+              "content-type": "application/json", "x-api-key": "placeholder",
+              "anthropic-beta": Array.from({ length: 50 }, (_, i) => `private-header-${i}`).join(","),
+            },
+            body: JSON.stringify({ model: "mock/test-model", max_tokens: 64, stream: index % 2 === 0,
+              messages: [{ role: "user", content: "hi" }], ...feature }),
+          });
+          expect(response.status).toBe(400);
+          const error = await response.json() as { type: string; error: { type: string; message: string } };
+          expect(error.type).toBe("error");
+          expect(error.error.type).toBe("invalid_request_error");
+          expect(error.error.message).not.toContain("private-");
+          expect(getRequestLogEntries()).toHaveLength(index + 1);
+          expect(getRequestLogEntries().at(-1)?.errorCode).toBe("claude_compatibility_unsupported");
+        }
+        expect(sends).toBe(0);
+        // Count-token success is intentionally independent of Messages admission.
+        const counted = await fetch(new URL("/v1/messages/count_tokens", server.url), {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ model: "mock/test-model", messages: [{ role: "user", content: [{ type: "document" }] }] }),
+        });
+        expect(counted.status).toBe(200);
+      } finally { await server.stop(true); }
+    }
+  } finally { await upstream.stop(true); }
+});
+
+test("compatibility unset, shadow persistence and ordinary enforce controls", async () => {
+  const { server: upstream, captured } = mockChatUpstreamCapturing();
+  const document = { model: "mock/test-model", max_tokens: 64, stream: true,
+    messages: [{ role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "private-fixture" } }] }] };
+  try {
+    for (const compatibility of [undefined, "shadow", "enforce"] as const) {
+      saveConfig(mockConfig(new URL("/v1", upstream.url).href, { compatibility }));
+      const server = startServer(0);
+      try {
+        clearRequestLogsForTests();
+        const body = compatibility === "enforce" ? {
+          ...document, stream: false, thinking: { type: "disabled" },
+          system: [{ type: "text", text: "stable", cache_control: { type: "ephemeral" } }],
+          tools: [{ name: "mcp_lookup", input_schema: { type: "object" }, strict: false, defer_loading: false, input_examples: [{}] }],
+          messages: [{ role: "user", content: "hi" }],
+        } : document;
+        const response = await postMessages(server.url.toString(), body);
+        expect(response.status).toBe(200);
+        await response.text();
+        const expected = compatibility === "shadow" ? {
+          decision: "shadow", featureCodes: ["documents"], reason: "shadow: would reject: documents",
+        } : undefined;
+        expect(getRequestLogEntries()).toHaveLength(1);
+        const requestId = getRequestLogEntries()[0].requestId;
+        expect(getRequestLogEntries()[0].claudeCompatibility).toEqual(expected);
+        expect(readRecentUsageEntries(1)[0]?.claudeCompatibility).toEqual(expected);
+        const dto = logsFromApiBody<{ requestId: string; claudeCompatibility?: unknown }>(
+          await (await fetch(new URL("/api/logs", server.url))).json());
+        expect(dto.find(row => row.requestId === requestId)?.claudeCompatibility).toEqual(expected);
+        clearRequestLogsForTests();
+        hydrateRequestLogsFromDisk();
+        expect(getRequestLogEntries().find(row => row.requestId === requestId)?.claudeCompatibility).toEqual(expected);
+        if (compatibility === "shadow") {
+          addRequestLog({ requestId: "compatibility-boundary", timestamp: Date.now(), model: "test-model", provider: "mock",
+            status: 200, durationMs: 1, usageStatus: "unreported",
+            claudeCompatibility: JSON.parse('{"decision":"shadow","featureCodes":["documents","private-header"],"reason":"private-reason"}') });
+          const rows = logsFromApiBody<{ requestId: string; claudeCompatibility?: unknown }>(
+            await (await fetch(new URL("/api/logs", server.url))).json());
+          expect(rows.find(row => row.requestId === "compatibility-boundary")?.claudeCompatibility).toEqual(expected);
+        }
+      } finally { await server.stop(true); }
+    }
+    expect(captured).toHaveLength(3);
+  } finally { await upstream.stop(true); }
+});
+
+test("present invalid compatibility modes return one fixed 503 before translation", async () => {
+  const { server: upstream, urls } = mockChatUpstreamCapturing();
+  try {
+    for (const compatibility of [null, "", "enfroce", false, 1, [], { secret: "private-fixture" }]) {
+      writeFileSync(join(testDir, "config.json"), JSON.stringify({
+        ...mockConfig(new URL("/v1", upstream.url).href), claudeCode: { compatibility },
+      }));
+      const server = startServer(0);
+      try {
+        clearRequestLogsForTests();
+        const response = await postMessages(server.url.toString(), {
+          model: "mock/test-model", max_tokens: 16, messages: [{ role: "user", content: "hi" }],
+        });
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({ type: "error", error: { type: "api_error", message: "Invalid claudeCode.compatibility setting" } });
+        expect(getRequestLogEntries()).toHaveLength(1);
+        expect(getRequestLogEntries()[0].errorCode).toBe("claude_compatibility_configuration");
+        if (compatibility === null) {
+          const malformed = await fetch(new URL("/v1/messages", server.url), {
+            method: "POST", headers: { "content-type": "application/json" }, body: "{",
+          });
+          expect(malformed.status).toBe(400);
+          expect(getRequestLogEntries()).toHaveLength(2);
+        }
+      } finally { await server.stop(true); }
+    }
+    expect(urls).toEqual([]);
+  } finally { await upstream.stop(true); }
+});
+
+test("native passthrough precedes even invalid compatibility mode", async () => {
+  const received: unknown[] = [];
+  const upstream = Bun.serve({ port: 0, async fetch(req) {
+    received.push(await req.json());
+    return Response.json({ id: "msg_test", type: "message", role: "assistant", model: "claude-haiku-4-5",
+      content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } });
+  } });
+  const body = { model: "claude-haiku-4-5", max_tokens: 16, messages: [
+    { role: "assistant", content: [{ type: "thinking", thinking: "fixture", signature: "opaque-fixture" }] },
+    { role: "user", content: "continue" },
+  ] };
+  try {
+    for (const compatibility of ["enforce", "invalid"]) {
+      writeFileSync(join(testDir, "config.json"), JSON.stringify({ ...mockConfig("http://127.0.0.1:1/v1"),
+        claudeCode: { compatibility, anthropicBaseUrl: upstream.url.origin } }));
+      const server = startServer(0);
+      try {
+        const response = await fetch(new URL("/v1/messages", server.url), { method: "POST",
+          headers: { "content-type": "application/json", "x-api-key": "sk-ant-test" }, body: JSON.stringify(body) });
+        expect(response.status).toBe(200);
+        await response.text();
+      } finally { await server.stop(true); }
+    }
+    expect(received).toEqual([body, body]);
+  } finally { await upstream.stop(true); }
+});
+
+test("compatibility survives management toggles and rejects Desktop source features", async () => {
+  const { server: upstream, urls } = mockChatUpstreamCapturing();
+  saveConfig(mockConfig(new URL("/v1", upstream.url).href, { compatibility: "enforce" }));
+  const server = startServer(0);
+  try {
+    for (const enabled of [false, true]) {
+      const toggle = await fetch(new URL("/api/native-integrations/claude", server.url), {
+        method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled }),
+      });
+      expect(toggle.status).toBe(200);
+      expect(loadConfig().claudeCode?.compatibility).toBe("enforce");
+    }
+    const settings = await fetch(new URL("/api/claude-code", server.url), {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ injectAgents: false }),
+    });
+    expect(settings.status).toBe(200);
+    expect(loadConfig().claudeCode?.compatibility).toBe("enforce");
+    buildDesktop3pRegistry([], [{ provider: "mock", id: "test-model" }], {
+      version: 1, assignments: { "mock/test-model": { family: "opus", alias: "claude-opus-4-8-20260201" } },
+      defaults: { opus: "mock/test-model", fable: null, sonnet: null, haiku: null },
+    });
+    clearRequestLogsForTests();
+    const response = await postMessages(server.url.toString(), {
+      model: "claude-opus-4-8-20260201", max_tokens: 16,
+      system: [{ type: "text", text: "<!-- ocx-effort: max -->" }],
+      messages: [{ role: "assistant", content: [{ type: "thinking", thinking: "fixture", signature: "opaque-fixture" }] },
+        { role: "user", content: "continue" }],
+    });
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain("thinking_replay");
+    expect(getRequestLogEntries()).toHaveLength(1);
+    expect(getRequestLogEntries()[0].surface).toBe("claude-desktop");
+    expect(urls).toEqual([]);
+  } finally {
+    buildDesktop3pRegistry([], []);
+    await server.stop(true);
+    await upstream.stop(true);
+  }
+});
+
+test("shadow captures source thinking settings before an effort directive removes them", async () => {
+  const { server: upstream, captured } = mockChatUpstreamCapturing();
+  saveConfig(mockConfig(new URL("/v1", upstream.url).href, { compatibility: "shadow" }));
+  const server = startServer(0);
+  try {
+    clearRequestLogsForTests();
+    const response = await postMessages(server.url.toString(), {
+      model: "mock/test-model", max_tokens: 64, stream: true, thinking: { type: "disabled" },
+      system: [{ type: "text", text: "<!-- ocx-route: mock/test-model -->\n<!-- ocx-effort: max -->" }],
+      messages: [{ role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "fixture" } }] }],
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(captured).toHaveLength(1);
+    expect(getRequestLogEntries()[0]?.claudeCompatibility).toEqual({
+      decision: "shadow", featureCodes: ["documents", "thinking_settings"], reason: "shadow: would reject: documents",
+    });
+  } finally { await server.stop(true); await upstream.stop(true); }
+});
+
 async function postMessages(serverUrl: string, body: Record<string, unknown>): Promise<Response> {
   return fetch(new URL("/v1/messages", serverUrl), {
     method: "POST",
@@ -1509,8 +1652,6 @@ test("generated agent effort directive restores exact xhigh and max after Claude
   const { server: upstream, captured } = mockChatUpstreamCapturing();
   saveConfig(mockConfig(`${upstream.url.toString().replace(/\/$/, "")}/v1`));
   const server = startServer(0);
-  const route = "claude-ocx-mock--test-model";
-  const key = getOrCreateDirectiveSigningKey();
   try {
     for (const effort of ["xhigh", "max"]) {
       const response = await postMessages(server.url.toString(), {
@@ -1518,9 +1659,8 @@ test("generated agent effort directive restores exact xhigh and max after Claude
         max_tokens: 32000,
         stream: true,
         system: [
-          { type: "text", text: `<!-- ocx-route: ${route} -->` },
+          { type: "text", text: "<!-- ocx-route: claude-ocx-mock--test-model -->" },
           { type: "text", text: `<!-- ocx-effort: ${effort} -->` },
-          { type: "text", text: `<!-- ocx-sig: v1:${signDirective(route, effort, key)} -->` },
         ],
         thinking: { type: "enabled", budget_tokens: 31999 },
         messages: [{ role: "user", content: "hi" }],
@@ -1557,7 +1697,6 @@ test("generated agent effort directive preserves routed Anthropic structured out
   saveConfig({
     port: 0,
     defaultProvider: "mock-anthropic",
-    subagentModels: ["mock-anthropic/claude-sonnet-5"],
     providers: {
       "mock-anthropic": {
         adapter: "anthropic",
@@ -1568,9 +1707,6 @@ test("generated agent effort directive preserves routed Anthropic structured out
     },
   } as OcxConfig);
   const server = startServer(0);
-  const route = "claude-ocx-mock-anthropic--claude-sonnet-5";
-  const effort = "max";
-  const key = getOrCreateDirectiveSigningKey();
   const schema = {
     type: "object",
     properties: { answer: { type: "string" } },
@@ -1583,9 +1719,8 @@ test("generated agent effort directive preserves routed Anthropic structured out
       max_tokens: 32000,
       stream: true,
       system: [
-        { type: "text", text: `<!-- ocx-route: ${route} -->` },
-        { type: "text", text: `<!-- ocx-effort: ${effort} -->` },
-        { type: "text", text: `<!-- ocx-sig: v1:${signDirective(route, effort, key)} -->` },
+        { type: "text", text: "<!-- ocx-route: claude-ocx-mock-anthropic--claude-sonnet-5 -->" },
+        { type: "text", text: "<!-- ocx-effort: max -->" },
       ],
       thinking: { type: "enabled", budget_tokens: 31999 },
       output_config: {

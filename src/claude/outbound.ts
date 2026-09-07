@@ -5,10 +5,8 @@
  *  - Transport-only `ping` events may appear at any point, including before
  *    message_start. Semantic framing stays message_start ->
  *    (content_block_start -> deltas -> content_block_stop)* -> message_delta -> message_stop.
- *  - thinking blocks get thinking_delta(s) then ONE signature_delta derived from
- *    Responses reasoning.encrypted_content (genuine sig when present, otherwise
- *    OpenCodex-owned ocxr1 continuity); Date.now synthetic is removed and krc is
- *    never emitted as a genuine signature.
+ *  - thinking blocks get thinking_delta(s), then one signature_delta containing the
+ *    genuine replay signature or a bounded ocxr1 fallback envelope.
  *  - message_delta.usage is cumulative; message_start embeds a full message snapshot.
  *  - errors: {type:"error", error:{type,message}}; may arrive mid-stream after HTTP 200.
  */
@@ -22,7 +20,7 @@ import {
   type TranslatorBudget,
 } from "../lib/translator-budget";
 import { sseFieldOffset, sseFieldValue } from "../lib/sse-decoder";
-import { decodeReasoningEnvelope, encodeReasoningEnvelope, OCX_REASONING_PREFIX } from "../responses/reasoning-envelope";
+import { decodeReasoningEnvelope, encodeReasoningEnvelope } from "../responses/reasoning-envelope";
 
 type Rec = Record<string, unknown>;
 
@@ -217,9 +215,8 @@ interface OpenBlock {
   callId?: string;
   /** Last fixed-size reasoning identity (item + summary/content index) seen by this block. */
   reasoningPartKey?: string;
-  /** Buffered thinking text for owned-ocxr1 fallback when no genuine sig is available. */
   thinkingBuf?: string;
-  /** Genuine Anthropic signature decoded from reasoning encrypted_content, if any. */
+  thinkingBufBytes?: number;
   reasoningSig?: string;
 }
 
@@ -237,6 +234,9 @@ export function responsesSseToAnthropicSse(
   let bufferBytes = 0;
   let started = false;
   let terminated = false;
+  // Starting termination can still throw while closing a block or emitting its
+  // terminal frame. Only a delivered terminal forbids the bounded overflow error.
+  let terminalDelivered = false;
   let cancelled = false;
   let blockIndex = 0;
   let open: OpenBlock | null = null;
@@ -259,6 +259,11 @@ export function responsesSseToAnthropicSse(
   const releaseDeliveredFrame = () => {
     const bytes = queuedLiveFrameBytes.shift();
     if (bytes !== undefined) translatorBudget.releaseRetained(bytes, { kind: "live_transient" });
+  };
+  const releaseThinkingBuffer = (block: OpenBlock | null | undefined) => {
+    if (block?.kind !== "thinking") return;
+    translatorBudget.releaseRetained(block.thinkingBufBytes ?? 0, { kind: "reasoning" });
+    block.thinkingBufBytes = 0;
   };
 
   return new ReadableStream<Uint8Array>({
@@ -303,23 +308,14 @@ export function responsesSseToAnthropicSse(
           open.webSearchArgsEmitted = true;
         }
         if (open.kind === "thinking") {
-          // Derive signature from decoded encrypted_content (genuine sig) or owned ocxr1 continuity.
-          // Never emit krc as a genuine signature; it stays internal.
-          let sig = open.reasoningSig;
-          if (!sig) {
-            const txt = open.thinkingBuf ?? "";
-            if (txt.length > 0) {
-              sig = encodeReasoningEnvelope({ txt });
-            } else {
-              sig = encodeReasoningEnvelope({ txt: "" });
-            }
-          }
+          const signature = open.reasoningSig ?? encodeReasoningEnvelope({ txt: open.thinkingBuf ?? "" });
           emit("content_block_delta", {
             type: "content_block_delta", index: open.index,
-            delta: { type: "signature_delta", signature: sig },
+            delta: { type: "signature_delta", signature },
           });
         }
         emit("content_block_stop", { type: "content_block_stop", index: open.index });
+        releaseThinkingBuffer(open);
         if (open.callId) translatorBudget.closeCall(open.callId);
         open = null;
       };
@@ -332,7 +328,7 @@ export function responsesSseToAnthropicSse(
           ? { type: "text", text: "" }
           : { type: "thinking", thinking: "", signature: "" };
         emit("content_block_start", { type: "content_block_start", index, content_block: contentBlock });
-        open = { kind, index, thinkingBuf: "", reasoningSig: undefined, reasoningPartKey: undefined };
+        open = { kind, index, thinkingBuf: "", thinkingBufBytes: 0 };
       };
       const finish = (stopReason: string, usage: unknown) => {
         if (terminated) return;
@@ -345,6 +341,7 @@ export function responsesSseToAnthropicSse(
           usage: anthropicUsage(usage, webSearchRequests),
         });
         emit("message_stop", { type: "message_stop" });
+        terminalDelivered = true;
       };
       // upstreamDerived: transient upstream statuses become overloaded_error so the
       // Anthropic-SDK client retries with backoff; proxy-internal exceptions stay
@@ -353,11 +350,15 @@ export function responsesSseToAnthropicSse(
       // resets reach the reader catch (no failed-tail relay) and stay api_error —
       // same as today, deliberate residual.
       const fail = (status: number, message: string, upstreamDerived = false, code?: string) => {
-        if (terminated) return;
+        // finish/fail sets terminated before closeOpenBlock. A closure-time
+        // allocation failure must still emit one error, without retrying closure.
+        if (terminated && (code !== "translation_buffer_limit" || terminalDelivered)) return;
         terminated = true;
         if (code === "translation_buffer_limit") {
+          releaseThinkingBuffer(open);
           if (open?.callId) translatorBudget.closeCall(open.callId);
           open = null;
+          terminalDelivered = true;
           // No normal close frames are valid after overflow. Emit exactly one bounded
           // typed terminal without consulting the exhausted budget.
           controller.enqueue(encoder.encode(sseFrame("error", anthropicErrorBody(
@@ -374,10 +375,12 @@ export function responsesSseToAnthropicSse(
           // Do not manufacture message_start before the terminal error. Earlier transport-only
           // pings remain valid and do not turn the failure into a partial message.
           emit("error", anthropicErrorBody(status, message, type, code));
+          terminalDelivered = true;
           return;
         }
         closeOpenBlock();
         emit("error", anthropicErrorBody(status, message, type, code));
+        terminalDelivered = true;
       };
 
       const handleFrame = (eventName: string, data: Rec) => {
@@ -391,8 +394,10 @@ export function responsesSseToAnthropicSse(
           case "response.output_text.delta": {
             if (typeof data.delta !== "string" || data.delta.length === 0) break;
             ensureBlock("text");
+            const active = open;
+            if (!active || active.kind !== "text") break;
             emit("content_block_delta", {
-              type: "content_block_delta", index: open!.index,
+              type: "content_block_delta", index: active.index,
               delta: { type: "text_delta", text: data.delta },
             });
             break;
@@ -401,6 +406,8 @@ export function responsesSseToAnthropicSse(
           case "response.reasoning_text.delta": {
             if (typeof data.delta !== "string" || data.delta.length === 0) break;
             ensureBlock("thinking");
+            const active = open;
+            if (!active || active.kind !== "thinking") break;
             // The JSON path joins reasoning summary/content parts with "\n\n"
             // (responsesJsonToAnthropicMessage); mirror that at part and item boundaries
             // so multi-part summaries do not glue into one run-on paragraph. Frames
@@ -412,53 +419,39 @@ export function responsesSseToAnthropicSse(
             // components while retaining item and part equality, rather than dropping item_id and
             // accidentally joining distinct malformed reasoning items.
             const partKey = `${boundedReasoningIdentity(data.item_id)}:${slot}`;
-            if (open!.reasoningPartKey !== undefined && open!.reasoningPartKey !== partKey) {
+            const needsPartSeparator = active.reasoningPartKey !== undefined
+              && active.reasoningPartKey !== partKey;
+            const appended = `${needsPartSeparator ? "\n\n" : ""}${data.delta}`;
+            const previous = active.thinkingBuf ?? "";
+            const previousBytes = active.thinkingBufBytes ?? 0;
+            const nextBytes = appendedUtf8Bytes(previous, previousBytes, appended);
+            const scope = { kind: "reasoning" } as const;
+            const reservation = translatorBudget.reserveTransient(nextBytes, scope);
+            try {
+              active.thinkingBuf = previous + appended;
+              active.thinkingBufBytes = nextBytes;
+              reservation.commitRetained();
+              translatorBudget.releaseRetained(previousBytes, scope);
+            } catch (error) {
+              reservation.release();
+              throw error;
+            }
+            if (needsPartSeparator) {
               emit("content_block_delta", {
-                type: "content_block_delta", index: open!.index,
+                type: "content_block_delta", index: active.index,
                 delta: { type: "thinking_delta", thinking: "\n\n" },
               });
-              open!.thinkingBuf = (open!.thinkingBuf ?? "") + "\n\n";
             }
-            open!.reasoningPartKey = partKey;
+            active.reasoningPartKey = partKey;
             emit("content_block_delta", {
-              type: "content_block_delta", index: open!.index,
+              type: "content_block_delta", index: active.index,
               delta: { type: "thinking_delta", thinking: data.delta },
             });
-            open!.thinkingBuf = (open!.thinkingBuf ?? "") + data.delta;
             break;
           }
           case "response.output_item.added": {
             const item = isRec(data.item) ? data.item : null;
-            if (!item) break;
-            // Direct lossless mapping for tool_search (private tool_search_call) -> Anthropic tool_use.
-            if (item.type === "tool_search_call") {
-              ensureStarted();
-              closeOpenBlock();
-              sawToolUse = true;
-              const index = blockIndex++;
-              const callId = typeof (item as any).call_id === "string" ? (item as any).call_id : `toolu_${uuid()}`;
-              emit("content_block_start", {
-                type: "content_block_start", index,
-                content_block: { type: "tool_use", id: callId, name: "tool_search", input: {} },
-              });
-              translatorBudget.openCall(callId);
-              // Capture initial arguments if present on added (rare) for later delta buffering.
-              const initArgs = typeof (item as any).arguments === "string" ? (item as any).arguments : typeof (item as any).input === "string" ? (item as any).input : "";
-              const initArgsBytes = Buffer.byteLength(initArgs);
-              if (initArgsBytes > 0) translatorBudget.chargeRetained(initArgsBytes, { kind: "tool_args", callId });
-              open = {
-                kind: "tool_use",
-                index,
-                callId,
-                itemId: typeof item.id === "string" ? item.id : undefined,
-                bufferWebSearchArgs: false,
-                argsBuf: initArgs,
-                argsBufBytes: initArgsBytes,
-                webSearchArgsEmitted: false,
-              };
-              break;
-            }
-            if (item.type !== "function_call") break;
+            if (!item || item.type !== "function_call") break;
             ensureStarted();
             closeOpenBlock();
             sawToolUse = true;
@@ -515,7 +508,6 @@ export function responsesSseToAnthropicSse(
               type: "content_block_delta", index: open.index,
               delta: { type: "input_json_delta", partial_json: data.delta },
             });
-            open.webSearchArgsEmitted = true;
             break;
           }
           case "response.output_item.done": {
@@ -524,10 +516,10 @@ export function responsesSseToAnthropicSse(
             // Server-side web search (native passthrough or sidecar bridge): translate the
             // finished call into the Anthropic pair Claude Code natively parses —
             // server_tool_use (query via input_json_delta) + web_search_tool_result.
+            // Never marks sawToolUse (stop_reason stays end_turn unless a real tool ran).
             if (item.type === "web_search_call") {
               ensureStarted();
               closeOpenBlock();
-              sawToolUse = true;
               const pair = webSearchPairFromItem(item);
               const toolIndex = blockIndex++;
               emit("content_block_start", {
@@ -548,28 +540,9 @@ export function responsesSseToAnthropicSse(
               if (pair.completed) webSearchRequests++;
               break;
             }
-            // tool_search_call output (treated as tool_use for stop_reason)
-            if (item.type === "tool_search_call") {
-              if (!open || open.kind !== "tool_use") break;
-              if (!open.webSearchArgsEmitted) {
-                const rawArgs = typeof item.arguments === "string" && item.arguments.length > 0
-                  ? item.arguments
-                  : (open.argsBuf ?? "");
-                if (rawArgs.length > 0) {
-                  emit("content_block_delta", {
-                    type: "content_block_delta",
-                    index: open.index,
-                    delta: { type: "input_json_delta", partial_json: rawArgs },
-                  });
-                }
-              }
-              closeOpenBlock();
-              break;
-            }
-            if (!open) break;
             // Close the matching open block (message/reasoning items close implicitly on
             // the next block; function_call items must close here so tool input parses).
-            if (open.kind === "tool_use" && item.type === "function_call") {
+            if (open && open.kind === "tool_use" && item.type === "function_call") {
               if (open.bufferWebSearchArgs && !open.webSearchArgsEmitted) {
                 const rawArgs = typeof item.arguments === "string" && item.arguments.length > 0
                   ? item.arguments
@@ -585,48 +558,24 @@ export function responsesSseToAnthropicSse(
               }
               closeOpenBlock();
             }
-            else if (open.kind === "text" && item.type === "message") closeOpenBlock();
-            else if (open.kind === "thinking" && item.type === "reasoning") {
-              // Derive genuine signature from encrypted_content; malformed ocxr1 is treated as missing.
-              const enc = typeof (item as any).encrypted_content === "string" ? (item as any).encrypted_content as string : undefined;
-              if (enc) {
-                const env = decodeReasoningEnvelope(enc);
-                if (env?.sig) {
-                  open.reasoningSig = env.sig;
-                } else if (env?.krc) {
-                  // Never emit krc as genuine signature.
-                }
-                // malformed (env===null) or txt-only envelope leaves reasoningSig undefined -> owned fallback.
-                // Native blobs (no ocxr1 prefix) also decode to null -> fallback.
+            else if (open && open.kind === "text" && item.type === "message") closeOpenBlock();
+            else if (item.type === "reasoning") {
+              const encrypted = typeof item.encrypted_content === "string" ? item.encrypted_content : "";
+              const env = encrypted ? decodeReasoningEnvelope(encrypted) : null;
+              const red = env?.red ?? [];
+              if (env?.sig && open?.kind !== "thinking") ensureBlock("thinking");
+              if (open?.kind === "thinking") {
+                if (env?.sig) open.reasoningSig = env.sig;
+                closeOpenBlock();
               }
-              // Capture additional thinking text that may be present in the done payload (non-streaming provider).
-              const parts: string[] = [];
-              if (Array.isArray((item as any).summary)) {
-                for (const s of (item as any).summary as any[]) if (s && typeof s.text === "string" && s.text.length>0) parts.push(s.text);
+              if (red.length > 0) {
+                ensureStarted();
+                closeOpenBlock();
               }
-              if (Array.isArray((item as any).content)) {
-                for (const s of (item as any).content as any[]) if (s && typeof s.text === "string" && s.text.length>0) parts.push(s.text);
-              }
-              if (parts.length>0) {
-                const doneText = parts.join("\n\n");
-                // Only append if not already buffered via deltas (deltas would have set thinkingBuf).
-                if (!open.thinkingBuf || open.thinkingBuf.length===0) open.thinkingBuf = doneText;
-                else if (!open.thinkingBuf.includes(doneText)) open.thinkingBuf += (open.thinkingBuf.endsWith("\n\n")?"":"\n\n")+doneText;
-              }
-              // Handle redacted thinking: emit separate redacted_thinking blocks after the thinking block
-              // closes. For streaming this happens as a new block; for simplicity emit after close.
-              const red = (() => {
-                if (!enc) return undefined;
-                const e = decodeReasoningEnvelope(enc);
-                return e?.red;
-              })();
-              closeOpenBlock();
-              if (red && red.length>0) {
-                for (const data of red) {
-                  const idx = blockIndex++;
-                  emit("content_block_start", { type: "content_block_start", index: idx, content_block: { type: "redacted_thinking", data } });
-                  emit("content_block_stop", { type: "content_block_stop", index: idx });
-                }
+              for (const data of red) {
+                const idx = blockIndex++;
+                emit("content_block_start", { type: "content_block_start", index: idx, content_block: { type: "redacted_thinking", data } });
+                emit("content_block_stop", { type: "content_block_stop", index: idx });
               }
             }
             break;
@@ -647,13 +596,6 @@ export function responsesSseToAnthropicSse(
               finish("max_tokens", response.usage);
             } else if (details.reason === "content_filter") {
               finish("refusal", response.usage);
-            } else if (details.reason === "pause_turn") {
-              // Anthropic pause_turn preserved only where Responses retains it verbatim;
-              // collapsed form via truncated-stop-reason stays max_output_tokens -> max_tokens.
-              finish("pause_turn", response.usage);
-            } else if (details.reason === "model_context_window_exceeded") {
-              // Token-limit truncation; retain verbatim value as max_tokens when present.
-              finish("max_tokens", response.usage);
             } else {
               const message = typeof details.message === "string" && details.message.trim()
                 ? details.message
@@ -690,7 +632,6 @@ export function responsesSseToAnthropicSse(
               status,
               message,
               true,
-              code,
             );
             break;
           }
@@ -821,6 +762,7 @@ export function responsesSseToAnthropicSse(
             fail(413, "upstream translation buffer exceeded the safe limit", false, "translation_buffer_limit");
           } else fail(500, err instanceof Error ? err.message : String(err));
         } finally {
+          releaseThinkingBuffer(open);
           translatorBudget.releaseRetained(bufferBytes, { kind: "live_transient" });
           if (pingTimer !== undefined) clearInterval(pingTimer);
           reader.releaseLock();
@@ -834,6 +776,7 @@ export function responsesSseToAnthropicSse(
     cancel(reason) {
       cancelled = true;
       while (queuedLiveFrameBytes.length > 0) releaseDeliveredFrame();
+      releaseThinkingBuffer(open);
       if (open?.callId) translatorBudget.closeCall(open.callId);
       if (pingTimer !== undefined) clearInterval(pingTimer);
       return reader?.cancel(reason);
@@ -873,39 +816,16 @@ export function responsesJsonToAnthropicMessage(json: unknown, model: string): R
             if (isRec(s) && typeof s.text === "string" && s.text.length > 0) parts.push(s.text);
           }
         }
-        const enc = typeof (raw as any).encrypted_content === "string" ? (raw as any).encrypted_content as string : undefined;
-        let sig: string | undefined;
-        let red: string[] | undefined;
-        if (enc) {
-          const env = decodeReasoningEnvelope(enc);
-          if (env?.sig) sig = env.sig;
-          if (env?.red && env.red.length > 0) red = env.red;
+        const encrypted = typeof raw.encrypted_content === "string" ? raw.encrypted_content : "";
+        const env = encrypted ? decodeReasoningEnvelope(encrypted) : null;
+        // Legacy combined envelopes place redacted blocks before the signed block,
+        // matching the Anthropic adapter. New bridge output uses separate items.
+        for (const data of env?.red ?? []) content.push({ type: "redacted_thinking", data });
+        // env.txt may be locally hidden text. Do not expose it here or manufacture
+        // a new signed continuity carrier; hidden-summary replay remains limited.
+        if (parts.length > 0 || env?.sig) {
+          content.push({ type: "thinking", thinking: parts.join("\n\n"), signature: env?.sig ?? encodeReasoningEnvelope({ txt: parts.join("\n\n") }) });
         }
-        if (parts.length > 0) {
-          const derivedSig = sig ?? encodeReasoningEnvelope({ txt: parts.join("\n\n") });
-          content.push({ type: "thinking", thinking: parts.join("\n\n"), signature: derivedSig });
-        }
-        if (red && red.length > 0) {
-          for (const data of red) content.push({ type: "redacted_thinking", data });
-        }
-        break;
-      }
-      case "tool_search_call": {
-        sawToolUse = true;
-        let input: unknown = {};
-        if (typeof (raw as any).arguments === "string" && (raw as any).arguments.length > 0) {
-          try { input = JSON.parse((raw as any).arguments); } catch { input = {}; }
-        } else if (typeof (raw as any).input === "string" && (raw as any).input.length > 0) {
-          try { input = JSON.parse((raw as any).input); } catch { input = {}; }
-        } else if ((raw as any).arguments && typeof (raw as any).arguments === "object") {
-          input = (raw as any).arguments;
-        }
-        content.push({
-          type: "tool_use",
-          id: typeof (raw as any).call_id === "string" ? (raw as any).call_id : `toolu_${uuid()}`,
-          name: "tool_search",
-          input,
-        });
         break;
       }
       case "function_call": {
@@ -924,7 +844,7 @@ export function responsesJsonToAnthropicMessage(json: unknown, model: string): R
         break;
       }
       case "web_search_call": {
-        sawToolUse = true;
+        // Server-side search: emit the Anthropic pair. Does NOT set sawToolUse.
         const pair = webSearchPairFromItem(raw);
         content.push({ type: "server_tool_use", id: pair.id, name: "web_search", input: pair.input });
         content.push({ type: "web_search_tool_result", tool_use_id: pair.id, content: pair.resultContent });
@@ -937,13 +857,9 @@ export function responsesJsonToAnthropicMessage(json: unknown, model: string): R
   }
 
   const details = isRec(body.incomplete_details) ? body.incomplete_details : {};
-  const isIncompleteTokenLimit = body.status === "incomplete" && (details.reason === "max_output_tokens" || details.reason === "model_context_window_exceeded");
-  const isIncompletePause = body.status === "incomplete" && details.reason === "pause_turn";
   if (body.status === "incomplete"
     && details.reason !== "max_output_tokens"
-    && details.reason !== "content_filter"
-    && details.reason !== "pause_turn"
-    && details.reason !== "model_context_window_exceeded") {
+    && details.reason !== "content_filter") {
     const message = typeof details.message === "string" && details.message.trim()
       ? details.message
       : `upstream response was incomplete${typeof details.reason === "string" ? ` (${details.reason})` : ""}`;
@@ -952,11 +868,10 @@ export function responsesJsonToAnthropicMessage(json: unknown, model: string): R
   if (body.status === "completed" && body.end_turn === false && !sawToolUse) {
     return anthropicErrorBody(529, "upstream turn ended without a final answer", "overloaded_error");
   }
-  const stopReason = isIncompleteTokenLimit
+  const stopReason = body.status === "incomplete" && details.reason === "max_output_tokens"
     ? "max_tokens"
     : body.status === "incomplete" && details.reason === "content_filter"
       ? "refusal"
-    : isIncompletePause ? "pause_turn"
     : sawToolUse ? "tool_use" : "end_turn";
 
   return {
@@ -1075,9 +990,10 @@ export async function collectAnthropicMessage(
   } finally {
     reader.releaseLock();
   }
-  closeBlock();
-
+  // Error is authoritative. In particular, do not allocate another copy of an
+  // unfinished thinking block after the translator reported closure overflow.
   if (error) return error;
+  closeBlock();
   return {
     id: `msg_${uuid()}`,
     type: "message",

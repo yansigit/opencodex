@@ -1042,6 +1042,13 @@ export function bridgeToResponsesSSE(
             }
             if (event.type !== "done" && event.type !== "incomplete" && event.type !== "error") continue;
           }
+          // Anthropic signature_delta supplies the latest signature, not an append-only
+          // fragment (anthropic-sdk-typescript MessageStream). Keep consecutive updates
+          // together; the next semantic event belongs to the following block.
+          if (pendingSignature !== undefined && event.type !== "thinking_signature" && event.type !== "heartbeat") {
+            if (currentReasoning) closeCurrentReasoning();
+            else flushHiddenReasoningEnvelope();
+          }
           switch (event.type) {
             case "assistant_boundary": {
               // A guarded continuation starts a fresh assistant output item while keeping the
@@ -1151,15 +1158,21 @@ export function bridgeToResponsesSSE(
             case "thinking_signature": {
               pendingSignatureBytes = replaceRetainedString(pendingSignatureBytes, event.signature, "reasoning");
               pendingSignature = event.signature;
-              // Signature arrives at the end of the thinking block. With a visible reasoning item
-              // open, closeCurrentReasoning attaches the envelope; hidden/suppressed blocks flush
-              // an envelope-only reasoning item now.
-              if (!currentReasoning) flushHiddenReasoningEnvelope();
+              // Delay closing until the next semantic event so a signature update cannot
+              // create another block or become attached to the following thinking text.
               break;
             }
             case "redacted_thinking": {
+              if (currentMsg) closeCurrentMessage("commentary");
+              if (currentReasoning) closeCurrentReasoning();
+              if (currentRawReasoning) closeCurrentRawReasoning();
+              flushHiddenRawReasoning();
+              if (currentToolCall) closeCurrentToolCall();
               budget?.chargeRetained(bytesOf(event.data), { kind: "reasoning" });
               pendingRedacted.push(event.data);
+              // A redacted block is complete at content_block_start. Emit it here,
+              // not with a later thinking block or after a tool call at turn end.
+              flushHiddenReasoningEnvelope();
               break;
             }
             case "kiro_redacted_reasoning": {
@@ -1913,6 +1926,9 @@ function buildResponseJSONWithBudget(
       if (budget) releaseTranslatedEvent(e, budget);
       continue;
     }
+    if (batchSignature !== undefined && e.type !== "thinking_signature" && e.type !== "heartbeat") {
+      flushSummaryReasoning();
+    }
     switch (e.type) {
       case "assistant_boundary":
         flushText("commentary");
@@ -1957,19 +1973,23 @@ function buildResponseJSONWithBudget(
         }
         break;
       case "thinking_signature":
-        // End of the current thinking block — flush it WITH the signature envelope so the
-        // block/signature pairing survives multi-block turns.
+        // Like streaming, retain the latest signature update until the next semantic
+        // event. Flushing every update would manufacture signature-only siblings.
         batchSignatureBytes = replaceBatchRetainedString(batchSignatureBytes, e.signature, "reasoning");
         batchSignature = e.signature;
-        flushSummaryReasoning();
         break;
       case "redacted_thinking":
+        flushText("commentary");
+        flushSummaryReasoning();
+        flushRawReasoning();
+        flushToolCall();
         {
           const dataBytes = bytesOf(e.data);
           budget?.chargeRetained(dataBytes, { kind: "reasoning" });
           batchRedactedBytes += dataBytes;
         }
         batchRedacted.push(e.data);
+        flushSummaryReasoning();
         break;
       case "kiro_redacted_reasoning":
         // Stash only — pushed after the trailing flushes. One blob per turn, so last wins.
