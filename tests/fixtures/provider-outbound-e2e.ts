@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { saveConfig } from "../../src/config";
 import { fetchProviderModels } from "../../src/codex/catalog/provider-fetch";
+import { DestinationDnsResolutionError } from "../../src/lib/destination-policy";
 import { providerOutboundGet } from "../../src/lib/provider-outbound";
 import { PROXY_ENV_KEYS } from "../../src/lib/proxy-env";
 import { handleManagementAPI } from "../../src/server/management-api";
@@ -95,6 +96,17 @@ try {
       "all-proxy",
       { baseUrl: "http://all-proxy-only.invalid/v1", allowPrivateNetwork: false },
       "http://all-proxy-only.invalid/v1/models",
+      {},
+      {
+        // Keep this negative route independent of platform DNS/search-domain behavior.
+        // If ALL_PROXY were incorrectly selected, the typed failure would still degrade
+        // into a real fetch; the result and proxy-request assertions below catch that.
+        resolveAddresses: async () => {
+          throw new DestinationDnsResolutionError(
+            "provider URL hostname all-proxy-only.invalid could not be resolved",
+          );
+        },
+      },
     );
     allProxy = { status: allProxyResponse.status, body: await allProxyResponse.text() };
   } catch (error) {

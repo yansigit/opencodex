@@ -28,6 +28,10 @@ export const SERIAL_TEST_FILES = [
   "tests/codex-integration/codex-prompt-route.test.ts",
   "tests/codex-integration/codex-shim.test.ts",
   "tests/codex-integration/codex-transition-state-race.test.ts",
+  // Proves the cross-process SQLite mutation lock with real Bun children. On a
+  // loaded Windows worker, child startup and teardown can exceed the test's
+  // bounded five-second ownership waits even though the lock behavior passes.
+  "tests/config/config-mutation-lock.test.ts",
   "tests/config/config-save-boundary.test.ts",
   "tests/providers/cursor/cursor-images.test.ts",
   "tests/providers/cursor/cursor-native-exec-shell.test.ts",
@@ -64,6 +68,10 @@ export const SERIAL_TEST_FILES = [
   "tests/storage/storage-worker-lifecycle.test.ts",
   "tests/ci-workflows/test-runner.test.ts",
   "tests/update/update-stop-first.test.ts",
+  // Calls the real trusted PowerShell process-time probe, whose production
+  // five-second timeout intentionally degrades to null. Parallel Windows load
+  // can consume that whole budget and turn the integration assertion flaky.
+  "tests/windows/windows-popup-fix.test.ts",
   // These suites share the interval-based overlay reconciler singleton and
   // OPENCODEX_HOME. Parallel files can stop or reset the process-wide poller
   // while a sibling is waiting for an observation, so isolate the whole family.
