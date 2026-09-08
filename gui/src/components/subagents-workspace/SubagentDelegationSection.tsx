@@ -356,10 +356,15 @@ export default function SubagentDelegationSection({
         <button
           type="button"
           className={`switch ${ultraOn ? "on" : ""}`}
-          onClick={() => onUltraModeSave({ multiAgentModeHintText: ultraOn ? null : ULTRA_MODE_PRESET })}
+          onClick={() => {
+            if (ultraOn) onUltraModeSave({ multiAgentModeHintText: null });
+            else if (ultraMode.recommendation) {
+              onUltraModeSave({ multiAgentModeHintText: ultraMode.recommendation.text });
+            }
+          }}
           // Turning OFF (clear) is always safe, even when v2 is disabled — a stale
           // hint would otherwise silently re-activate on the next v2 enable.
-          disabled={saving || ultraSaving || (!ultraOn && !ultraMode.multiAgentV2Enabled)}
+          disabled={saving || ultraSaving || (!ultraOn && (!ultraMode.multiAgentV2Enabled || !ultraMode.recommendation))}
           aria-label={t("sub.ultraMode")}
           aria-pressed={ultraOn}
         >
@@ -376,7 +381,7 @@ export default function SubagentDelegationSection({
             initialHint={ultraMode.hintText ?? ""}
             disabled={saving || ultraSaving}
             onSave={onUltraModeSave}
-            preset={ULTRA_MODE_PRESET}
+            preset={ultraMode.recommendation?.text ?? null}
             labels={{
               text: t("sub.ultraModeText"),
               preset: t("sub.ultraModePreset"),
