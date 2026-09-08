@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
-import { resolve } from "node:path";
 import { act } from "react";
 import type { Root } from "react-dom/client";
 import { LanguageProvider } from "../src/i18n/provider";
 import { clearClientResourceStoresForTests } from "../src/client-resource";
 import Usage from "../src/pages/Usage";
+import { formatCalendarDate } from "../src/usage-calendar-series";
 
 const globals = ["document", "window", "navigator", "localStorage", "sessionStorage", "ResizeObserver", "IS_REACT_ACT_ENVIRONMENT"] as const;
 const originalFetch = globalThis.fetch;
@@ -19,6 +19,9 @@ type RequestGate = { url: string; resolve: (response: Response) => void };
 let requests: RequestGate[];
 
 beforeEach(() => {
+  since = new Date(2020, 8, 15, 10, 20, 0, 0).getTime();
+  until = new Date(2020, 8, 15, 10, 21, 59, 999).getTime();
+  boundsQuery = `since=${since}&until=${until}`;
   previousGlobals = Object.fromEntries(globals.map(key => [key, Reflect.get(globalThis, key)])) as typeof previousGlobals;
   clearClientResourceStoresForTests();
   testWindow = new Window({ url: "http://localhost/" });
@@ -109,9 +112,9 @@ async function enter(start: string, end: string) {
 
 const apply = () => click(form().querySelector<HTMLButtonElement>('button[type="submit"]')!);
 const clear = () => click(form().querySelector<HTMLButtonElement>('button[type="button"]')!);
-const since = new Date(2020, 8, 15, 10, 20, 0, 0).getTime();
-const until = new Date(2020, 8, 15, 10, 21, 59, 999).getTime();
-const boundsQuery = `since=${since}&until=${until}`;
+let since: number;
+let until: number;
+let boundsQuery: string;
 
 function sessionEntries() {
   return Array.from({ length: sessionStorage.length }, (_, index) => {
@@ -155,49 +158,31 @@ for (const connected of [false, true]) {
 }
 
 test("America/Santiago midnight DST retains final-day activity and tooltip", async () => {
-  if (process.env.OCX_USAGE_SANTIAGO_CHILD !== "1") {
-    // Restoring an absent TZ can change Bun's effective timezone on Windows.
-    // Start the DST case in its timezone without mutating this suite's clock.
-    const timezone = { present: Object.hasOwn(process.env, "TZ"), value: process.env.TZ };
-    const localTime = new Date(2020, 8, 15, 10, 20).getTime();
-    const child = Bun.spawnSync([
-      process.execPath, "test", import.meta.path,
-      "-t", "^America/Santiago midnight DST retains final-day activity and tooltip$",
-      "--timeout", "10000",
-    ], {
-      cwd: resolve(import.meta.dir, ".."),
-      env: { ...process.env, TZ: "America/Santiago", OCX_USAGE_SANTIAGO_CHILD: "1" },
-      stdout: "pipe", stderr: "pipe", timeout: 12000, killSignal: "SIGKILL",
-    });
-    const diagnostics = `${child.stdout.toString()}\n${child.stderr.toString()}`;
-    expect(child.exitedDueToTimeout, diagnostics).not.toBe(true);
-    expect(child.signalCode, diagnostics).toBeUndefined();
-    expect(child.exitCode, diagnostics).toBe(0);
-    expect(child.stdout.toString().split(/\r?\n/), diagnostics).toContain("OCX_SANTIAGO_CASE_COMPLETED");
-    expect({ present: Object.hasOwn(process.env, "TZ"), value: process.env.TZ }).toEqual(timezone);
-    expect(new Date(2020, 8, 15, 10, 20).getTime()).toBe(localTime);
-    return;
+  const previous = process.env.TZ;
+  process.env.TZ = "America/Santiago";
+  try {
+    expect(new Date(2026, 8, 6, 0).getHours()).toBe(1);
+    await mount();
+    await respond(0, "preset-marker");
+    await enter("2026-09-05T00:00", "2026-09-07T23:59");
+    await apply();
+    const gate = requests.at(-1)!;
+    const data = report(gate, "santiago-marker", "2026-09-07");
+    data.days = ["2026-09-05", "2026-09-06", "2026-09-07"].map(date => ({
+      date, requests: date === "2026-09-07" ? 7 : 0, measuredRequests: 0, reportedRequests: 0,
+      totalTokens: date === "2026-09-07" ? 700 : 0, models: [],
+    }));
+    await act(async () => gate.resolve(Response.json(data)));
+    const active = container.querySelector<HTMLElement>('.heatmap-grid .heatmap-cell:not(.heatmap-cell-0)');
+    expect(active).not.toBeNull();
+    await act(async () => active!.focus());
+    expect(document.querySelector(".heatmap-tip-date")?.textContent).toBe(formatCalendarDate("2026-09-07", "en"));
+    expect(document.querySelector(".heatmap-tip")?.textContent).toContain("700");
+  } finally {
+    if (previous === undefined) delete process.env.TZ;
+    else process.env.TZ = previous;
   }
-  expect(process.env.TZ).toBe("America/Santiago");
-  expect(new Date(2026, 8, 6, 0).getHours()).toBe(1);
-  await mount();
-  await respond(0, "preset-marker");
-  await enter("2026-09-05T00:00", "2026-09-07T23:59");
-  await apply();
-  const gate = requests.at(-1)!;
-  const data = report(gate, "santiago-marker", "2026-09-07");
-  data.days = ["2026-09-05", "2026-09-06", "2026-09-07"].map(date => ({
-    date, requests: date === "2026-09-07" ? 7 : 0, measuredRequests: 0, reportedRequests: 0,
-    totalTokens: date === "2026-09-07" ? 700 : 0, models: [],
-  }));
-  await act(async () => gate.resolve(Response.json(data)));
-  const active = container.querySelector<HTMLElement>('.heatmap-grid .heatmap-cell:not(.heatmap-cell-0)');
-  expect(active).not.toBeNull();
-  await act(async () => active!.dispatchEvent(new testWindow.MouseEvent("mouseover", { bubbles: true })));
-  expect(container.querySelector(".heatmap-tip-date")?.textContent).toBe("2026-09-07");
-  expect(container.querySelector(".heatmap-tip")?.textContent).toContain("700");
-  if (process.env.OCX_USAGE_SANTIAGO_CHILD === "1") console.log("OCX_SANTIAGO_CASE_COMPLETED");
-}, process.env.OCX_USAGE_SANTIAGO_CHILD === "1" ? 10000 : 15000);
+});
 
 test("Apply submits inclusive bounds once; Clear restores the held preset without custom cache entries", async () => {
   await mount();
@@ -225,9 +210,10 @@ test("Apply submits inclusive bounds once; Clear restores the held preset withou
   await act(async () => { await new Promise<void>(resolve => setTimeout(resolve, 0)); });
   // A one-day historical window must not produce a year grid anchored to today's date.
   expect(container.querySelectorAll(".heatmap-grid .heatmap-cell")).toHaveLength(7);
-  const activeCell = container.querySelector(".heatmap-grid .heatmap-cell-1")!;
-  await act(async () => { activeCell.dispatchEvent(new testWindow.MouseEvent("mouseover", { bubbles: true })); });
-  expect(container.querySelector('[role="tooltip"]')?.textContent).toContain("2020-09-15");
+  const activeCell = container.querySelector<HTMLElement>(".heatmap-grid .heatmap-cell-1")!;
+  await act(async () => { activeCell.focus(); });
+  expect(document.querySelector(".heatmap-tip-date")?.textContent).toBe(formatCalendarDate("2020-09-15", "en"));
+  expect(document.querySelector(".heatmap-tip")?.textContent).toContain(formatCalendarDate("2020-09-15", "en"));
   await enter("2020-09-16T10:20", "2020-09-16T10:21");
   expect(interval()).toBe(appliedInterval);
   expect(requests).toHaveLength(2);
