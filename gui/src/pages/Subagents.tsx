@@ -50,7 +50,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   const catalogLoadGeneration = useRef(0);
   const delegation = useSubagentDelegation(apiBase);
   const [catalogState, setCatalogState] = useState<CatalogState>(() => readCatalogState(cached));
-  const [ultraMode, setUltraMode] = useState<UltraModeState>({ enabled: false, hintText: null, multiAgentV2Enabled: false, multiAgentMode: "default" });
+  const [ultraMode, setUltraMode] = useState<UltraModeState>({ enabled: false, hintText: null, recommendation: null, multiAgentV2Enabled: false, multiAgentMode: "default" });
   const [nativeParentOverride, setNativeParentOverride] = useState<V2NativeParentOverrideState>({ enabled: false, model: null, active: false });
   const [agentTaskRecovery, setAgentTaskRecovery] = useState<AgentTaskRecoveryState>({ enabled: false, model: null });
   const [routedDelegationBridge, setRoutedDelegationBridge] = useState<V2RoutedDelegationBridgeState>({ enabled: false });
@@ -85,6 +85,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       multiAgentMode?: "v1" | "default" | "v2";
       keepNativeChatGptOnV1?: boolean;
       multiAgentModeHintText?: string | null;
+      multiAgentModeHintRecommendation?: { text?: unknown; revision?: unknown };
       subagentDeveloperInstructions?: string | null;
       v2NativeParentOverride?: Partial<V2NativeParentOverrideState>;
       agentTaskRecovery?: Partial<AgentTaskRecoveryState>;
@@ -96,11 +97,20 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
     setMultiAgentMode(data.multiAgentMode === "v1" || data.multiAgentMode === "v2" ? data.multiAgentMode : "default");
     setKeepNativeChatGptOnV1(data.keepNativeChatGptOnV1 === true);
     setChildInstructions(typeof data.subagentDeveloperInstructions === "string" ? data.subagentDeveloperInstructions : "");
+    const rawRecommendation = data.multiAgentModeHintRecommendation;
+    const recommendation = rawRecommendation
+      && typeof rawRecommendation.text === "string"
+      && rawRecommendation.text.trim().length > 0
+      && typeof rawRecommendation.revision === "string"
+      && rawRecommendation.revision.trim().length > 0
+      ? { text: rawRecommendation.text, revision: rawRecommendation.revision }
+      : null;
     setUltraMode({
       enabled: data.enabled ?? false,
       loaded: true,
       keepNativeChatGptOnV1: data.keepNativeChatGptOnV1 === true,
       hintText: data.multiAgentModeHintText ?? null,
+      recommendation,
       // Ultra mode replaces Codex's effort-derived policy for every model. The
       // `default` surface still preserves upstream V1 pins (for example luna),
       // so only an explicitly forced V2 catalog is an effective surface here.

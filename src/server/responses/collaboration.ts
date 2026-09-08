@@ -242,6 +242,9 @@ export const PROACTIVE_MULTI_AGENT_MODE_TEXT = [
   "This mode remains active until a later multi-agent mode developer message changes it.",
 ].join(" ");
 
+const OPENCODEX_SUBAGENT_GUIDANCE_OPEN_TAG = "<opencodex_subagent_guidance>";
+const OPENCODEX_SUBAGENT_GUIDANCE_CLOSE_TAG = "</opencodex_subagent_guidance>";
+
 export function isV1CollabSurface(parsed: OcxParsedRequest): boolean {
   return collabSurface(parsed) === "v1";
 }
@@ -482,22 +485,16 @@ export async function multiAgentGuidanceText(
       // fallback only for explicit routed/account-qualified ids.
       const promptModel = preferred?.model
         ?? (injectionModel?.includes("/") ? injectionModel : undefined);
-      return `<multi_agent_mode>${applyInjectionPlaceholders(injectionPrompt, promptModel, injectionEffort, roster, fallbackGuidance, nativeDefaultState)}</multi_agent_mode>`;
+      return `${OPENCODEX_SUBAGENT_GUIDANCE_OPEN_TAG}${applyInjectionPlaceholders(injectionPrompt, promptModel, injectionEffort, roster, fallbackGuidance, nativeDefaultState)}${OPENCODEX_SUBAGENT_GUIDANCE_CLOSE_TAG}`;
     }
     if (!preferred && roster === "" && fallbackGuidance === "") return null;
-    let text = "When the active spawn_agent tool supports optional \"model\" or \"reasoning_effort\" overrides, "
-      + "use only models listed for this collaboration surface. "
-      + "When setting either override, set fork_turns to \"none\" "
-      + "(or a positive turn count such as \"3\"; full-history forks reject overrides) "
-      + "and make the task message self-contained. "
-      + "When specifying model overrides, preserve any caller-provided agent_type; do not replace it with \"worker\". "
-      + "Subagent exec runs in a pure V8 isolate without require('fs'); "
-      + "escape nested template literals in tools.apply_patch to prevent JavaScript syntax errors (e.g., write \\` and \\\${var}).";
+    let text = "OpenCodex sub-agent routing metadata for this collaboration surface. "
+      + "This metadata does not override Codex delegation or model-selection rules.";
     if (preferred) {
       text += ` Preferred sub-agent: model "${preferred.model}"`
         + (injectionEffort ? `, reasoning_effort "${injectionEffort}"` : "")
         + `; nativeDefaultState: ${nativeDefaultState}.`
-        + " — use it unless the user names another. Confirm a different listed model for one spawn only; do not persist the exception.";
+        + " Confirm a different listed model for one spawn only; do not persist the exception.";
     }
     text += fallbackGuidance;
     text += roster;
@@ -505,7 +502,7 @@ export async function multiAgentGuidanceText(
       // Roster is the only unbounded part — drop it before breaking the budget.
       text = text.slice(0, text.length - roster.length);
     }
-    return `<multi_agent_mode>${text}</multi_agent_mode>`;
+    return `${OPENCODEX_SUBAGENT_GUIDANCE_OPEN_TAG}${text}${OPENCODEX_SUBAGENT_GUIDANCE_CLOSE_TAG}`;
   }
 
   const effort = parsed.options.reasoning;
@@ -517,7 +514,7 @@ export async function multiAgentGuidanceText(
 
 
 
-export const V2_GUIDANCE_CHAR_BUDGET = 1200;
+export const V2_GUIDANCE_CHAR_BUDGET = 700;
 
 export function applyInjectionPlaceholders(prompt: string, model?: string, effort?: string, roster?: string, fallback?: string, nativeDefaultState?: NativeDefaultState): string {
   return prompt
@@ -563,6 +560,17 @@ function isGeneratedDeveloperItem(item: unknown, text: string): boolean {
   return generatedDeveloperText(item) === text;
 }
 
+function generatedGuidanceFamily(text: string): "multi_agent_mode" | "opencodex_subagent_guidance" | undefined {
+  if (text.startsWith("<multi_agent_mode>") && text.endsWith("</multi_agent_mode>")) {
+    return "multi_agent_mode";
+  }
+  if (text.startsWith(OPENCODEX_SUBAGENT_GUIDANCE_OPEN_TAG)
+      && text.endsWith(OPENCODEX_SUBAGENT_GUIDANCE_CLOSE_TAG)) {
+    return "opencodex_subagent_guidance";
+  }
+  return undefined;
+}
+
 function isDeveloperPrefixItem(item: unknown): boolean {
   if (!isRecord(item)) return false;
   if (item.type === "additional_tools") return item.role === "developer";
@@ -602,13 +610,13 @@ export function injectDeveloperMessage(parsed: OcxParsedRequest, text: string): 
   const devItem = { type: "message", role: "developer", content: [{ type: "input_text", text }] };
   if (rawInput) {
     const replayPrefix = rawInput.slice(0, replayPrefixLen);
-    const taggedGuidance = text.startsWith("<multi_agent_mode>") && text.endsWith("</multi_agent_mode>");
-    const lastTaggedGuidance = taggedGuidance
+    const guidanceFamily = generatedGuidanceFamily(text);
+    const lastTaggedGuidance = guidanceFamily
       ? replayPrefix.map(generatedDeveloperText)
-        .filter(item => item?.startsWith("<multi_agent_mode>") && item.endsWith("</multi_agent_mode>"))
+        .filter(item => item !== undefined && generatedGuidanceFamily(item) === guidanceFamily)
         .at(-1)
       : undefined;
-    if (taggedGuidance ? lastTaggedGuidance === text : replayPrefix.some(item => isGeneratedDeveloperItem(item, text))) {
+    if (guidanceFamily ? lastTaggedGuidance === text : replayPrefix.some(item => isGeneratedDeveloperItem(item, text))) {
       return;
     }
   }

@@ -88,7 +88,7 @@ function functionToolToResponses(raw: Rec): Rec | null {
     ...(typeof raw.description === "string" ? { description: raw.description } : {}),
     parameters: raw.input_schema,
     ...(raw.defer_loading === true ? { defer_loading: true } : {}),
-    ...(typeof raw.strict === "boolean" ? { strict: raw.strict } : {}),
+    strict: typeof raw.strict === "boolean" ? raw.strict : false,
   };
 }
 

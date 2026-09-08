@@ -510,13 +510,160 @@ export function waitWithMonotonicTimeout<T>(
   });
 }
 
+function waitWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve(null), timeoutMs);
+    promise.then(
+      value => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      error => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+/** Read continuously so a timeout can still report output received before EOF. */
+export function captureTestOutput(
+  stdout: ReadableStream<Uint8Array>,
+  stderr: ReadableStream<Uint8Array>,
+) {
+  const collect = (stream: ReadableStream<Uint8Array>) => {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    let reading = true;
+    let complete = false;
+    const done = (async () => {
+      try {
+        while (reading) {
+          const chunk = await reader.read();
+          if (!reading) break;
+          if (chunk.done) {
+            complete = true;
+            break;
+          }
+          text += decoder.decode(chunk.value, { stream: true });
+        }
+      } catch {
+        // Retain the prefix without turning a pipe error into an unhandled rejection.
+      } finally {
+        if (reading) text += decoder.decode();
+        reading = false;
+        reader.releaseLock();
+      }
+    })();
+    return {
+      done,
+      snapshot: () => ({ text, complete }),
+      cancel() {
+        if (!reading) return;
+        reading = false;
+        text += decoder.decode();
+        void reader.cancel().catch(() => {});
+      },
+    };
+  };
+  const out = collect(stdout);
+  const err = collect(stderr);
+  return {
+    async finish(timeoutMs: number) {
+      const drained = await waitWithTimeout(Promise.all([out.done, err.done]), timeoutMs);
+      if (drained === null) {
+        out.cancel();
+        err.cancel();
+      }
+      const stdoutSnapshot = out.snapshot();
+      const stderrSnapshot = err.snapshot();
+      return {
+        stdout: stdoutSnapshot.text,
+        stderr: stderrSnapshot.text,
+        complete: drained !== null && stdoutSnapshot.complete && stderrSnapshot.complete,
+      };
+    },
+  };
+}
+
+export async function runTestLane(
+  lane: BunTestLane,
+  runId: string,
+  inheritedLock: { lockPath: string; ownerToken: string } | undefined,
+  capture = false,
+  writers = {
+    stdout: (value: string) => { process.stdout.write(value); },
+    stderr: (value: string) => { process.stderr.write(value); },
+  },
+): Promise<{ exitCode: number; output: string }> {
+  const isolated = createIsolatedTestEnvironment({
+    ...process.env,
+    [TEST_RUN_ID_ENV]: runId,
+    [TEST_RUN_LOCK_PATH_ENV]: inheritedLock?.lockPath,
+    [TEST_RUN_LOCK_TOKEN_ENV]: inheritedLock?.ownerToken,
+    OCX_TEST_FULL_SUITE: "1",
+  });
+  const startedAt = Date.now();
+  let interrupted: NodeJS.Signals | null = null;
+  const child = Bun.spawn([process.execPath, "test", ...lane.args], {
+    env: isolated.env,
+    stdin: "inherit",
+    stdout: capture ? "pipe" : "inherit",
+    stderr: capture ? "pipe" : "inherit",
+  });
+  const captured = capture ? captureTestOutput(child.stdout!, child.stderr!) : undefined;
+  const forward = (signal: NodeJS.Signals) => {
+    interrupted = signal;
+    try { child.kill(signal); } catch { /* child already exited */ }
+  };
+  const onInterrupt = () => forward("SIGINT");
+  const onTerminate = () => forward("SIGTERM");
+  process.once("SIGINT", onInterrupt);
+  process.once("SIGTERM", onTerminate);
+
+  const exited = child.exited;
+  try {
+    let exitCode = await waitWithTimeout(exited, lane.timeoutMs);
+    if (exitCode === null) {
+      console.error(`[test] ${lane.label} exceeded ${Math.round(lane.timeoutMs / 1000)}s; terminating pid ${child.pid}.`);
+      try { child.kill("SIGTERM"); } catch { /* child already exited */ }
+      const graceful = await waitWithTimeout(exited, 5_000);
+      if (graceful === null) {
+        try { child.kill("SIGKILL"); } catch { /* child already exited */ }
+        await waitWithTimeout(exited, 2_000);
+      }
+    }
+    const result = await captured?.finish(1_000);
+    const stdout = result?.stdout ?? "";
+    const stderr = result?.stderr ?? "";
+    if (stdout) writers.stdout(stdout);
+    if (stderr) writers.stderr(stderr);
+    const output = stdout + "\n" + stderr;
+    if (result && !result.complete) {
+      console.error("[test] captured output is incomplete; collected output is shown above.");
+      if (exitCode === 0) exitCode = 1;
+    }
+    if (exitCode === null) return { exitCode: 124, output };
+    if (interrupted === "SIGINT") return { exitCode: 130, output };
+    if (interrupted === "SIGTERM") return { exitCode: 143, output };
+    const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+    console.warn(`[test] ${lane.label} finished in ${seconds}s (exit ${exitCode}).`);
+    return { exitCode, output };
+  } finally {
+    process.off("SIGINT", onInterrupt);
+    process.off("SIGTERM", onTerminate);
+    isolated.cleanup();
+  }
+}
+
 export interface TestLaneRuntimeOptions extends TestTerminationGraceOptions {
   command?: string[];
   createEnvironment?: typeof createIsolatedTestEnvironment;
   terminateProcess?: (child: Bun.Subprocess, signal: NodeJS.Signals) => Promise<void>;
 }
 
-async function runTestLane(
+async function runManagedTestLane(
   lane: BunTestLane,
   runId: string,
   inheritedLock: { lockPath: string; ownerToken: string } | undefined,
@@ -617,7 +764,7 @@ export async function runTestLaneForTests(
   runId: string,
   options: TestLaneRuntimeOptions = {},
 ): Promise<number> {
-  return (await runTestLane(lane, runId, undefined, false, options)).exitCode;
+  return (await runManagedTestLane(lane, runId, undefined, false, options)).exitCode;
 }
 
 export async function terminateSpawnedTestProcessForTests(
@@ -750,7 +897,7 @@ if (import.meta.main) {
       let exitCode = 0;
       let captured = "";
       for (const lane of resolveBunTestPlan(requestedTests, changedRun?.comparisonCommit)) {
-        const result = await runTestLane(lane, runId, inheritedLock, Boolean(changedRun));
+        const result = await runManagedTestLane(lane, runId, inheritedLock, Boolean(changedRun));
         captured += result.output;
         if (result.exitCode !== 0 && exitCode === 0) exitCode = result.exitCode;
         if ([124, 130, 143].includes(result.exitCode)) break;
