@@ -23,6 +23,7 @@ import {
   type McodeGeneratedConfig,
   type OpencodeGeneratedConfig,
   type PiGeneratedConfig,
+  type RaycastGeneratedConfig,
 } from "../../src/clients/config-export";
 import type { OcxConfig } from "../../src/types";
 import { catalogConvergenceFactory } from "../helpers/catalog-convergence";
@@ -216,6 +217,50 @@ describe("native Anthropic effort ladder reaches the Aside document", () => {
   });
 });
 describe("GET /api/client-config", () => {
+  for (const hostname of ["0.0.0.0", "::", "192.0.2.40"]) {
+    test(`Raycast export refuses authenticated bind ${hostname} before generating a document`, async () => {
+      const response = await clientConfigApi(baseConfig({ hostname }), "?client=raycast");
+      expect(response.status).toBe(400);
+      const body = await response.json() as Record<string, unknown>;
+      expect(body.reason).toBe("non_loopback");
+      expect(body.config).toBeUndefined();
+      expect(body.text).toBeUndefined();
+    });
+  }
+
+  test("Raycast export uses the declared unauthenticated listener instead of the management port", async () => {
+    const response = await clientConfigApi(baseConfig({
+      hostname: "0.0.0.0",
+      unauthenticatedLoopbackListener: { enabled: true, port: 10237 },
+    }), "?client=raycast");
+    expect(response.status).toBe(200);
+    const body = await response.json() as ClientConfigEnvelope;
+    const document = body.config as RaycastGeneratedConfig;
+    expect(document.providers[0]!.base_url).toBe("http://127.0.0.1:10237/v1");
+    expect(document.providers[0]!.models.length).toBeGreaterThan(0);
+    expect(body.text).not.toContain(REAL_LOOKING_KEY);
+    expect(body.text).not.toContain("api_keys");
+  });
+
+  test("OpenCode export keeps its envelope and uses the declared unauthenticated listener", async () => {
+    const response = await clientConfigApi(baseConfig({
+      hostname: "0.0.0.0", unauthenticatedLoopbackListener: { enabled: true, port: 10237 },
+    }), "?client=opencode");
+    expect(response.status).toBe(200);
+    const body = await response.json() as ClientConfigEnvelope;
+    expect(body.client).toBe("opencode");
+    expect((body.config as OpencodeGeneratedConfig).provider.opencodex!.options.baseURL)
+      .toBe("http://127.0.0.1:10237/v1");
+  });
+
+  test("Raycast export uses the main port for an ordinary loopback bind", async () => {
+    const response = await clientConfigApi(baseConfig(), "?client=raycast");
+    expect(response.status).toBe(200);
+    const body = await response.json() as ClientConfigEnvelope;
+    expect((body.config as RaycastGeneratedConfig).providers[0]!.base_url)
+      .toBe("http://127.0.0.1:10100/v1");
+  });
+
   test("opencode envelope carries the shared builder's exact bytes", async () => {
     const config = baseConfig();
     const response = await clientConfigApi(config, "?client=opencode");

@@ -10,6 +10,9 @@ export const SERIAL_TEST_FILES = [
   "tests/adapters/anthropic/anthropic-image-normalize.test.ts",
   "tests/claude-integration/claude-native-passthrough.test.ts",
   "tests/claude-integration/claude-management-api.test.ts",
+  // Real descendant termination needs a fresh process and the shared loaded
+  // startup budget; its marker and child/grandchild reaping assertions remain.
+  "tests/claude-integration/claude-certification.test.ts",
   // Uses real multi-second streaming and inactivity deadlines. The macOS
   // promotion pool delayed both sides past their test-level bounds.
   "tests/clients/remote-catalog.test.ts",
@@ -60,6 +63,15 @@ export const SERIAL_TEST_FILES = [
   // Keep its 60s product invariant, but remove unrelated suite contention.
   "tests/usage/quota-reset-seen-store.test.ts",
   "tests/responses/responses-stateless-dangling-call-repair.test.ts",
+  // Repeated real listener/config lifecycles hang a reused macOS Bun worker
+  // after the quotaWindow round-trip in the full pool (reproduced twice), while
+  // all 21 tests pass in a fresh process and in the server-only suite. Preserve
+  // the lifecycle assertions and deadlines; give this file its own process.
+  "tests/server/account-pool-management-api.test.ts",
+  // A reused Bun 1.4 macOS worker can spin during this file's first server
+  // lifecycle (sampled at 99% CPU); contain its debug/server globals in a fresh
+  // process while retaining every endpoint assertion and original deadline.
+  "tests/server/api-debug.test.ts",
   "tests/server/server-auth.test.ts",
   // Proves heartbeats cover a real 1.5s retry wait inside a 5s test budget.
   // The loaded macOS pool consumed that margin without a product failure.
@@ -113,7 +125,15 @@ export const DEDICATED_TEST_FILES = [
 export const STORAGE_TEST_FILES = DEDICATED_TEST_FILES.slice(0, 6);
 export const API_TEST_FILES = ["tests/server/api-usage.test.ts"] as const;
 
-const laneNames = ["general", "serial", "dedicated", "dedicated-storage", "dedicated-api"] as const;
+const laneNames = [
+  "general",
+  "serial",
+  "dedicated",
+  "dedicated-storage",
+  "dedicated-api",
+  "platform-main",
+  "platform-serial",
+] as const;
 export type TestLane = (typeof laneNames)[number];
 
 type DirectoryReader = (directory: string) => Dirent[];
@@ -159,7 +179,7 @@ export function validateLaneManifest(inventory: string[]): {
   const normalized = [...inventory].sort();
   if (new Set(normalized).size !== normalized.length) throw new Error("lane manifest contains duplicate paths");
   for (const path of normalized) {
-    if (!path.startsWith("tests/") || path.includes("..")) {
+    if (!/^tests\/[A-Za-z0-9._/-]+$/.test(path) || path.includes("..")) {
       throw new Error(`lane manifest contains path outside tests: ${path}`);
     }
   }
@@ -192,6 +212,10 @@ export function laneFiles(lane: TestLane, root = process.cwd()): string[] {
   const lanes = validateLaneManifest(discoverTestFiles(root));
   if (lane === "dedicated-storage") return [...STORAGE_TEST_FILES];
   if (lane === "dedicated-api") return [...API_TEST_FILES];
+  // Match the full-suite planner: both serial and dedicated files receive
+  // their own process on macOS, outside the general worker pool.
+  if (lane === "platform-main") return lanes.general;
+  if (lane === "platform-serial") return [...lanes.serial, ...lanes.dedicated];
   return lanes[lane];
 }
 
@@ -240,6 +264,6 @@ if (import.meta.main) {
       for (const path of allocateFilesByTiming(files, count, durations)[index - 1]!) console.log(path);
     } else for (const path of files) console.log(path);
   } else {
-    throw new Error("usage: --lane general|serial|dedicated|dedicated-storage|dedicated-api");
+    throw new Error(`usage: --lane ${laneNames.join("|")}`);
   }
 }

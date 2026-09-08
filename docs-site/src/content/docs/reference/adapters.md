@@ -195,6 +195,10 @@ header and does not guarantee a provider cache hit.
 **Auth:** `key` (`x-api-key` by default, or `Authorization: Bearer` with `apiKeyTransport: "bearer"`) or `oauth` (Bearer + `anthropic-beta`, for Claude Pro/Max).
 
 - Converts messages to Anthropic content blocks (text, base64 image, `tool_use`, `thinking`).
+- Translated Anthropic Messages reasoning replay shares the request translation budget, including
+  encoding/decoding copy overhead. Requests exceeding it return HTTP 413 with
+  `translation_buffer_limit`; signatures and opaque reasoning data are never truncated to fit.
+  Native Anthropic passthrough uses its separate body-size contract.
 - **Extended thinking math:** Anthropic requires `max_tokens > thinking.budget_tokens`. The adapter
   maps reasoning effort to a budget (minimal 1024 … max 32000), then computes a safe `max_tokens` with
   output headroom, and **drops `temperature`/`top_p`** when thinking is enabled (Anthropic forbids

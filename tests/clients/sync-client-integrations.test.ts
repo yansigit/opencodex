@@ -65,7 +65,7 @@ describe("ocx sync fans out to enabled native clients and owned file integration
 
     expect(fn).toContain("grokIntegrationEnabled(config)");
     expect(fn).toContain("claudeDesktopIntegrationEnabled(config)");
-    expect(fn).toContain('["mcode", "pi", "aside"]');
+    expect(fn).toContain('["mcode", "pi", "aside", "raycast"]');
     expect(fn).toContain("refreshOwnedCatalogIntegrations");
     // Native clients keep their catches; the owned catalog helper isolates file clients.
     expect(fn.match(/catch \(error\)/g)?.length).toBe(2);
@@ -651,15 +651,66 @@ describe("owned Pi/Aside catalogs follow filtered model selections", () => {
   });
 });
 
-test("the direct ocx sync command refreshes MCode, Pi and Aside instead of relying on /api/sync", async () => {
+test("the direct ocx sync command refreshes MCode, Pi, Raycast and server-owned Aside", async () => {
   const src = await Bun.file(new URL("../../src/cli/dispatch.ts", import.meta.url)).text();
   const start = src.indexOf("sync: async deps =>");
   const command = src.slice(start, src.indexOf("v2: async deps =>", start));
   expect(command).toContain("refreshOwnedCatalogIntegrations");
-  expect(command).toContain('["mcode", "pi"]');
+  expect(command).toContain('["mcode", "pi", "raycast"]');
   expect(command).toContain("refreshAsideProfilesThroughServer");
   expect(command.indexOf("syncModelsToCodex")).toBeLessThan(command.indexOf("refreshOwnedCatalogIntegrations"));
   expect(command).toContain('synced.status !== "refused"');
+});
+
+test("server startup owns Raycast refresh; ensure does not reuse a saved-config snapshot", async () => {
+  const src = await Bun.file(new URL("../../src/cli/index.ts", import.meta.url)).text();
+  const start = src.slice(src.indexOf("async function handleStart"), src.indexOf("function detachedStartEnvironment"));
+  const ensure = src.slice(src.indexOf("async function handleEnsure"), src.indexOf("async function handleTrayProxyStart"));
+  expect(src).toContain("refreshOwnedCatalogIntegrations");
+  expect(src).toContain('}, ["raycast"]);');
+  expect(start).toContain("await refreshOwnedRaycastCatalog(config, port)");
+  expect(ensure).not.toContain("await refreshOwnedRaycastCatalog(");
+  expect(src).not.toContain("refreshAllOwnedIntegrations");
+});
+
+test("already-running ensure leaves Raycast untouched when saved host and listener policy diverge", async () => {
+  // Exercise the actual command body with external effects injected. Importing
+  // index.ts directly starts CLI dispatch, so isolate only handleEnsure here.
+  const src = await Bun.file(new URL("../../src/cli/index.ts", import.meta.url)).text();
+  const command = src.slice(src.indexOf("async function handleEnsure"), src.indexOf("async function handleTrayProxyStart"));
+  const executable = new Bun.Transpiler({ loader: "ts" }).transformSync(command);
+  const root = mkdtempSync(join(tmpdir(), "ocx-ensure-raycast-divergence-"));
+  const configPath = join(root, "providers.yaml");
+  const original = "providers:\n  - id: opencodex\n    base_url: http://127.0.0.1:10237/v1\n";
+  writeFileSync(configPath, original);
+  const savedConfig = {
+    port: 10100, hostname: "192.0.2.40", providers: {}, defaultProvider: "mock",
+    unauthenticatedLoopbackListener: { enabled: true, port: 10999 },
+  } as OcxConfig;
+  let refreshCalls = 0;
+  const deps = {
+    findProxyOwnerBeforeJournalRecovery: async () => ({ live: { hostname: "127.0.0.1", port: 10237 } }),
+    loadConfig: () => savedConfig,
+    codexAutoStartEnabled: () => true,
+    syncModelsToCodex: async () => ({ status: "skipped" }),
+    refreshOwnedRaycastCatalog: async () => {
+      refreshCalls += 1;
+      writeFileSync(configPath, "wrong saved destination");
+    },
+    injectSystemEnv: async () => ({ injected: true }),
+    reportShellHookFailure: () => {},
+    reconcileShellHook: () => ({ state: "installed" }),
+    reconcileEnsureDesiredIntegrations: async () => {},
+    console: { log: () => {}, error: () => {} },
+  };
+  try {
+    const ensure = new Function(...Object.keys(deps), `${executable}; return handleEnsure;`)(...Object.values(deps)) as () => Promise<boolean>;
+    expect(await ensure()).toBe(true);
+    expect(refreshCalls).toBe(0);
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+  } finally {
+    removeTreeWithRetry(root);
+  }
 });
 
 test("identical explicit mutation keys join but cannot swallow a different apply or disable", async () => {

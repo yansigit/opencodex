@@ -259,7 +259,7 @@ import {
 } from "../../providers/request-pacing";
 import { slugsEquivalent } from "../../providers/slug-codec";
 import { isMuseSubscriptionUsagePayload, parseMuseSubscriptionUsage } from "../../providers/muse-subscription-usage";
-import { hasPassiveAccountQuota, recordPassiveAccountQuota } from "../../providers/quota";
+import { hasPassiveAccountQuota, recordAnthropicAccountQuotaFromHeaders, recordPassiveAccountQuota } from "../../providers/quota";
 import { captureConfigGeneration } from "../../lib/state-store-sweeper";
 import { applyOpenAiVirtualModel, resolveOpenAiCompactModel } from "../../providers/openai-virtual-models";
 import { isUsageDebugEnabled } from "../../usage/debug";
@@ -300,7 +300,7 @@ import {
   upstreamErrorMessageFromPayload,
 } from "../../lib/errors";
 import type { AdmissionLease } from "../../lib/admission";
-import { supportedLadderFor } from "../effort-policy";
+import { prepareEffortNormalization, supportedLadderFor } from "../effort-policy";
 import { classifyAgentKind, isThreadSpawnRequest } from "../effort-policy";
 import {
   applySubagentModelFallback,
@@ -352,8 +352,9 @@ import {
 import {
   agentTaskRecoveryConfig,
   discardEncryptedAgentTaskRecovery,
-  recoverEncryptedAgentTask,
+  recoverEncryptedAgentTaskWithResult,
   restoreCachedEncryptedAgentTasks,
+  type AgentTaskRecoveryFailureReason,
 } from "./agent-task-recovery";
 import { relaySseEagerBounded } from "../relay-eager";
 import {
@@ -413,6 +414,7 @@ import {
   type UpstreamHostAdmissionLease,
 } from "../../codex/upstream-host-health";
 import { createGrokResponsesSparseTerminalBlockRewrite } from "../grok-responses-snapshot-repair";
+import { createGrokResponsesControlFrameBlockRewrite } from "../grok-responses-control-frame";
 import {
   createResponsesSnapshotBlockRewrite,
   hasResponsesSnapshotRepair,
@@ -1602,7 +1604,9 @@ export function codexForwardTerminalOutcomeRecorder(
 ): ((status: ResponsesTerminalStatus, httpStatusOverride?: number) => void) | undefined {
   if (!usesCodexForwardPoolAuth(authCtx, provider)) return undefined;
   return (status, httpStatusOverride) => {
-    if (status === "incomplete") {
+    const quotaStatus = [httpStatusOverride, logCtx?.terminalHttpStatus]
+      .find(value => value === 429 || value === 402);
+    if (status === "incomplete" && quotaStatus === undefined) {
       // Normal limit/content-filter/stall terminal — the account served the
       // request. Don't penalize account health; record success to clear any
       // prior soft-avoid so a healthy account isn't stuck avoided.
@@ -1627,7 +1631,7 @@ export function codexForwardTerminalOutcomeRecorder(
     // the parent's terminalHttpStatus so the semantic status is not lost.
     const outcome = status === "completed"
       ? 200
-      : (httpStatusOverride ?? logCtx?.terminalHttpStatus ?? 502);
+      : (quotaStatus ?? httpStatusOverride ?? logCtx?.terminalHttpStatus ?? 502);
     recordCodexUpstreamOutcome(config, authCtx.accountId, outcome, {
       threadId: authCtx.affinityKey,
       fixedAccount: authCtx.fixedAccount,
@@ -2003,13 +2007,14 @@ export const UPSTREAM_JSON_BODY_READ_OPTIONS = {
   firstByteTimeoutMs: UPSTREAM_JSON_BODY_TOTAL_TIMEOUT_MS,
 };
 
-function unreadableEncryptedAgentTaskResponse(): Response {
+function unreadableEncryptedAgentTaskResponse(reason?: AgentTaskRecoveryFailureReason): Response {
   return new Response(
     JSON.stringify({
       error: {
         message: UNREADABLE_ENCRYPTED_AGENT_TASK_MESSAGE,
         type: "invalid_request_error",
         code: "unreadable_encrypted_agent_task",
+        ...(reason === undefined ? {} : { recovery_reason: reason }),
       },
     }),
     { status: 400, headers: { "Content-Type": "application/json" } },
@@ -2347,6 +2352,7 @@ async function applyFinalRouteRequestNormalization(args: {
   inboundTransport?: "websocket";
 }): Promise<void> {
   const { parsed, route, config, req, logCtx, inboundWire, inboundTransport } = args;
+  const effortSelector = prepareEffortNormalization(parsed, route);
 
   // Only Anthropic message routes retain the Codex-facing selector. Other providers must keep
   // their existing response.model contract even when their public and wire model ids differ.
@@ -2371,7 +2377,8 @@ async function applyFinalRouteRequestNormalization(args: {
 
   // Settle the wire once so logging, fast-mode, auth, and sidecars read the adapter
   // this request will actually use (#404).
-  route.provider = resolveOpenCodeGoTransport(route.provider, sessionLaneIdFromRequest(req.headers));
+  route.provider = resolveOpenCodeGoTransport(route.provider,
+    sessionLaneIdFromRequest(req.headers) ?? normalizeLogConversationId(req.headers.get("x-opencode-session")));
   route.provider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire);
   if (preserveAnthropicResponseModel) parsed._responseModelId = responseModelId;
   logCtx.model = route.modelId;
@@ -2481,6 +2488,17 @@ async function applyFinalRouteRequestNormalization(args: {
       }
     } else if (isInjectionDebugEnabled() && collabSurface(parsed) !== null) {
       injectionDebugLog(`[opencodex] ${route.modelId}: collab surface=${collabSurface(parsed)}, guidance silent (effort=${parsed.options.reasoning ?? "unset"}, injectionModel=${config.injectionModel ?? "unset"})`);
+    }
+  }
+
+  {
+    const { applyPinnedEffort } = await import("../effort-policy");
+    const pinned = applyPinnedEffort(parsed, route, config, effortSelector);
+    if (pinned) {
+      logCtx.requestedEffort = pinned.from ? `${pinned.from}->${pinned.to}` : pinned.to;
+      if (isInjectionDebugEnabled()) {
+        injectionDebugLog(`[opencodex] ${route.modelId}: pinned reasoning effort applied (${pinned.from ?? "none"} -> ${pinned.to})`);
+      }
     }
   }
 
@@ -2631,6 +2649,7 @@ export async function handleComboResponses(
   const payloadEligible = (target: (typeof combo.targets)[number]): boolean =>
     comboPayloadReadable || !unreadableEncryptedAgentTask || canDecryptUnreadableAgentTask(target);
   let encryptedTaskRecoveryAttempted = false;
+  let recoveryFailureReason: AgentTaskRecoveryFailureReason | undefined;
   let storedPool401ReplayDispatched = false;
   const recoverUnreadableEncryptedTask = async (): Promise<boolean> => {
     if (encryptedTaskRecoveryAttempted) return false;
@@ -2652,15 +2671,18 @@ export async function handleComboResponses(
     }
     let recovered = false;
     try {
-      recovered = await recoverEncryptedAgentTask(
+      const result = await recoverEncryptedAgentTaskWithResult(
         req,
         (body as { input?: unknown } | undefined)?.input,
         recovery,
         config,
         { parentThreadId: inboundClientThreadId, abortSignal: options.abortSignal },
       );
+      recovered = result.recovered;
+      recoveryFailureReason = result.recovered ? undefined : result.reason;
     } catch {
       recovered = false;
+      recoveryFailureReason = undefined;
     }
     // Recovery has the same in-place input mutation contract as the direct routed path.
     if (
@@ -2710,7 +2732,7 @@ export async function handleComboResponses(
     if (!(await recoverUnreadableEncryptedTask())) {
       return options.abortSignal?.aborted
         ? clientCancelledResponse()
-        : unreadableEncryptedAgentTaskResponse();
+        : unreadableEncryptedAgentTaskResponse(recoveryFailureReason);
     }
   }
 
@@ -2770,7 +2792,20 @@ export async function handleComboResponses(
       attemptRetained = true;
     };
     let consumedChildFailure: ConsumedComboFailure | undefined;
-    const callbackGate = createChildPassthroughCallbackGate(options);
+    const callbackGate = createChildPassthroughCallbackGate({
+      ...options,
+      onNativePassthroughTerminal: status => {
+        // A committed stream can acquire terminal metadata after preflight copied
+        // the child log. Publish it before the outer logger finalizes, but only
+        // through the gate: discarded attempts must never affect the parent.
+        // Undefined child fields must preserve metadata already inspected by WS.
+        if (childLog.terminalHttpStatus !== undefined) logCtx.terminalHttpStatus = childLog.terminalHttpStatus;
+        if (childLog.terminalIncompleteReason !== undefined) logCtx.terminalIncompleteReason = childLog.terminalIncompleteReason;
+        if (childLog.terminalErrorCode !== undefined) logCtx.terminalErrorCode = childLog.terminalErrorCode;
+        if (childLog.upstreamError !== undefined) logCtx.upstreamError = childLog.upstreamError;
+        options.onNativePassthroughTerminal?.(status);
+      },
+    });
     let response: Response;
     try {
       const currentTargetProvider = pick.target.provider;
@@ -3606,6 +3641,7 @@ async function handleResponsesInner(
     previewSelectionAdmission?.release();
   }
 
+  let recoveryFailureReason: AgentTaskRecoveryFailureReason | undefined;
   // Native fallback and explicitly trusted direct Responses routes can consume ciphertext,
   // so recover only after final route selection.
   if (
@@ -3624,15 +3660,18 @@ async function handleResponsesInner(
       (body as { input?: unknown } | undefined)?.input,
     );
     if (unreadableEncryptedAgentTask) try {
-      recovered = await recoverEncryptedAgentTask(
+      const result = await recoverEncryptedAgentTaskWithResult(
         req,
         (body as { input?: unknown } | undefined)?.input,
         agentTaskRecovery,
         config,
         { parentThreadId, abortSignal: options.abortSignal },
       );
+      recovered = result.recovered;
+      recoveryFailureReason = result.recovered ? undefined : result.reason;
     } catch {
       recovered = false;
+      recoveryFailureReason = undefined;
     }
     if (recovered) {
       unreadableEncryptedAgentTask = hasUnreadableEncryptedAgentTask(
@@ -3756,7 +3795,7 @@ async function handleResponsesInner(
     && !finalRouteCanPassThroughEncryptedTask
     && unreadableEncryptedAgentTask
   ) {
-    return unreadableEncryptedAgentTaskResponse();
+    return unreadableEncryptedAgentTaskResponse(recoveryFailureReason);
   }
 
   // The canonical ChatGPT backend rejects previous_response_id, so a local replay miss leaves no
@@ -3921,7 +3960,7 @@ async function handleResponsesInner(
     }
   }
   const isOAuth401ReplayProvider = isAntigravityOAuth
-    || ((route.providerName === "xai" || route.providerName === "github-copilot" || route.providerName === "kiro" || route.providerName === "cursor")
+    || ((route.providerName === "xai" || route.providerName === "github-copilot" || route.providerName === "kiro" || route.providerName === "cursor" || route.providerName === "orcarouter-oauth")
       && route.provider.authMode === "oauth");
   let sentOAuthSnapshot: OAuthAccessSnapshot | undefined;
   let replayOAuthCredentialSnapshot: Pick<OAuthAccessSnapshot, "accountId" | "generation"> | undefined;
@@ -4211,7 +4250,27 @@ async function handleResponsesInner(
       for (let attempt = 0; attempt < 3; attempt++) {
         if (selectionIsCurrent(requestBindings.get(wireRequest))) {
           const fetchImpl = (route.provider as OcxProviderConfig & { fetch?: typeof globalThis.fetch }).fetch ?? execute;
-          return fetchImpl(destination, dispatchInit);
+          const binding = requestBindings.get(wireRequest);
+          const snapshot = route.providerName === "anthropic" && anthropicPoolAccountId && binding?.kind === "oauth"
+            ? binding.snapshot : undefined;
+          const writerGeneration = snapshot ? captureConfigGeneration() : 0;
+          const sentHeaders = snapshot ? new Headers(dispatchInit.headers) : undefined;
+          const ownsBearer = snapshot !== undefined
+            && sentHeaders?.get("authorization") === `Bearer ${snapshot.accessToken}`
+            && !sentHeaders?.has("x-api-key");
+          const response = await fetchImpl(destination, dispatchInit);
+          // Observe each physical response before retries replace it. The binding belongs to
+          // this dispatch, so a manual switch cannot file A's headers against B. Header
+          // overrides and credential replacement make ownership unprovable: skip those writes.
+          if (ownsBearer && snapshot) {
+            try {
+              const current = getAccountCredentialWithStatus("anthropic", snapshot.accountId);
+              if (current && !current.needsReauth && credentialGeneration(current.credential) === snapshot.generation) {
+                recordAnthropicAccountQuotaFromHeaders(snapshot.accountId, response.headers, writerGeneration);
+              }
+            } catch { /* best-effort observation cannot fail the response */ }
+          }
+          return response;
         }
         const nextAdapter = await refreshDispatchAdapter(requestParsed);
         const rebuilt = await nextAdapter.buildRequest(requestParsed, {
@@ -5787,12 +5846,9 @@ async function handleResponsesInner(
       if (terminalBodyWillRecord) {
         options.setTerminalOutcomeRecorder?.((status, httpStatusOverride) => {
           terminalRecorder(status, httpStatusOverride);
-          if (status === "failed") {
-            const quotaFailureMessage = httpStatusOverride === 429 || httpStatusOverride === 402
-              || logCtx.terminalHttpStatus === 429
-              || logCtx.terminalHttpStatus === 402
-              ? (httpStatusOverride ?? logCtx.terminalHttpStatus)
-              : undefined;
+          if (status === "failed" || status === "incomplete") {
+            const quotaFailureMessage = [httpStatusOverride, logCtx.terminalHttpStatus]
+              .find(value => value === 429 || value === 402);
             if (!isFixedCodexAccount(authCtx) && quotaFailureMessage !== undefined) {
               recordSubagentQuotaFailureForThreadSpawn(
                 req.headers,
@@ -6041,9 +6097,9 @@ async function handleResponsesInner(
       // Grok Build renders deltas live but reconstructs its durable assistant
       // turn from the completed response snapshot. Native Responses streams
       // may instead carry the complete items in output_item.done, so the
-      // explicit Grok compatibility marker enables strict terminal-only repair.
+      // explicit Grok compatibility marker enables strict client compatibility rewrites.
       // The provider's broader snapshot/lifecycle repair remains opt-in.
-      const grokClientSnapshotRepairEnabled = logCtx.surface === "grok";
+      const grokClientCompatibilityEnabled = logCtx.surface === "grok";
       const snapshotRepairEnabled = hasResponsesSnapshotRepair(route.provider.responsesSnapshotRepair);
       const githubCopilotRepairEnabled = route.providerName === "github-copilot";
       const responseModelRewrite = parsed._responseModelId !== undefined
@@ -6092,7 +6148,10 @@ async function handleResponsesInner(
         githubCopilotRepairEnabled
           ? createGithubCopilotResponsesBlockRewrite(translatorBudget)
           : undefined,
-        grokClientSnapshotRepairEnabled
+        grokClientCompatibilityEnabled
+          ? createGrokResponsesControlFrameBlockRewrite()
+          : undefined,
+        grokClientCompatibilityEnabled
           ? createGrokResponsesSparseTerminalBlockRewrite(translatorBudget)
           : undefined,
         snapshotRepairEnabled
@@ -6139,12 +6198,9 @@ async function handleResponsesInner(
         const reportNativeTerminal = recordTerminalOutcomes
           ? (status: ResponsesTerminalStatus, httpStatusOverride?: number) => {
             terminalRecorder?.(status, httpStatusOverride);
-            if (status === "failed") {
-              const quotaFailureMessage = httpStatusOverride === 429 || httpStatusOverride === 402
-                || logCtx.terminalHttpStatus === 429
-                || logCtx.terminalHttpStatus === 402
-                ? (httpStatusOverride ?? logCtx.terminalHttpStatus)
-                : undefined;
+            if (status === "failed" || status === "incomplete") {
+              const quotaFailureMessage = [httpStatusOverride, logCtx.terminalHttpStatus]
+                .find(value => value === 429 || value === 402);
               if (!isFixedCodexAccount(authCtx) && quotaFailureMessage !== undefined) {
                 recordSubagentQuotaFailureForThreadSpawn(
                   req.headers,
@@ -6232,12 +6288,9 @@ async function handleResponsesInner(
         // client-cancel (no terminal seen) is finalized separately via consumeForInspection's onCancel.
         const reportNativeTerminal = (status: ResponsesTerminalStatus, httpStatusOverride?: number) => {
           terminalRecorder?.(status, httpStatusOverride);
-          if (status === "failed") {
-            const quotaFailureMessage = httpStatusOverride === 429 || httpStatusOverride === 402
-              || logCtx.terminalHttpStatus === 429
-              || logCtx.terminalHttpStatus === 402
-              ? (httpStatusOverride ?? logCtx.terminalHttpStatus)
-              : undefined;
+          if (status === "failed" || status === "incomplete") {
+            const quotaFailureMessage = [httpStatusOverride, logCtx.terminalHttpStatus]
+              .find(value => value === 429 || value === 402);
             if (!isFixedCodexAccount(authCtx) && quotaFailureMessage !== undefined) {
               recordSubagentQuotaFailureForThreadSpawn(
                 req.headers,
@@ -6525,7 +6578,10 @@ async function handleResponsesInner(
     : undefined;
   if (ccaInTurnGrounding) parsed._ccaInTurnGrounding = ccaInTurnGrounding;
   const canRunWebSearch = webSearchWinsMedia && !ccaInTurnGrounding;
-  const rotateSidecarProviderOn429 = async (retryAfter: string | null): Promise<ProviderAdapter | null> => {
+  const rotateSidecarProviderOn429 = async (
+    retryAfter: string | null,
+    responseHeaders?: Headers,
+  ): Promise<ProviderAdapter | null> => {
     const rotated = rotateProviderTransportOn429(config, route.providerName, route.provider, {
       retryAfter,
       now: Date.now(),
@@ -6569,6 +6625,8 @@ async function handleResponsesInner(
         anthropicPoolAccountId,
         retryAfter,
         anthropicSessionKey,
+        Date.now(),
+        responseHeaders,
       );
       if (!nextAccountId) return null;
       try {
@@ -7658,6 +7716,8 @@ async function handleResponsesInner(
           anthropicPoolAccountId,
           upstreamResponse.headers.get("retry-after"),
           anthropicSessionKey,
+          Date.now(),
+          upstreamResponse.headers,
         );
         if (!nextAccountId) break;
         try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
@@ -8243,6 +8303,8 @@ async function handleResponsesInner(
           anthropicPoolAccountId,
           response.headers.get("retry-after"),
           anthropicSessionKey,
+          Date.now(),
+          response.headers,
         );
         if (nextAccountId) {
           try { void response.body?.cancel().catch(() => {}); } catch { /* already closed */ }

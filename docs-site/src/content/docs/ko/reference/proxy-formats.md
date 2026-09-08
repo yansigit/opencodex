@@ -185,6 +185,11 @@ SSE 객체, choice delta, `finish_reason`이 있는 종료 choice, `data: [DONE]
 이 엔드포인트는 Claude Code와 호환 클라이언트가 사용하는 Anthropic Messages 방언을 말합니다. 대부분의 요청은
 Responses로 변환되어 일반적으로 라우팅된 뒤, Anthropic JSON 또는 Anthropic SSE로 다시 변환됩니다.
 
+변환되는 Messages 요청의 reasoning 재전송은 요청 전체의 번역 예산을 공유합니다. 이 예산에는
+인코딩·디코딩 과정에서 생기는 복사본도 포함됩니다. 한도를 초과하면 `translation_buffer_limit`과
+HTTP 413을 반환하며, 한도에 맞추려고 서명이나 불투명 reasoning 데이터를 자르지 않습니다.
+네이티브 Anthropic passthrough에는 별도의 본문 크기 제한이 적용됩니다.
+
 네이티브 Anthropic passthrough는 다음이 모두 참일 때만 적용됩니다.
 
 - Claude Code 설정에서 native passthrough가 비활성화되어 있지 않습니다.

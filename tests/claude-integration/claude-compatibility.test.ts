@@ -7,6 +7,61 @@ import {
 } from "../../src/claude/compatibility";
 
 describe("claude compatibility analyzer (pure, no Lab)", () => {
+  test("shadow evidence excludes supported features even alongside a rejected document", () => {
+    const body = {
+      messages: [{ role: "user", content: [{ type: "document" }] }],
+      service_tier: "standard_only", context_management: { edits: [] },
+      output_config: { format: { type: "json_schema", schema: { type: "object" } } },
+      tools: [
+        { type: "tool_search_tool_regex_20251119", name: "tool_search" },
+        { name: "lookup", input_schema: { type: "object" }, defer_loading: true, strict: true },
+      ],
+    };
+    const result = analyzeClaudeCompatibility(body, { mode: "shadow", adapter: "openai-responses" });
+    expect(result.decision).toBe("shadow");
+    expect(result.featureCodes).toEqual(expect.arrayContaining(["documents", "strict_tools", "deferred_tools", "structured_output", "service_tier", "context_management", "tool_search"]));
+    expect(result.shadowFeatureCodes).toEqual(["documents"]);
+  });
+
+  test("ordinary client names, schemas and arguments are not protocol declarations", () => {
+    for (const name of ["mcp_lookup", "tool_search", "tool_search_tool_local", "safe_code_execution", "computer"]) {
+      const result = analyzeClaudeCompatibility({
+        tools: [{ name, type: "function", input_schema: { type: "object", properties: {
+          cache_control: { type: "string" }, strict: { const: true },
+        } } }],
+        messages: [{ role: "assistant", content: [{ type: "tool_use", name, id: "t1", input: {
+          type: "document", defer_loading: true, mcp_servers: [],
+        } }] }],
+      }, { mode: "enforce" });
+      expect(result).toEqual({ decision: "allow", compatible: true, featureCodes: [] });
+    }
+  });
+
+  test("inactive flags and direct callers remain ordinary tools", () => {
+    expect(analyzeClaudeCompatibility({
+      defer_tools: false, deferred_tools: [],
+      tools: [{ name: "lookup", input_schema: { type: "object" }, strict: false, defer_loading: false, allowed_callers: ["direct"] }],
+      messages: [{ role: "assistant", content: [{ type: "tool_use", name: "lookup", id: "t1", input: {}, caller: { type: "direct" } }] }],
+    }, { mode: "enforce" })).toEqual({ decision: "allow", compatible: true, featureCodes: [] });
+  });
+
+  test("mode recognition rejects non-exact values and defaults closed", () => {
+    for (const compatibility of [undefined, null, false, 1, {}, [], "ENFORCE", "enforce ", "invalid"]) {
+      expect(isClaudeCompatibilityMode(compatibility)).toBe(false);
+      expect(resolveClaudeCompatibilityMode({ compatibility })).toBe("enforce");
+    }
+  });
+
+  test("header volume cannot hide semantic rejection or enter shadow evidence", () => {
+    const result = analyzeClaudeCompatibility({ messages: [{ role: "user", content: [{ type: "document" }] }] }, {
+      mode: "shadow", adapter: "openai-responses",
+      anthropicBeta: Array.from({ length: 100 }, (_, i) => `private-header-${i}`).join(","),
+    });
+    expect(result.decision).toBe("shadow");
+    expect(result.shadowFeatureCodes).toEqual(["documents"]);
+    expect(result.reason).not.toContain("private");
+  });
+
   test("collect: empty body has no codes, beta header ignored when empty", () => {
     expect(collectClaudeFeatureCodes({}, undefined)).toEqual([]);
     expect(collectClaudeFeatureCodes({}, "")).toEqual([]);
@@ -443,5 +498,98 @@ describe("claude compatibility analyzer (pure, no Lab)", () => {
     const empty = { messages: [{ role: "assistant", content: [{ type: "redacted_thinking", data: "" }] }] } as unknown as Record<string, unknown>;
     expect(collectClaudeFeatureCodes(empty, undefined)).not.toContain("signed_thinking");
     expect(analyzeClaudeCompatibility(empty, { mode: "enforce", adapter: "google" }).decision).not.toBe("reject");
+  });
+
+  // ── upstream f7f890ff coverage restored under fork semantics ──
+  // Shapes from upstream Messages docs; expectations re-derived for the fork
+  // policy (default enforce, invalid mode -> enforce, native anthropic bypass).
+  test("restore: strict tool flag retains its Responses mapping and fails closed elsewhere", () => {
+    const body = { tools: [{ name: "lookup", input_schema: { type: "object", properties: {} }, strict: true }] };
+    expect(collectClaudeFeatureCodes(body, undefined)).toContain("strict_tools");
+    expect(analyzeClaudeCompatibility(body, { mode: "enforce", adapter: "openai-responses" }).decision).toBe("allow");
+    const enforce = analyzeClaudeCompatibility(body, { mode: "enforce", adapter: "google" });
+    expect(enforce).toMatchObject({ decision: "reject", compatible: false });
+    expect(enforce.reason).toContain("strict_tools");
+    const shadow = analyzeClaudeCompatibility(body, { mode: "shadow", adapter: "google" });
+    expect(shadow.decision).toBe("shadow");
+    for (const result of [enforce, shadow]) {
+      expect(result.reason?.length ?? 0).toBeLessThanOrEqual(512);
+      expect(JSON.stringify(result)).not.toContain("lookup");
+    }
+    expect(analyzeClaudeCompatibility(body, { mode: "enforce", adapter: "anthropic" }).decision).toBe("allow");
+  });
+
+  test("restore: programmatic caller modes fail closed on translated targets", () => {
+    const allowedCallers = { tools: [{ name: "lookup", input_schema: { type: "object", properties: {} }, allowed_callers: ["code_execution_20260120"] }] };
+    expect(collectClaudeFeatureCodes(allowedCallers, undefined)).toContain("caller_mode");
+    expect(analyzeClaudeCompatibility(allowedCallers, { mode: "enforce", adapter: "openai-responses" }).decision).toBe("reject");
+    const callerReplay = { messages: [{ role: "assistant", content: [{ type: "tool_use", name: "lookup", id: "t1", input: {}, caller: { type: "code_execution_20260120", tool_id: "srv1" } }] }] };
+    expect(collectClaudeFeatureCodes(callerReplay, undefined)).toContain("caller_mode");
+    expect(analyzeClaudeCompatibility(callerReplay, { mode: "enforce", adapter: "cursor" }).decision).toBe("reject");
+    expect(analyzeClaudeCompatibility(callerReplay, { mode: "shadow", adapter: "cursor" }).decision).toBe("shadow");
+    // Direct callers remain the ordinary function-tool path.
+    const direct = { tools: [{ name: "lookup", input_schema: { type: "object", properties: {} }, allowed_callers: ["direct"] }] };
+    expect(collectClaudeFeatureCodes(direct, undefined)).not.toContain("caller_mode");
+    expect(analyzeClaudeCompatibility(direct, { mode: "enforce", adapter: "openai-responses" }).decision).toBe("allow");
+    const directReplay = { messages: [{ role: "assistant", content: [{ type: "tool_use", name: "lookup", id: "t1", input: {}, caller: { type: "direct" } }] }] };
+    expect(collectClaudeFeatureCodes(directReplay, undefined)).not.toContain("caller_mode");
+  });
+
+  test("restore: tool_reference blocks fail closed on translated targets", () => {
+    const body = { messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "tool_reference", tool_name: "lookup" }] }] }] };
+    expect(collectClaudeFeatureCodes(body, undefined)).toContain("tool_reference");
+    const enforce = analyzeClaudeCompatibility(body, { mode: "enforce", adapter: "openai-responses" });
+    expect(enforce).toMatchObject({ decision: "reject", compatible: false });
+    expect(enforce.reason).toContain("tool_reference");
+    expect(analyzeClaudeCompatibility(body, { mode: "enforce", adapter: "anthropic" }).decision).toBe("allow");
+  });
+
+  test("restore: top-level mcp_servers connector is mcp_tool, not an unknown body field", () => {
+    const body = { mcp_servers: [{ type: "url", url: "https://example.invalid/mcp", authorization_token: "private-fixture" }] };
+    const codes = collectClaudeFeatureCodes(body, undefined);
+    expect(codes).toContain("mcp_tool");
+    expect(codes).not.toContain("unknown_body_field");
+    const enforce = analyzeClaudeCompatibility(body, { mode: "enforce", adapter: "openai-responses" });
+    expect(enforce.decision).toBe("reject");
+    expect(enforce.reason).toContain("mcp_tool");
+    // No credential or URL material may leak into the closed diagnostic.
+    expect(JSON.stringify(enforce)).not.toContain("private-");
+    expect(JSON.stringify(enforce)).not.toContain("example.invalid");
+  });
+
+  test("restore: unknown block nested in tool_result children fails closed", () => {
+    const body = { messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "future_block", payload: "private-fixture" }] }] }] };
+    expect(collectClaudeFeatureCodes(body, undefined)).toContain("unknown_content_block");
+    expect(analyzeClaudeCompatibility(body, { mode: "enforce", adapter: "openai-responses" }).decision).toBe("reject");
+    expect(analyzeClaudeCompatibility(body, { mode: "enforce", adapter: "anthropic" }).decision).toBe("allow");
+  });
+
+  test("restore: computer toolset fails closed on translated targets", () => {
+    const body = { tools: [{ type: "computer_toolset_20260801", name: "computer" }] };
+    expect(collectClaudeFeatureCodes(body, undefined)).toContain("computer_use");
+    expect(analyzeClaudeCompatibility(body, { mode: "enforce", adapter: "openai-responses" }).decision).toBe("reject");
+    const shadow = analyzeClaudeCompatibility(body, { mode: "shadow", adapter: "openai-responses" });
+    expect(shadow.decision).toBe("shadow");
+    expect(shadow.reason).toContain("computer_use");
+  });
+
+  test("restore: a renamed tool cannot hide an unsupported server tool type", () => {
+    const body = { tools: [{ type: "future_server_tool", name: "tool_search", input_schema: {} }] };
+    expect(collectClaudeFeatureCodes(body, undefined)).toContain("server_tool");
+    expect(analyzeClaudeCompatibility(body, { mode: "enforce", adapter: "openai-responses" }).decision).toBe("reject");
+  });
+
+  test("restore: fork keeps tool_search lossless and unsigned thinking replay allowed (deliberate divergence from upstream rejection)", () => {
+    const hostedSearch = { tools: [{ type: "tool_search_tool_regex_20251119", name: "tool_search" }] };
+    expect(collectClaudeFeatureCodes(hostedSearch, undefined)).toContain("tool_search");
+    expect(analyzeClaudeCompatibility(hostedSearch, { mode: "enforce", adapter: "openai-responses" }).decision).toBe("allow");
+    const searchHistory = { messages: [{ role: "assistant", content: [{ type: "server_tool_use", name: "tool_search", id: "srv1", input: {} }] }] };
+    expect(analyzeClaudeCompatibility(searchHistory, { mode: "enforce", adapter: "openai-responses" }).decision).toBe("allow");
+    const searchResult = { messages: [{ role: "user", content: [{ type: "tool_search_tool_result", tool_use_id: "srv1", content: { type: "tool_search_tool_search_result", tool_references: [] } }] }] };
+    expect(analyzeClaudeCompatibility(searchResult, { mode: "enforce", adapter: "openai-responses" }).decision).toBe("allow");
+    // Unsigned and ocxr1-owned thinking replay remain translated continuity, not a rejection.
+    const ocxr1Replay = { messages: [{ role: "assistant", content: [{ type: "thinking", thinking: "chain", signature: "ocxr1:eyJ0eHQiOiJoaSJ9" }] }] };
+    expect(analyzeClaudeCompatibility(ocxr1Replay, { mode: "enforce", adapter: "openai-responses" }).decision).toBe("allow");
+    expect(collectClaudeFeatureCodes(ocxr1Replay, undefined)).not.toContain("signed_thinking");
   });
 });

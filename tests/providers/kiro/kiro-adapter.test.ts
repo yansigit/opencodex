@@ -339,6 +339,68 @@ describe("kiro adapter — buildRequest", () => {
     }
   });
 
+  test("a code-mode exec result carrying a host failure string names the broken rule", async () => {
+    // freeform: the Kiro seam annotates only when the emitted catalog is genuinely code mode.
+    const execTool = { name: "exec", description: "Run JavaScript", freeform: true, parameters: { type: "object" } };
+    const failure = "apply_patch verification failed: invalid patch: The first line of the patch must be '*** Begin Patch'";
+    const messages = [
+      { role: "user", content: "run it" },
+      { role: "assistant", content: [{ type: "toolCall", id: "call-x", name: "exec", arguments: {} }] },
+      { role: "toolResult", toolCallId: "call-x", toolName: "exec", content: failure, isError: false },
+    ];
+    const { body } = await createKiroAdapter(provider).buildRequest(parsedWith(messages, [execTool]));
+    const resultText = JSON.parse(body).conversationState.currentMessage.userInputMessage
+      .userInputMessageContext.toolResults[0].content[0].text;
+    expect(resultText).toBe(`${failure}\n[recovery: The patch text must open with the bare marker line \`*** Begin Patch\`: no code fence, prose, or extra asterisks on that line (blank lines or indentation before it are tolerated).]`);
+  });
+
+  test("a host failure string on a non-code-mode catalog stays raw", async () => {
+    const failure = "tool `apply_patch` expects a string input";
+    const messages = [
+      { role: "user", content: "run it" },
+      { role: "assistant", content: [{ type: "toolCall", id: "call-x", name: "exec", arguments: {} }] },
+      { role: "toolResult", toolCallId: "call-x", toolName: "exec", content: failure, isError: false },
+    ];
+    for (const tools of [
+      // A structured tool that merely shares the name exec.
+      [{ name: "exec", description: "Run a shell string", parameters: { type: "object" } }],
+      // Freeform exec beside a bare shell bridge is the flat-catalog shape, not code mode.
+      [
+        { name: "exec", description: "Run JavaScript", freeform: true, parameters: { type: "object" } },
+        { name: "exec_command", description: "Run", parameters: { type: "object" } },
+      ],
+    ]) {
+      const { body } = await createKiroAdapter(provider).buildRequest(parsedWith(messages, tools));
+      const resultText = JSON.parse(body).conversationState.currentMessage.userInputMessage
+        .userInputMessageContext.toolResults[0].content[0].text;
+      expect(resultText).toBe(failure);
+    }
+  });
+
+  test("a host failure chunk in a coalesced group carries its recovery line beside raw siblings", async () => {
+    // Whitespace and a failed-empty wrapper keep their raw grouping policy; only the chunk that
+    // carries a host failure string is substituted (the exact combination review round 1 named).
+    const execTool = { name: "exec", description: "Run JavaScript", freeform: true, parameters: { type: "object" } };
+    const failedExecWrapper = "Script failed\nWall time 0.1 seconds\nOutput:\n";
+    const hostFailure = "tool `apply_patch` expects a string input";
+    const result = (content: string) => ({ role: "toolResult", toolCallId: "call-g", toolName: "exec", content, isError: false });
+    const messages = [
+      { role: "user", content: "run it" },
+      { role: "assistant", content: [{ type: "toolCall", id: "call-g", name: "exec", arguments: {} }] },
+      result("  "), result(hostFailure), result(failedExecWrapper),
+    ];
+    const { body } = await createKiroAdapter(provider).buildRequest(parsedWith(messages, [execTool]));
+    const toolResults = JSON.parse(body).conversationState.currentMessage.userInputMessage
+      .userInputMessageContext.toolResults as Array<{ content: Array<{ text: string }>; status: string }>;
+    expect(toolResults).toHaveLength(1);
+    expect(toolResults[0].status).toBe("success");
+    expect(toolResults[0].content).toEqual([
+      { text: "  " },
+      { text: `${hostFailure}\n[recovery: tools.apply_patch takes exactly one string argument; pass the patch text itself, not an object such as {input: ...}.]` },
+      { text: failedExecWrapper },
+    ]);
+  });
+
   test("real exec output and empty non-exec results are left alone", async () => {
     // Review finding (Codex P2): a failed cell with no output is empty but NOT a success. The
     // success guidance would erase the only failure signal — reachable via Responses history,
@@ -1823,6 +1885,8 @@ describe("kiro code-mode catalog nudge", () => {
     // Reaches the ACTUAL Kiro wire prompt, not just the builder: the live 2026-08-28 session that
     // misread a blank result was a routed Kiro turn.
     expect(content).toContain("Nothing in the isolate is echoed automatically");
+    // Survives Kiro's 16 384-char injected-instruction bound on the real wire prompt.
+    expect(content).toContain("Host contract for the nested helpers");
     // The generic fallback must be gone, not merely accompanied.
     expect(content).not.toContain("If a listed tool exposes nested helpers such as a tools.* API");
   });

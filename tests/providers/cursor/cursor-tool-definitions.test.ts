@@ -771,6 +771,9 @@ describe("Cursor code mode tool guidance", () => {
     expect(note).toContain("no further asterisks");
     expect(note).not.toContain("*** Begin Patch ***");
     expect(note).toContain("OpenCodex does not rewrite JavaScript inside exec");
+    expect(note).toContain("Host contract for the nested helpers");
+    expect(note).toContain("takes exactly one string");
+    expect(note).toContain("write_stdin");
 
     // The flat-catalog shell-bridge guidance must NOT appear: naming a top-level
     // `exec_command` in code mode sends the model after a tool that does not exist.
@@ -819,6 +822,7 @@ describe("Cursor code mode tool guidance", () => {
     expect(note).toContain("is the Codex Responses shell bridge for this turn");
     expect(note).not.toContain("is Codex code mode");
     expect(note).not.toContain("V8 isolate");
+    expect(note).not.toContain("Host contract for the nested helpers");
   });
 });
 

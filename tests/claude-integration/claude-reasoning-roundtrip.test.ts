@@ -101,10 +101,11 @@ describe("claude reasoning roundtrip", () => {
       output: [{ type: "reasoning", summary: [{type:"summary_text", text:"t"}], encrypted_content: enc }],
       usage: {}
     }, "m") as any;
-    expect(msg.content[0].type).toBe("thinking");
-    expect(msg.content[0].signature).toBe("s1");
-    expect(msg.content[1]).toEqual({ type: "redacted_thinking", data: "r1" });
-    expect(msg.content[2]).toEqual({ type: "redacted_thinking", data: "r2" });
+    expect(msg.content).toEqual([
+      { type: "redacted_thinking", data: "r1" },
+      { type: "redacted_thinking", data: "r2" },
+      { type: "thinking", thinking: "t", signature: "s1" },
+    ]);
   });
 
   test("outbound JSON: tool_search_call maps to tool_use name tool_search and triggers tool_use stop_reason", () => {

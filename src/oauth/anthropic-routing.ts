@@ -47,7 +47,15 @@ import {
   touchSessionAffinity,
 } from "../routing/account-pool";
 
+/**
+ * The read side of a `Headers` object, so a caller can pass the live upstream response's
+ * headers without this module importing anything from the server layer -- and so a test can
+ * hand it a plain `new Headers({...})`.
+ */
+export type AnthropicRateLimitHeaders = Pick<Headers, "get">;
+
 const PROVIDER = "anthropic";
+const anthropicResetDerivedUntil = new Map<string, number>();
 const UNKNOWN_USAGE_SCORE = 100;
 const DEFAULT_AUTO_SWITCH_THRESHOLD = 80;
 const DEFAULT_QUOTA_WINDOW: OcxAccountPoolQuotaWindow = "five-hour";
@@ -107,9 +115,14 @@ export function anthropicQuotaWindow(config: AnthropicAccountPoolConfig): OcxAcc
 export function getAnthropicAccountHealthSnapshot(
   accountId: string,
   now = Date.now(),
-): { cooldownUntil?: number; cooldownSource?: "retry-after" | "default" } | null {
+): { cooldownUntil?: number; cooldownSource?: "retry-after" | "reset-derived" | "default" } | null {
   const entry = getPoolCooldownRegistry(POOL_KEY_ANTHROPIC).get(accountId, now);
   if (!entry) return null;
+  const resetUntil = anthropicResetDerivedUntil.get(accountId);
+  if (resetUntil !== undefined) {
+    if (resetUntil <= now) anthropicResetDerivedUntil.delete(accountId);
+    else return { cooldownUntil: resetUntil, cooldownSource: "reset-derived" };
+  }
   const source = entry.source === "retry-after" ? "retry-after" : "default";
   return { cooldownUntil: entry.until, cooldownSource: source };
 }
@@ -118,6 +131,7 @@ export function clearAnthropicAccountCooldown(accountId: string): boolean {
   const registry = getPoolCooldownRegistry(POOL_KEY_ANTHROPIC);
   const had = registry.get(accountId) !== null;
   registry.clear(accountId);
+  anthropicResetDerivedUntil.delete(accountId);
   return had;
 }
 
@@ -128,6 +142,7 @@ export function sweepExpiredAnthropicRoutingHealth(now = Date.now()): number {
 /** Test / logout helper. */
 export function clearAnthropicAccountPoolState(): void {
   clearAccountPoolState(POOL_KEY_ANTHROPIC);
+  anthropicResetDerivedUntil.clear();
   manualPreference = undefined;
   quorumCache = null;
 }
@@ -630,6 +645,7 @@ export function rotateAnthropicAccountOn429(
   retryAfterHeader: string | null | undefined,
   sessionKey?: string | null,
   now = Date.now(),
+  rateLimitHeaders?: AnthropicRateLimitHeaders | null,
 ): string | null {
   // Presence supplies the reactive default only when the operator has not made a choice. An
   // explicit false is authoritative: a second credential can represent another billing,
@@ -638,14 +654,42 @@ export function rotateAnthropicAccountOn429(
   if (configured === false) return null;
   if (configured !== true && !hasAnthropicFailoverQuorum(now)) return null;
 
+  const resetCandidates = rateLimitHeaders ? (["5h", "7d"] as const).flatMap(window => {
+    if (rateLimitHeaders.get(`anthropic-ratelimit-unified-${window}-status`)?.trim() !== "rejected") return [];
+    const seconds = Number(rateLimitHeaders.get(`anthropic-ratelimit-unified-${window}-reset`)?.trim());
+    const deadline = seconds * 1000;
+    return Number.isFinite(deadline) && deadline > now && deadline <= 8.64e15 ? [deadline] : [];
+  }) : [];
+  const resetUntil = resetCandidates.length > 0
+    ? Math.max(...resetCandidates)
+    : undefined;
+  const usableResetUntil = resetUntil !== undefined && resetUntil > now ? resetUntil : undefined;
+  const retryText = retryAfterHeader?.trim();
+  const retryUntil = retryText
+    ? /^\d+(?:\.\d+)?$/.test(retryText) ? now + Math.ceil(Number(retryText) * 1000) : Date.parse(retryText)
+    : NaN;
+  const retryValid = Number.isFinite(retryUntil) && retryUntil > now && retryUntil <= 8.64e15;
+  const effectiveRetry = retryValid
+    ? retryText
+    : usableResetUntil !== undefined ? String(Math.max(1, Math.ceil((usableResetUntil - now) / 1000))) : retryAfterHeader;
   recordPoolAccountCooldown(
     POOL_KEY_ANTHROPIC,
     failedAccountId,
     "rate_limit",
-    retryAfterHeader,
+    effectiveRetry,
     now,
   );
+  // Provider-stated windows are authoritative; the shared guessed-backoff cap
+  // must not make a drained account eligible before its announced reset.
+  const statedUntil = retryValid ? retryUntil : usableResetUntil;
+  if (statedUntil !== undefined) {
+    getPoolCooldownRegistry(POOL_KEY_ANTHROPIC).set(failedAccountId, statedUntil, {
+      source: retryValid ? "retry-after" : "reset-derived", reason: "rate_limit",
+    });
+  }
   clearSessionAffinityForAccount(POOL_KEY_ANTHROPIC, failedAccountId);
+  if (!retryValid && usableResetUntil !== undefined) anthropicResetDerivedUntil.set(failedAccountId, usableResetUntil);
+  else anthropicResetDerivedUntil.delete(failedAccountId);
   notePoolRotationFailure(POOL_KEY_ANTHROPIC, failedAccountId);
   // A rotation means the roster in use just changed; do not answer the next activation question
   // from a count read taken before the failure.

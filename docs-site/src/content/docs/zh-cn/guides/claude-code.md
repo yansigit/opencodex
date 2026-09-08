@@ -157,9 +157,15 @@ opencodex 会将已路由模型公开为稳定且可逆的别名：
 user-agent 会获得易读的 CLI 形式，其他客户端会获得 Desktop 哈希形式。两种别名族都会永久
 保持可解码——以任一形式保存在 `settings.json` 中的模型都能继续工作。
 
-如果 Claude Desktop 底部的选择器没有切换已运行 3P 对话的模型，请在该对话中使用
-`/model <id>`。OpenCodex 无法读取选择器状态，只会路由每个请求实际携带的模型 ID；可在
-**Logs → requestedModel** 中确认结果。
+如果 Claude Desktop 底部的选择器没有切换正在进行的 3P 对话的模型，可以尝试
+`/model <id>`，但在受影响的 Desktop 版本中，这种变通方法也可能失败。
+[Issue #3782](https://github.com/lidge-jun/opencodex/issues/3782) 报告称，在 Windows 上使用
+Claude Desktop 1.46388.4 时，无论通过底部选择器还是 `/model` 更改模型，对话都会继续使用
+最初的模型。该报告并未确定是哪个客户端组件或路由组件导致了这一行为。
+
+也可以尝试在 OpenCodex 的 Claude Desktop 配置档案中选择所需的默认模型，重新应用配置档案，
+然后开始新对话。这是一项排查步骤，不保证能解决问题。OpenCodex 无法读取选择器状态，
+而是根据每个请求携带的模型 ID 进行路由。请在 **Logs → requestedModel** 中确认客户端实际发送的内容。
 
 **别名语法规则：**provider 不得包含 `/` 或 `--`，也不得等于 `native`。
 不含 `/` 或 `~` 的普通 model ID 继续使用 v1 前缀 `claude-ocx-…`。包含 `/` 或 `~` 的 model ID
@@ -352,11 +358,13 @@ Claude Code 的 `/effort` 设置会完整保留并传递给适配器：
 | Assistant 文本 | `output_text` |
 | Assistant `tool_use` | `function_call`（`input` → JSON 字符串化的 `arguments`） |
 | 用户 `tool_result` | `function_call_output`（`is_error` → `[tool error]` 前缀） |
-| 重放 `thinking` / `redacted_thinking` | 丢弃 |
+| 重放 `thinking` / `redacted_thinking` | `reasoning` 项；签名和脱敏载荷保存在有界 `ocxr1` 信封中 |
 | Function 工具 | `{type: "function"}`（`web_search*` → `{type: "web_search"}`） |
 | `tool_choice` | `auto`→`auto`，`none`→`none`，`any`→`required`，指定函数→`{type:"function",name}`，托管 WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
 | `stop_sequences` | `stop` |
+
+在预期的 Anthropic 适配器上，保留未隐藏的签名块（包括空 thinking）和不透明的 redacted 块。`hideThinkingSummary` 策略不变：不会向 Claude 客户端公开本地隐藏的签名文本，尚未证明经过此隐藏边界的无损重放。旧版组合信封在流式文本发出后无法恢复原始块顺序。`claudeCode.compatibility: "enforce"` 仍拒绝 thinking 重放。这不证明真实 Anthropic 接受请求或缓存命中改善；[#3719](https://github.com/lidge-jun/opencodex/issues/3719) 仍未关闭。
 
 **错误情况（400）：**JSON 格式错误；缺少/空的 `model`；缺少/空的 `messages`；不支持的
 role；`tool_result` 缺少 `tool_use_id`；`tool_use` 缺少 id/name；指定名称的 `tool_choice`
@@ -369,7 +377,8 @@ role；`tool_result` 缺少 `tool_use_id`；`tool_use` 缺少 id/name；指定�
 | `response.created` | `message_start` + `ping` |
 | 心跳 | `ping` |
 | 文本增量 | `content_block_start` → `content_block_delta`（文本）→ `content_block_stop` |
-| 推理摘要/文本 | 带合成签名的 `thinking` 块 |
+| 推理摘要/文本 | 带重放签名或有界 `ocxr1` 回退信封的 `thinking` 块 |
+| 脱敏推理 | 从推理信封重放的 `redacted_thinking` 块 |
 | Function-call 帧 | 带 `input_json_delta` 的 `tool_use` 块 |
 | 终止事件 | `message_delta` → `message_stop` |
 | 在终止事件前 EOF | 502 风格的 `api_error` |

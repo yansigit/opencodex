@@ -96,6 +96,31 @@ export const HEAD_CAPABILITIES: readonly HeadCapability[] = [
  */
 export const CAPABILITIES: readonly Capability[] = [
   {
+    command: ["models", "price"],
+    summary: "Read the saved manual price for an exact provider/model selector.",
+    routes: [{ method: "GET", path: "/api/providers/{provider}/model-costs" }],
+    flags: [{ name: "--json", value: "boolean", summary: "Emit provider, modelId, and cost (null for automatic pricing)." }],
+    mutates: false,
+    json: "envelope",
+    details: ["The provider must be configured; everything after the first slash is the exact upstream model ID."],
+  },
+  {
+    command: ["models", "set-price"],
+    summary: "Save four manual USD-per-1M-token rates, or restore automatic pricing for one model.",
+    routes: [{ method: "PUT", path: "/api/providers/{provider}/model-costs" }],
+    flags: [
+      { name: "--input", value: "number", summary: "Input rate; required unless --auto is used." },
+      { name: "--output", value: "number", summary: "Output rate; required unless --auto is used." },
+      { name: "--cache-read", value: "number", summary: "Cache read rate; defaults to 0." },
+      { name: "--cache-write", value: "number", summary: "Cache write rate; defaults to 0." },
+      { name: "--auto", value: "boolean", summary: "Remove this model's override; cannot be combined with rates." },
+      { name: "--json", value: "boolean", summary: "Emit the saved price or reset result as JSON." },
+    ],
+    mutates: true,
+    json: "payload",
+    details: ["Uses the exact upstream model ID after the first slash. Omitted cache rates default to zero; sibling model prices are preserved."],
+  },
+  {
     command: ["status"],
     summary: "Proxy status, injection state, and version skew between this CLI and the running proxy.",
     // No management route: `collectStatus` identity-probes `/healthz` through
@@ -148,7 +173,10 @@ export const CAPABILITIES: readonly Capability[] = [
     summary: "Configured providers with connectivity and selected models.",
     // Local config + PROVIDER_REGISTRY. Does not call GET /api/providers.
     routes: [],
-    flags: [{ name: "--json", value: "boolean", summary: "Emit the provider list as JSON." }],
+    flags: [
+      { name: "--json", value: "boolean", summary: "Emit the provider list as JSON." },
+      { name: "--jsonl", value: "boolean", summary: "Emit one configured provider per JSON line." },
+    ],
     mutates: false,
     json: "envelope",
     details: ["Reads local config; drives no management API route."],
@@ -213,6 +241,8 @@ export const CAPABILITIES: readonly Capability[] = [
     routes: [{ method: "GET", path: "/api/usage" }],
     flags: [
       { name: "--range", value: "string", summary: "today | 1d | 7d | 30d | all" },
+      { name: "--since", value: "string", summary: "Inclusive start: epoch milliseconds or full ISO datetime with timezone; requires --until and overrides --range." },
+      { name: "--until", value: "string", summary: "Inclusive end: epoch milliseconds or full ISO datetime with timezone; requires --since." },
       { name: "--provider", value: "string", summary: "Restrict to one provider." },
       { name: "--model", value: "string", summary: "Restrict to one model id." },
       { name: "--json", value: "boolean", summary: "Emit the usage report as JSON." },

@@ -204,6 +204,24 @@ describe("ocx export --json (accept criterion 1)", () => {
     expect(parsed.provider.opencodex!.options.baseURL).not.toContain(":10100/");
   });
 
+  test("OpenCode export keeps the live port when saved listener settings point at a future port", async () => {
+    const code = await handleExportCommand(["--client", "opencode", "--json"], {
+      baseUrl: "http://127.0.0.1:10100",
+      configImpl: () => config({
+        hostname: "0.0.0.0",
+        unauthenticatedLoopbackListener: { enabled: true, port: 10999 },
+      }),
+      fetchImpl: (async input => {
+        expect(String(input)).toBe("http://127.0.0.1:10100/api/models");
+        return Response.json(ROWS);
+      }) as typeof fetch,
+    });
+    expect(code).toBe(0);
+    const parsed = JSON.parse(stdout()) as { provider: Record<string, { options: { baseURL: string } }> };
+    expect(parsed.provider.opencodex!.options.baseURL).toBe("http://127.0.0.1:10100/v1");
+    expect(parsed.provider.opencodex!.options.baseURL).not.toContain(":10999/");
+  });
+
   test("disabled rows never reach the exported config", async () => {
     const proxy = fakeProxy();
     const result = await run(["--client", "pi", "--json"], { baseUrl: proxy.baseUrl });
@@ -542,4 +560,52 @@ describe("export allowlist parity", () => {
       { provider: "slash", id: "other", namespaced: "slash/other" },
     ], cfg).map(row => row.namespaced)).toEqual(["slash/org-model"]);
   });
+});
+
+describe("Raycast export uses the live management admission policy", () => {
+  for (const secondary of [false, true]) {
+    test(`live wildcard bind with secondary=${secondary} wins over saved loopback config`, async () => {
+      const oldHome = process.env.OPENCODEX_HOME;
+      const oldCodexHome = process.env.CODEX_HOME;
+      const root = tempDir();
+      process.env.OPENCODEX_HOME = join(root, "ocx");
+      process.env.CODEX_HOME = join(root, "codex");
+      mkdirSync(process.env.CODEX_HOME, { recursive: true });
+      try {
+        const liveConfig = config({
+          hostname: "0.0.0.0",
+          providers: { mock: {
+            adapter: "openai-chat", baseUrl: "http://127.0.0.1/v1",
+            liveModels: false, models: ["fixture-model"],
+          } },
+          ...(secondary ? { unauthenticatedLoopbackListener: { enabled: true, port: 10237 } } : {}),
+        });
+        const proxy = managementProxy(liveConfig);
+        const out = join(root, "providers.yaml");
+        writeFileSync(out, "keep existing export\n");
+        const result = await run(["--client", "raycast", "--json", "--out", out, "--force"], {
+          baseUrl: proxy.baseUrl,
+          // Deliberately contradict both live bind and secondary port.
+          config: config({ unauthenticatedLoopbackListener: { enabled: true, port: 10999 } }),
+        });
+        if (secondary) {
+          expect(result.code).toBe(0);
+          const document = JSON.parse(result.stdout) as { providers: Array<{ base_url: string }> };
+          expect(document.providers[0]!.base_url).toBe("http://127.0.0.1:10237/v1");
+          expect(readFileSync(out, "utf8")).toContain("10237/v1");
+          expect(readFileSync(out, "utf8")).not.toContain("10999");
+        } else {
+          expect(result.code).not.toBe(0);
+          expect(result.stdout).toBe("");
+          expect(result.stderr).toContain("non_loopback");
+          expect(readFileSync(out, "utf8")).toBe("keep existing export\n");
+        }
+      } finally {
+        if (oldHome === undefined) delete process.env.OPENCODEX_HOME;
+        else process.env.OPENCODEX_HOME = oldHome;
+        if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
+        else process.env.CODEX_HOME = oldCodexHome;
+      }
+    });
+  }
 });

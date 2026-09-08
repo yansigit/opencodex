@@ -63,6 +63,19 @@ describe("CI lane manifest", () => {
   test("never accepts a lane path outside tests", () => {
     expect(() => validateLaneManifest(["tests/good.test.ts", "src/not-a-test.ts"]))
       .toThrow(/outside tests/);
+    expect(() => validateLaneManifest(["tests/good.test.ts\n--shard=1/1"]))
+      .toThrow(/outside tests/);
+  });
+
+  test("platform lanes preserve full-suite coverage and singleton isolation", () => {
+    const inventory = discoverTestFiles(process.cwd());
+    const main = laneFiles("platform-main", process.cwd());
+    const serial = laneFiles("platform-serial", process.cwd());
+    expect(new Set([...main, ...serial])).toEqual(new Set(inventory));
+    expect(main.length + serial.length).toBe(inventory.length);
+    expect(new Set(main).intersection(new Set(serial)).size).toBe(0);
+    expect(serial).toEqual([...SERIAL_TEST_FILES, ...DEDICATED_TEST_FILES]);
+    for (const dedicated of DEDICATED_TEST_FILES) expect(main).not.toContain(dedicated);
   });
 
   test("never drops a nested test that shares a quarantined basename", () => {
@@ -214,6 +227,13 @@ test("only trusted dev shards publish the canonical timing cache", async () => {
     step.uses === "actions/cache/save@caa296126883cff596d87d8935842f9db880ef25",
   )).toBe(true);
   expect(ci.jobs["platform-macos"].steps?.some(step => step.uses?.startsWith("actions/cache/save@"))).toBe(false);
+  const macosFull = ci.jobs["platform-macos-full"] as typeof ci.jobs[string] & {
+    strategy?: { matrix?: { shard?: number[] } };
+  };
+  expect(macosFull.strategy?.matrix?.shard).toEqual([1, 2]);
+  expect(macosFull.steps?.some(step => step.uses?.startsWith("actions/cache/save@"))).toBe(false);
+  expect(macosFull.steps?.some(step => step.run?.includes("--lane platform-main"))).toBe(true);
+  expect(macosFull.steps?.some(step => step.run?.includes("--lane platform-serial"))).toBe(true);
   const windows = ci.jobs["platform-windows"];
   const windowsRestore = windows.steps?.find(step => step.uses?.startsWith("actions/cache/restore@"));
   expect(windowsRestore?.with?.key).toContain("ocx-test-timings-dev-");
@@ -231,9 +251,7 @@ test("only trusted dev shards publish the canonical timing cache", async () => {
   expect(focused?.run).not.toContain("tests/adapters/google/aistudio-native-webkit.test.ts");
   expect(focused?.run).toContain("tests/ci-workflows/test-runner.test.ts");
   expect(focused?.run).toContain("tests/providers/cursor/cursor-native-exec-shell.test.ts");
-  const full = ci.jobs["platform-macos"].steps?.find(step => step.name === "Full macOS suite");
-  expect(full?.run).toContain("bun scripts/test.ts --timeout 60000");
-  expect(full?.run).not.toContain("--update-timings");
+  expect(ci.jobs["platform-macos"].steps?.find(step => step.name === "Full macOS suite")).toBeUndefined();
 });
 
 test("nightly macOS is timed at 08:17 UTC and names its timing file", async () => {

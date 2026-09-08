@@ -149,6 +149,13 @@ history를 업스트림 function tool로 인코딩한 다음 스트리밍된 fun
 `custom_tool_call`로 복원합니다. 네이티브 OpenAI forward routing과 지원되는 `apply_patch` custom tool은 변경되지
 않습니다.
 
+라우팅된 code-mode 턴에는 첫 호출 전에 중첩 helper에 대한 호스트 규칙도 전달됩니다.
+`tools.apply_patch`는 별도 장식 없이 패치 마커만 있는 줄로 시작하고 끝나는 하나의 문자열을 받습니다.
+isolate에서는 `import`를 사용할 수 없으며, 오래 실행되는 명령은 `write_stdin`으로 폴링합니다.
+네이티브 라우팅 Responses, Kiro 또는 Cursor 경로의 code-mode exec 결과에 호스트의 실패 메시지 중
+하나가 여전히 포함되어 있으면, opencodex는 해당 규칙을 명시하는 한 줄짜리 힌트를 덧붙입니다.
+이 변경은 모델의 코드나 패치 텍스트를 다시 작성하지 않습니다.
+
 선택한 provider는 function/tool calling을 지원해야 합니다. tool call을 지원하지 않는 text-only provider에서는
 `exec`, Browser 또는 Computer Use를 사용할 수 없습니다. 네이티브 OpenAI 항목은 업스트림 tool mode를 그대로
 유지합니다.

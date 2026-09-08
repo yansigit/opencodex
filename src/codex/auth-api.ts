@@ -1835,6 +1835,42 @@ export async function listCodexAuthAccountsSnapshot(
   };
 }
 
+/** One opted-in account's metadata; reuse the bounded WHAM 401 recovery and generation fence. */
+export async function refreshCodexQuotaForActivation(config: OcxConfig, accountId: string): Promise<void> {
+  if (accountId === MAIN_CODEX_ACCOUNT_ID) {
+    const lease = tryAcquireNativeMainProfileClaim();
+    if (!lease) return;
+    try {
+      reconcileMainCodexAccountRuntimeState();
+      if (isAccountNeedsReauth(accountId)) return;
+      const identityGeneration = captureMainAccountIdentityGeneration();
+      const writerGeneration = captureConfigGeneration();
+      try {
+        // Refresh may need an exclusive claim; prepare before WHAM takes its shared claim.
+        if (!await getValidMainAccountToken({ preserveReauth: true })) return;
+      } catch (error) {
+        if (error instanceof MainAccountTokenRefreshError && error.reason === "reauth"
+          && isMainAccountIdentityGenerationLive(identityGeneration)) {
+          markAccountNeedsReauth(accountId, writerGeneration);
+        }
+        return;
+      }
+      if (isAccountNeedsReauth(accountId)) return;
+      await fetchMainAccountInfoAttempt(true, 1, lease, false, false);
+    } finally {
+      lease.release();
+    }
+    return;
+  }
+  const account = configuredPoolAccount(config, accountId);
+  if (!account) return;
+  const writerGeneration = captureConfigGeneration();
+  const result = await fetchPoolAccountQuota(accountId, true, account.plan);
+  if (result.needsReauth && result.credentialGeneration !== undefined) {
+    markAccountNeedsReauth(accountId, writerGeneration, result.credentialGeneration);
+  }
+}
+
 export async function listCodexAuthAccounts(config: OcxConfig, forceRefresh = false): Promise<CodexAuthAccountDto[]> {
   return (await listCodexAuthAccountsSnapshot(config, forceRefresh)).accounts;
 }

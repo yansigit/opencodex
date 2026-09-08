@@ -86,6 +86,24 @@ ocx connect rotate --admin-token-stdin
 
 ## Docker
 
+롤백할 때도 두 볼륨과 마운트 경로를 유지하세요. 기존 볼륨의 소유권과 권한은 자동으로 복구되지 않습니다. Compose 없이 실행할 때의 named volume 지정과 별도 상태 경로는 [영문 기준 가이드](/guides/remote-hub/#docker-compose)를 참고하세요.
+
+상태는 두 볼륨에 분리해 보관합니다. `ocx-state`는
+`OPENCODEX_HOME=/home/bun/.opencodex`, `codex-state`는
+`CODEX_HOME=/home/bun/.codex`에 연결됩니다. 두 제품의 `auth.json` 형식이 다르므로
+홈을 같은 폴더로 합치지 마세요. 루트 파일 시스템이 read-only여도 이 두 홈은 쓰기 가능합니다.
+
+카탈로그는 자동 생성되지 않습니다. 인증된 `/v1/catalog` 검사 전에 유효한
+`/home/bun/.codex/opencodex-catalog.json`을 생성하거나 가져와야 합니다.
+빈 홈에서 `catalog_not_found` 404는 정상입니다. 업그레이드는 기존 `ocx-state`를
+유지하고 `codex-state`를 추가하지만 파일을 자동 이동하지 않습니다. 이전 우회 설정으로
+`.opencodex`에 둔 카탈로그는 백업한 뒤 카탈로그만 owner-only 권한으로 옮기세요.
+두 제품의 `auth.json`을 서로 덮어쓰면 안 됩니다. 사용자 지정 `CODEX_HOME`은 그 정확한
+디렉터리를 쓰기 가능한 볼륨에 연결하고, 기본 카탈로그를
+`${CODEX_HOME}/opencodex-catalog.json`에 준비해야 합니다. `model_catalog_json`으로
+별도 파일을 지정했다면 그 경로도 영속 보관하세요. 명시적 이전이 완료되기 전까지는
+기존 사용자 지정 환경 변수와 볼륨 경로의 대응을 유지하세요.
+
 opencodex는 공식 컨테이너 이미지를 배포하지 않지만, 저장소 루트의 `Dockerfile`과 `compose.yaml`로 digest가 고정된 소스 이미지를 직접 빌드할 수 있습니다. 최초 정상 시작 시 자체 서명 TLS 인증서와 개인 키를 `ocx-state` 볼륨의 `/home/bun/.opencodex/container-tls/cert.pem`과 `/home/bun/.opencodex/container-tls/key.pem`에 생성합니다. 개인 키는 소유자만 읽을 수 있으며 이후 시작에서는 같은 인증서와 키를 검증한 뒤 다시 사용합니다. 데이터 엔드포인트는 HTTPS입니다.
 
 최초 정상 시작 전에 데이터 키를 stdin으로 한 번만 초기화하세요. bootstrap helper는 최대 512바이트인 한 줄만 허용합니다. 키를 출력하거나 기존 키를 덮어쓰지 않고 `ocx-state` 볼륨의 소유자 전용 `service-api-token`에 저장합니다.
@@ -133,7 +151,7 @@ docker compose up -d
 
 컨테이너 내부 health/readiness probe가 인증서 검증을 생략할 수 있는 범위는 고정된 컨테이너 루프백 연결뿐입니다. 외부 인수 검사에서는 복사한 공개 인증서나 시스템 신뢰 저장소를 사용해 실제로 접속하는 정확한 호스트 이름을 반드시 검증하세요. 컨테이너 healthcheck의 `/healthz`가 통과한 뒤 인증된 `/v1/catalog`와 실제 모델 응답도 별도로 확인해야 합니다.
 
-`docker compose down`은 `ocx-state` 볼륨을 보존합니다. `docker compose down --volumes`는 설정, OAuth 인증 정보, 사용량 기록, 데이터 키를 함께 삭제하므로 파괴적 작업으로 취급하세요.
+`docker compose down`은 `ocx-state`와 `codex-state`를 모두 보존합니다. `docker compose down --volumes`는 두 볼륨을 모두 삭제하여 설정, OAuth 인증 정보, 사용량 기록, 데이터 키, Codex 상태와 카탈로그를 지웁니다. 업그레이드나 재시작 대신 사용하지 마세요.
 
 ## 롤백과 문제 해결
 

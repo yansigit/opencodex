@@ -21,6 +21,8 @@ import {
   scenarioOutputMarkerMatched,
 } from "../../scripts/claude-certification";
 import { fixturePath } from "../helpers/repo-root";
+import { isolationBudgetMs } from "../helpers/ci-watchdog";
+import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
 
 describe("Claude certification runner policy", () => {
   test("sanitizes inherited credentials and proxy settings while using isolated homes", () => {
@@ -186,7 +188,10 @@ describe("Claude certification runner policy", () => {
       const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
       for (const [mode, expected, timeout] of [["timeout", "timeout", 250], ["overflow", "output limit exceeded", 2_000]] as const) {
         const marker = join(root, `${mode}.json`);
-        await expect(runCertificationCommandForTests(process.execPath, [fixture, marker, mode], root, { ...process.env } as Record<string, string>, timeout)).rejects.toThrow(expected);
+        // This shortened command deadline triggers termination; it is not a
+        // startup-latency assertion. Keep enough room for the two real children
+        // to exist under full-suite/CI load, then prove both are gone below.
+        await expect(runCertificationCommandForTests(process.execPath, [fixture, marker, mode], root, { ...process.env } as Record<string, string>, isolationBudgetMs(timeout))).rejects.toThrow(expected);
         expect(existsSync(marker)).toBe(true);
         const { child, grandchild } = JSON.parse(readFileSync(marker, "utf8")) as { child: number; grandchild: number };
         const deadline = Date.now() + 2_000;
@@ -195,7 +200,7 @@ describe("Claude certification runner policy", () => {
         expect(alive(grandchild)).toBe(false);
       }
     } finally { rmSync(root, { recursive: true, force: true }); }
-  });
+  }, SPAWN_BUDGET_MS);
 
   test("bounded command returns ordinary subprocess output", async () => {
     const result = await runCertificationCommandForTests(
