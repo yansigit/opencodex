@@ -494,7 +494,7 @@ export async function multiAgentGuidanceText(
       text += ` Preferred sub-agent: model "${preferred.model}"`
         + (injectionEffort ? `, reasoning_effort "${injectionEffort}"` : "")
         + `; nativeDefaultState: ${nativeDefaultState}.`
-        + " — use it unless the user names another. Confirm a different listed model for one spawn only; do not persist the exception.";
+        + " Confirm a different listed model for one spawn only; do not persist the exception.";
     }
     text += fallbackGuidance;
     text += roster;
