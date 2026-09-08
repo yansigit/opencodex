@@ -1,4 +1,6 @@
-import { isOpenCodeGo, normalizeOpenCodeGoAgentMessages } from "./opencode-go";
+import { normalizeRoutedAgentMessages } from "./routed-agent-messages";
+import { normalizeOpenCodeGoAdditionalTools } from "./opencode-go-additional-tools";
+import { isXaiResponsesDestination } from "../providers/xai-transport";
 import { createHash } from "node:crypto";
 import type { IncomingMeta, ProviderAdapter } from "./base";
 import { namespacedToolName, type AdapterEvent, type OcxParsedRequest, type OcxProviderConfig, type OcxUsage, type TierDecision } from "../types";
@@ -2142,7 +2144,9 @@ export function stripOpenAiOnlyWebSearchFields(body: unknown): unknown {
  */
 const MUSE_SPARK_WEB_SEARCH_STRICT_MODELS = new Set([
   "muse-spark-1.3-contributor",
+  "muse-spark-1.3-contributor-free",
   "muse-spark-1.2-contributor",
+  "muse-spark-1.2-contributor-free",
 ]);
 
 const MUSE_SPARK_WEB_SEARCH_STRICT_RESPONSE_URLS = new Set([
@@ -2383,7 +2387,9 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         parsed._rawBody,
         forward || parsed._previousResponseInputExpanded === true,
       );
-      if (!forward && isOpenCodeGo(provider.baseUrl)) outBody = normalizeOpenCodeGoAgentMessages(outBody);
+      if (!forward) outBody = normalizeRoutedAgentMessages(outBody, {
+        allowStringContent: isXaiResponsesDestination(provider),
+      });
       outBody = mapRoutedResponsesReasoningEffort(outBody, provider, parsed.modelId);
       // stripPreviousResponseId() intentionally returns its input on a no-op. Detach before the
       // tier write so a force-fast/default decision can never mutate parsed._rawBody.
@@ -2474,6 +2480,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         // Last, so promoted namespace children are also cleared of Codex-private fields.
         outBody = stripCanonicalOnlyToolFields(outBody, provider.supportsOpenAiWebSearchToolFields === false);
       }
+      if (!forward) outBody = normalizeOpenCodeGoAdditionalTools(outBody, url);
       // Same predicate as the routedCompaction gate in handleResponses(): an authMode check would
       // let a noncanonical custom forward provider skip this rewrite while the server still routes
       // it as a summarizer turn (#422). The compaction body build removes the tool surface and must
@@ -2523,6 +2530,13 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         parsed.modelId,
       );
       if (isCanonicalOpenAiForwardProvider(provider)) {
+        // Spark closes Responses Lite streams before a terminal completion. Select compatibility
+        // from the final wire model so aliases cannot leave the caller or a static header enabled.
+        if (isPlainObject(finalBody) && finalBody.model === "gpt-5.3-codex-spark") {
+          for (const name of Object.keys(headers)) {
+            if (name.toLowerCase() === CODEX_RESPONSES_LITE_HEADER) delete headers[name];
+          }
+        }
         const routingHeaders = new Headers(headers);
         applyCodexRoutingHint(routingHeaders, finalBody);
         // Static headers may use mixed casing. Remove every stale spelling

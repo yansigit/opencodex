@@ -1540,8 +1540,10 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     modelDiscovery: {
       // Resolves against effectiveBaseUrl (registry baseUrl .../v1) to the same
       // canonical endpoint https://inference-api.nousresearch.com/v1/models.
+      // Nous returns a mixed paid/free catalog whose JSON can exceed 256 KiB;
+      // keep the provider-specific limit below the process-wide 4 MiB ceiling.
       path: "models",
-      maxResponseBytes: 262_144,
+      maxResponseBytes: 1_048_576,
       maxModels: 512,
     },
     note: "Nous Research subscription gateway. OAuth device login with your own Portal account; mixed paid + :free models discovered live (fallback seed 2026-08-10: tencent/hy3:free, poolside/laguna-s-2.1:free, stepfun/step-3.7-flash:free, poolside/laguna-xs-2.1:free).",
@@ -1675,6 +1677,9 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     // Zen Go can close a Chat stream after a fully assembled function call without sending
     // finish_reason or [DONE] (#2260). The adapter still rejects incomplete argument JSON.
     openaiChatEofTolerance: true,
+    // Go rejects reasoning.encrypted_content with previous_response_id (#3838).
+    // Use explicit replay history and the existing stateless Responses policy.
+    statelessResponses: true,
     /* [Decision Log]
     - 목적과 의도: Route the exact models OpenCode Go documents on the Responses endpoint — GPT 5.6 Luna, Grok 4.6, and Muse Spark Contributor (#2617).
     - 기존 구현 및 제약 조건: The provider is mixed-wire but its provider-wide `openai-chat` adapter sent Luna to `/chat/completions`; explicit user `modelAdapters` entries must remain authoritative.

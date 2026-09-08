@@ -440,36 +440,43 @@ ocx codex-shim status
 ocx codex-shim uninstall
 ```
 
+:::note[Windows token environment]
+Newly generated Windows CMD and PowerShell shims restore the caller's `OPENCODEX_API_AUTH_TOKEN` after execution. Codex and its child processes can still inherit the token.
+
+After updating OpenCodex, recreate an existing Windows shim with `ocx codex-shim uninstall` followed by `ocx codex-shim install` to obtain this behavior. An ordinary update does not rewrite a healthy Windows shim.
+:::
+
 :::tip[Service vs Shim]
 Use `ocx service` for an always-on background proxy (recommended). Use `ocx codex-shim` for
 lightweight, on-demand startup without a daemon — the proxy starts only when `codex` is launched.
 :::
 
-#### Token injection without the shim
+#### Token injection into Codex
 
 On a non-loopback bind the injected provider carries `env_key = "OPENCODEX_API_AUTH_TOKEN"`. That
 line tells Codex which variable to read; it does not create it. Codex refuses to start a request
 when the variable is missing (`Missing environment variable: OPENCODEX_API_AUTH_TOKEN`), and the
-proxy is never reached. The value lives in `$OPENCODEX_HOME/service-api-token`; only a process that
-exports it into Codex's environment closes the gap.
+proxy is never reached. The value lives in `$OPENCODEX_HOME/service-api-token`; the launching process
+must supply it in Codex's environment.
 
-What does carry the token into a Codex process:
+Use the maintained shim installed by `ocx codex-shim install`. When the launching context resolves
+this shim, it reads the token file created by OpenCodex and supplies the variable to Codex.
+Desktop, cron, and service launches must use a PATH or launcher path that selects the shim;
+installation does not configure those environments automatically. Codex's own child processes
+may still inherit the token.
 
-- the shim installed by `ocx codex-shim install` (reads the token file at launch; the supported path
-  for Codex started from shells, Desktop, cron, or another service);
-- exporting `OPENCODEX_API_AUTH_TOKEN` yourself in the process that starts Codex — a shell profile,
-  the cron line, or an `Environment=`/`EnvironmentFile=` on the systemd unit that launches
-  **Codex** (not the proxy). Point it at the existing token file; do not copy the value into
-  `config.toml`.
+Do not export this bearer token from a shell startup file or copy it into `config.toml`. The
+`service-api-token` file contains the raw token, not `NAME=value` assignments, so it cannot be used
+directly as a systemd `EnvironmentFile=`.
 
-What does not: an `EnvironmentFile=` or `OCX_API_TOKEN_FILE` on `opencodex-proxy.service`. Those
-configure the proxy process only and never flow into an independently launched `codex exec`.
+An `EnvironmentFile=` or `OCX_API_TOKEN_FILE` on `opencodex-proxy.service` configures the proxy process
+only and never flows into an independently launched `codex exec`.
 
 A Codex upgrade that replaces the launcher removes the shim; the next ordinary `ocx` command restores
 it (see above), but a `codex exec` that runs before that fails. `ocx doctor` reports this exact
 state under "Codex env_key launch readiness" (env_key configured, variable unset, shim missing or
 unhealthy, token file present) with the repair command, and never prints the token. Reading the token
-file directly from Codex is not something Codex supports, so there is no OpenCodex directive for it.
+file is not part of the injected `env_key` contract; the launching process must supply that variable.
 
 ### `ocx tray <install|start|stop|status|uninstall|remove> [--json] [--no-start]`
 

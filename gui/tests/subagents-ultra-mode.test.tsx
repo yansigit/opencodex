@@ -1,9 +1,8 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
+import type { Root } from "react-dom/client";
 import Subagents from "../src/pages/Subagents";
-import { ULTRA_MODE_PRESET } from "../src/components/subagents-workspace/SubagentDelegationSection";
 import { LanguageProvider } from "../src/i18n/provider";
 
 const globals = ["document", "window", "navigator", "localStorage", "fetch", "IS_REACT_ACT_ENVIRONMENT"] as const;
@@ -14,12 +13,7 @@ let root: Root | null = null;
 let v2Responses: Array<{ ok: boolean; body: unknown; status?: number }> = [];
 let v2Call = 0;
 let requests: Array<{ url: string; init?: RequestInit }> = [];
-let injectionAvailable: Array<{ provider: string; model: string; namespaced: string; canonical?: boolean }> = [];
-let nativeOverrideServer = { enabled: false, model: null as string | null, active: false };
-let nativeOverridePutError: string | null = null;
-let nativeOverrideAfterPut: Partial<typeof nativeOverrideServer> | null = null;
-let routedBridgeServer = false;
-let routedBridgePutError: string | null = null;
+const recommendation = { text: "server-supplied proactive policy", revision: "test-policy-v1" };
 
 function response(body: unknown, ok = true, status = 200): Response {
   return {
@@ -45,12 +39,6 @@ beforeEach(() => {
   requests = [];
   v2Responses = [];
   v2Call = 0;
-  injectionAvailable = [];
-  nativeOverrideServer = { enabled: false, model: null, active: false };
-  nativeOverridePutError = null;
-  nativeOverrideAfterPut = null;
-  routedBridgeServer = false;
-  routedBridgePutError = null;
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
     value: async (url: string, init?: RequestInit) => {
@@ -58,30 +46,13 @@ beforeEach(() => {
       const path = new URL(String(url), "http://localhost/").pathname;
       if (path === "/api/v2") {
         if (init?.method === "PUT") {
-          const body = JSON.parse(String(init.body ?? "{}")) as { v2NativeParentOverride?: { enabled?: boolean; model?: string | null }; v2RoutedDelegationBridge?: boolean };
-          if (typeof body.v2RoutedDelegationBridge === "boolean") {
-            if (routedBridgePutError) return response({ error: routedBridgePutError }, false, 400);
-            routedBridgeServer = body.v2RoutedDelegationBridge;
-            return response({ ok: true, v2RoutedDelegationBridge: routedBridgeServer });
-          }
-          if (body.v2NativeParentOverride) {
-            if (nativeOverridePutError) return response({ error: nativeOverridePutError }, false, 400);
-            nativeOverrideServer = { ...nativeOverrideServer, ...body.v2NativeParentOverride, ...nativeOverrideAfterPut };
-            nativeOverrideAfterPut = null;
-            return response({ ok: true, v2NativeParentOverride: nativeOverrideServer });
-          }
           const latest = v2Responses.at(-1)?.body ?? { enabled: true, multiAgentMode: "v2", multiAgentModeHintText: null };
           return response(latest);
         }
         const next = v2Responses[Math.min(v2Call++, Math.max(v2Responses.length - 1, 0))];
-        if (!next) return response({ enabled: false, v2NativeParentOverride: nativeOverrideServer });
-        const body = next.body && typeof next.body === "object" && !Array.isArray(next.body) && !Object.hasOwn(next.body, "v2NativeParentOverride") && !Object.hasOwn(next.body, "v2RoutedDelegationBridge")
-          ? { ...next.body, v2NativeParentOverride: nativeOverrideServer, v2RoutedDelegationBridge: routedBridgeServer }
-          : next.body;
-        return response(body, next.ok, next.status ?? (next.ok ? 200 : 500));
+        return next ? response(next.body, next.ok, next.status ?? (next.ok ? 200 : 500)) : response({ enabled: false });
       }
       if (path === "/api/subagent-models") return response({ available: [], chosen: [] });
-      if (path === "/api/injection-model") return response({ available: injectionAvailable, efforts: [] });
       if (path === "/api/subagent-model-fallback") return response({ available: [], models: [], pollMs: 60_000 });
       if (path === "/api/injection-model") return response({ available: [], efforts: [] });
       return response({});
@@ -104,6 +75,7 @@ afterEach(async () => {
 });
 
 async function mount(apiBase = "") {
+  const { createRoot } = await import("react-dom/client");
   await act(async () => {
     root = createRoot(container);
     root.render(
@@ -117,90 +89,13 @@ async function mount(apiBase = "") {
 
 function ultraSwitch(): HTMLButtonElement {
   const button = Array.from(container.querySelectorAll("button"))
-    .find(candidate => candidate.getAttribute("aria-label") === "Ultra mode");
-  if (!button) throw new Error("Ultra mode switch not found");
+    .find(candidate => candidate.getAttribute("aria-label") === "Always proactive delegation");
+  if (!button) throw new Error("Always proactive delegation switch not found");
   return button as HTMLButtonElement;
-}
-
-function nativeParentSwitch(): HTMLButtonElement {
-  const button = Array.from(container.querySelectorAll("button"))
-    .find(candidate => candidate.getAttribute("aria-label") === "Route native V2 parents");
-  if (!button) throw new Error("Native parent switch not found");
-  return button as HTMLButtonElement;
-}
-
-function nativeParentSelect(): HTMLButtonElement {
-  const button = container.querySelector<HTMLButtonElement>('button[role="combobox"][aria-label="Native parent target model"]');
-  if (!button) throw new Error("Native parent model select not found");
-  return button;
-}
-
-function routedBridgeSwitch(): HTMLButtonElement {
-  const button = Array.from(container.querySelectorAll("button"))
-    .find(candidate => candidate.getAttribute("aria-label") === "Routed V2 delegation bridge");
-  if (!button) throw new Error("Routed delegation bridge switch not found");
-  return button as HTMLButtonElement;
-}
-
-function routedBridgePuts(): unknown[] {
-  return requests
-    .filter(row => row.url.endsWith("/api/v2") && row.init?.method === "PUT")
-    .map(row => JSON.parse(String(row.init?.body ?? "{}")))
-    .filter(body => Object.hasOwn(body, "v2RoutedDelegationBridge"));
-}
-
-test("loads the routed delegation bridge off by default with an accessible switch", async () => {
-  v2Responses = [{ ok: true, body: { enabled: false, multiAgentMode: "default" } }];
-  await mount();
-
-  expect(routedBridgeSwitch().getAttribute("aria-pressed")).toBe("false");
-  expect(routedBridgeSwitch().disabled).toBe(false);
-});
-
-test("saves only the routed delegation bridge scalar and refreshes server state", async () => {
-  v2Responses = [
-    { ok: true, body: { enabled: false, multiAgentMode: "default" } },
-    { ok: true, body: { enabled: false, multiAgentMode: "default", v2RoutedDelegationBridge: false } },
-  ];
-  await mount();
-
-  await act(async () => { routedBridgeSwitch().click(); });
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
-
-  expect(routedBridgePuts()).toEqual([{ v2RoutedDelegationBridge: true }]);
-  expect(routedBridgeSwitch().getAttribute("aria-pressed")).toBe("false");
-});
-
-test("retains the loaded routed delegation bridge state after a failed save", async () => {
-  routedBridgeServer = true;
-  routedBridgePutError = "bridge update rejected";
-  v2Responses = [{ ok: true, body: { enabled: true, multiAgentMode: "v2" } }];
-  await mount();
-
-  await act(async () => { routedBridgeSwitch().click(); });
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
-
-  expect(routedBridgeSwitch().getAttribute("aria-pressed")).toBe("true");
-  expect(container.textContent).toContain("bridge update rejected");
-});
-
-test("shows armed-but-inactive guidance outside explicit V2", async () => {
-  routedBridgeServer = true;
-  v2Responses = [{ ok: true, body: { enabled: false, multiAgentMode: "default" } }];
-  await mount();
-
-  expect(container.textContent).toContain("Armed; activates for eligible native V2 roots");
-});
-
-function nativeParentPuts(): Array<{ enabled: boolean; model: string | null }> {
-  return requests
-    .filter(row => row.url.endsWith("/api/v2") && row.init?.method === "PUT")
-    .map(row => JSON.parse(String(row.init?.body ?? "{}")).v2NativeParentOverride)
-    .filter(Boolean);
 }
 
 test("does not enable Ultra mode for the default surface even when V2 is enabled", async () => {
-  v2Responses = [{ ok: true, body: { enabled: true, multiAgentMode: "default", multiAgentModeHintText: null } }];
+  v2Responses = [{ ok: true, body: { enabled: true, multiAgentMode: "default", multiAgentModeHintText: null, multiAgentModeHintRecommendation: recommendation } }];
   await mount();
 
   expect(ultraSwitch().disabled).toBe(true);
@@ -210,13 +105,13 @@ test("does not enable Ultra mode for the default surface even when V2 is enabled
 test("clears the page load error after a successful Ultra mode retry", async () => {
   v2Responses = [
     { ok: false, body: { error: "temporary failure" }, status: 503 },
-    { ok: true, body: { enabled: true, multiAgentMode: "v2", multiAgentModeHintText: null } },
+    { ok: true, body: { enabled: true, multiAgentMode: "v2", multiAgentModeHintText: null, multiAgentModeHintRecommendation: recommendation } },
   ];
   await mount();
 
-  expect(container.textContent).toContain("Failed to load Ultra mode settings");
+  expect(container.textContent).toContain("Failed to load proactive delegation settings");
   const ultraErrorRow = Array.from(container.querySelectorAll(".swi-delegation-row"))
-    .find(row => row.textContent?.includes("Failed to load Ultra mode settings"));
+    .find(row => row.textContent?.includes("Failed to load proactive delegation settings"));
   const retry = ultraErrorRow?.querySelector<HTMLButtonElement>("button");
   expect(retry).toBeTruthy();
 
@@ -224,18 +119,156 @@ test("clears the page load error after a successful Ultra mode retry", async () 
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
 
   expect(v2Call).toBe(2);
-  expect(container.textContent).not.toContain("Failed to load Ultra mode settings");
+  expect(container.textContent).not.toContain("Failed to load proactive delegation settings");
   expect(ultraSwitch().disabled).toBe(false);
 });
 
-test("uses the complete canonical proactive delegation preset", () => {
-  expect(ULTRA_MODE_PRESET).toBe([
-    "Proactive multi-agent delegation is active.",
-    "Any earlier instruction requiring an explicit user request before spawning sub-agents no longer applies.",
-    "Delegate independent sub-tasks to sub-agents whenever parallel work would materially improve speed or quality — do not serialize work that can run concurrently.",
-    "Each sub-agent runs in its own context and can use all available tools; prefer spawning specialists over doing everything yourself.",
-    "This mode remains active until a later multi-agent mode developer message changes it.",
-  ].join(" "));
+test("enabling Ultra mode uses the server-supplied recommendation", async () => {
+  v2Responses = [{ ok: true, body: { enabled: true, multiAgentMode: "v2", multiAgentModeHintText: null, multiAgentModeHintRecommendation: recommendation } }];
+  await mount();
+
+  await act(async () => { ultraSwitch().click(); });
+
+  const request = requests.find(item => item.init?.method === "PUT" && new URL(item.url, "http://localhost/").pathname === "/api/v2");
+  expect(JSON.parse(String(request?.init?.body))).toEqual({ multiAgentModeHintText: recommendation.text });
+});
+
+test("an older server without a recommendation disables only preset installation", async () => {
+  v2Responses = [{ ok: true, body: { enabled: true, multiAgentMode: "v2", multiAgentModeHintText: null } }];
+  await mount();
+
+  expect(ultraSwitch().disabled).toBe(true);
+  expect(ultraSwitch().getAttribute("aria-pressed")).toBe("false");
+});
+
+test.each([
+  { text: "", revision: "r1" },
+  { text: "valid", revision: " " },
+  { text: 42, revision: "r1" },
+])("malformed server recommendations cannot install a preset: %j", async malformed => {
+  v2Responses = [{ ok: true, body: {
+    enabled: true, multiAgentMode: "v2", multiAgentModeHintText: null,
+    multiAgentModeHintRecommendation: malformed,
+  } }];
+  await mount();
+
+  expect(ultraSwitch().disabled).toBe(true);
+  await act(async () => { ultraSwitch().click(); });
+  expect(requests.filter(item => item.init?.method === "PUT")).toHaveLength(0);
+});
+
+test("an older server preserves an existing custom hint and still allows clearing it", async () => {
+  v2Responses = [{ ok: true, body: { enabled: true, multiAgentMode: "v2", multiAgentModeHintText: "custom policy" } }];
+  await mount();
+
+  expect(ultraSwitch().disabled).toBe(false);
+  expect(ultraSwitch().getAttribute("aria-pressed")).toBe("true");
+  await act(async () => { ultraSwitch().click(); });
+
+  const request = requests.find(item => item.init?.method === "PUT" && new URL(item.url, "http://localhost/").pathname === "/api/v2");
+  expect(JSON.parse(String(request?.init?.body))).toEqual({ multiAgentModeHintText: null });
+});
+
+test.each([undefined, { text: "", revision: "r1" }])("custom hints remain editable without a valid recommendation: %j", async unavailable => {
+  v2Responses = [{ ok: true, body: {
+    enabled: true, multiAgentMode: "v2", multiAgentModeHintText: "custom policy",
+    multiAgentModeHintRecommendation: unavailable,
+  } }];
+  await mount();
+  const editor = container.querySelector(".swi-ultra-mode-editor")!;
+  const textarea = editor.querySelector("textarea")!;
+  const restore = [...editor.querySelectorAll("button")].find(button => button.textContent?.trim() === "Restore preset")!;
+  const save = [...editor.querySelectorAll("button")].find(button => button.textContent?.trim() === "Save")!;
+  const custom = "  my custom policy\nwith a preserved trailing space ";
+  expect(restore.disabled).toBe(true);
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(testWindow.HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, custom);
+    textarea.dispatchEvent(new testWindow.Event("input", { bubbles: true }));
+    textarea.dispatchEvent(new testWindow.Event("change", { bubbles: true }));
+  });
+  expect(requests.filter(item => item.init?.method === "PUT")).toHaveLength(0);
+  await act(async () => { save.click(); });
+  const puts = requests.filter(item => item.init?.method === "PUT");
+  expect(puts).toHaveLength(1);
+  expect(JSON.parse(String(puts[0].init?.body))).toEqual({ multiAgentModeHintText: custom });
+});
+
+test("a custom hint loads without writing and restore stays local until Save", async () => {
+  v2Responses = [{ ok: true, body: {
+    enabled: true,
+    multiAgentMode: "v2",
+    multiAgentModeHintText: "custom policy",
+    multiAgentModeHintRecommendation: recommendation,
+  } }];
+  await mount();
+
+  const editor = container.querySelector(".swi-ultra-mode-editor");
+  const textarea = editor?.querySelector("textarea") as HTMLTextAreaElement | null;
+  const restore = Array.from(editor?.querySelectorAll("button") ?? [])
+    .find(button => button.textContent?.trim() === "Restore preset");
+  const save = Array.from(editor?.querySelectorAll("button") ?? [])
+    .find(button => button.textContent?.trim() === "Save");
+
+  expect(textarea?.value).toBe("custom policy");
+  expect(requests.filter(item => item.init?.method === "PUT")).toHaveLength(0);
+
+  await act(async () => { (restore as HTMLButtonElement).click(); });
+  expect(textarea?.value).toBe(recommendation.text);
+  expect(requests.filter(item => item.init?.method === "PUT")).toHaveLength(0);
+
+  await act(async () => { (save as HTMLButtonElement).click(); });
+  const put = requests.find(item => item.init?.method === "PUT" && new URL(item.url, "http://localhost/").pathname === "/api/v2");
+  expect(JSON.parse(String(put?.init?.body))).toEqual({ multiAgentModeHintText: recommendation.text });
+});
+
+test.each([
+  ["missing", undefined],
+  ["malformed", { text: "", revision: "b1" }],
+  ["valid", { text: "server-B policy", revision: "b1" }],
+] as const)("server switches cannot install or restore another server's preset (%s)", async (_kind, nextRecommendation) => {
+  let releaseNext!: (value: Response) => void;
+  const nextRead = new Promise<Response>(resolve => { releaseNext = resolve; });
+  const nextState = {
+    enabled: true, multiAgentMode: "v2", multiAgentModeHintText: null,
+    multiAgentModeHintRecommendation: nextRecommendation,
+  };
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (url: string, init?: RequestInit) => {
+      requests.push({ url: String(url), init });
+      const path = new URL(String(url), "http://localhost/").pathname;
+      if (path === "/old/api/v2") return response({
+        enabled: true, multiAgentMode: "v2", multiAgentModeHintText: "custom-A policy",
+        multiAgentModeHintRecommendation: recommendation,
+      });
+      if (path === "/new/api/v2") return init?.method === "PUT" ? response(nextState) : nextRead;
+      if (path.endsWith("/api/subagent-models")) return response({ available: [], chosen: [] });
+      if (path.endsWith("/api/subagent-model-fallback")) return response({ available: [], models: [], pollMs: 60_000 });
+      if (path.endsWith("/api/injection-model")) return response({ available: [], efforts: [] });
+      return response({});
+    },
+  });
+  await mount("/old");
+  expect(container.querySelector<HTMLTextAreaElement>(".swi-ultra-mode-editor textarea")?.value).toBe("custom-A policy");
+  await act(async () => { root!.render(<LanguageProvider><Subagents apiBase="/new" /></LanguageProvider>); });
+
+  expect(ultraSwitch().disabled).toBe(true);
+  expect(container.querySelector(".swi-ultra-mode-editor")).toBeNull();
+  await act(async () => { ultraSwitch().click(); });
+  expect(requests.filter(item => item.init?.method === "PUT")).toHaveLength(0);
+
+  await act(async () => { releaseNext(response(nextState)); await nextRead; });
+  const valid = Boolean(nextRecommendation?.text);
+  expect(ultraSwitch().disabled).toBe(!valid);
+  await act(async () => { ultraSwitch().click(); });
+  const puts = requests.filter(item => item.init?.method === "PUT");
+  if (valid) {
+    expect(puts).toHaveLength(1);
+    expect(puts[0]?.url).toBe("/new/api/v2");
+    expect(JSON.parse(String(puts[0]?.init?.body))).toEqual({ multiAgentModeHintText: nextRecommendation!.text });
+  } else {
+    expect(puts).toHaveLength(0);
+  }
 });
 
 test("a save refresh from an old API server cannot overwrite a newer server", async () => {
@@ -249,7 +282,7 @@ test("a save refresh from an old API server cannot overwrite a newer server", as
       if (path === "/old/api/v2") {
         if (init?.method === "PUT") return response({ ok: true });
         oldGets++;
-        if (oldGets === 1) return response({ enabled: true, multiAgentMode: "v2", multiAgentModeHintText: null });
+        if (oldGets === 1) return response({ enabled: true, multiAgentMode: "v2", multiAgentModeHintText: null, multiAgentModeHintRecommendation: recommendation });
         return oldRefresh;
       }
       if (path === "/new/api/v2") return response({ enabled: false, multiAgentMode: "default", multiAgentModeHintText: null });
@@ -276,212 +309,10 @@ test("a save refresh from an old API server cannot overwrite a newer server", as
   expect(ultraSwitch().disabled).toBe(true);
 
   await act(async () => {
-    releaseOldRefresh(response({ enabled: true, multiAgentMode: "v2", multiAgentModeHintText: ULTRA_MODE_PRESET }));
+    releaseOldRefresh(response({ enabled: true, multiAgentMode: "v2", multiAgentModeHintText: recommendation.text, multiAgentModeHintRecommendation: recommendation }));
     await oldRefresh;
     await new Promise(resolve => setTimeout(resolve, 10));
   });
   expect(ultraSwitch().disabled).toBe(true);
   expect(ultraSwitch().getAttribute("aria-pressed")).toBe("false");
-});
-
-test("hydrates native parent override off and filters canonical ChatGPT rows", async () => {
-  injectionAvailable = [
-    { provider: "openai", model: "gpt-5.6-luna", namespaced: "gpt-5.6-luna", canonical: true },
-    { provider: "alias", model: "parent-model", namespaced: "alias/parent-model", canonical: true },
-    { provider: "relay", model: "parent-model", namespaced: "relay/parent-model" },
-  ];
-  v2Responses = [{ ok: true, body: {
-    enabled: true,
-    multiAgentMode: "v2",
-    keepNativeChatGptOnV1: false,
-    v2NativeParentOverride: { enabled: false, model: null, active: false },
-  } }, { ok: true, body: { enabled: true, multiAgentMode: "v2", keepNativeChatGptOnV1: false } }];
-  await mount();
-
-  expect(nativeParentSwitch().getAttribute("aria-pressed")).toBe("false");
-  expect(container.textContent).not.toContain("alias/parent-model");
-  await act(async () => { nativeParentSelect().click(); });
-  const options = [...testWindow.document.querySelectorAll('[role="option"]')];
-  expect(options).toHaveLength(2);
-  expect(options.map(option => option.textContent).join(" ")).toContain("parent-model");
-  expect(options.map(option => option.textContent).join(" ")).not.toContain("gpt-5.6-luna");
-});
-
-test("persists a routed target while disabled with a complete atomic payload", async () => {
-  injectionAvailable = [{ provider: "relay", model: "parent-model", namespaced: "relay/parent-model" }];
-  v2Responses = [{ ok: true, body: {
-    enabled: true,
-    multiAgentMode: "v2",
-    keepNativeChatGptOnV1: false,
-    v2NativeParentOverride: { enabled: false, model: null, active: false },
-  } }];
-  await mount();
-
-  await act(async () => { nativeParentSelect().click(); });
-  const option = [...testWindow.document.querySelectorAll<HTMLButtonElement>('[role="option"]')]
-    .find(candidate => candidate.textContent?.includes("parent-model"));
-  expect(option).toBeTruthy();
-  await act(async () => { option!.click(); });
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
-
-  expect(nativeParentPuts()).toContainEqual({ enabled: false, model: "relay/parent-model" });
-  expect(nativeParentSwitch().getAttribute("aria-pressed")).toBe("false");
-});
-
-test("enables native parent routing with the selected model atomically", async () => {
-  injectionAvailable = [{ provider: "relay", model: "parent-model", namespaced: "relay/parent-model" }];
-  v2Responses = [{ ok: true, body: {
-    enabled: true,
-    multiAgentMode: "v2",
-    keepNativeChatGptOnV1: false,
-    v2NativeParentOverride: { enabled: false, model: "relay/parent-model", active: false },
-  } }, { ok: true, body: { enabled: true, multiAgentMode: "v2", keepNativeChatGptOnV1: false } }];
-  await mount();
-
-  expect(nativeParentSwitch().disabled).toBe(false);
-  await act(async () => { nativeParentSwitch().click(); });
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
-
-  expect(nativeParentPuts()).toContainEqual({ enabled: true, model: "relay/parent-model" });
-  expect(nativeParentSwitch().getAttribute("aria-pressed")).toBe("true");
-});
-
-test("rolls back the native parent controls after a failed update", async () => {
-  injectionAvailable = [
-    { provider: "relay", model: "first-model", namespaced: "relay/first-model" },
-    { provider: "relay", model: "second-model", namespaced: "relay/second-model" },
-  ];
-  nativeOverridePutError = "native parent target rejected";
-  v2Responses = [{ ok: true, body: {
-    enabled: true,
-    multiAgentMode: "v2",
-    keepNativeChatGptOnV1: false,
-    v2NativeParentOverride: { enabled: false, model: "relay/first-model", active: false },
-  } }];
-  await mount();
-
-  await act(async () => { nativeParentSelect().click(); });
-  const option = [...testWindow.document.querySelectorAll<HTMLButtonElement>('[role="option"]')]
-    .find(candidate => candidate.textContent?.includes("second-model"));
-  await act(async () => { option!.click(); });
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
-
-  expect(nativeParentSelect().textContent).toContain("first-model");
-  expect(container.textContent).toContain("native parent target rejected");
-});
-
-test("uses the post-save GET as the source of truth", async () => {
-  injectionAvailable = [
-    { provider: "relay", model: "first-model", namespaced: "relay/first-model" },
-    { provider: "relay", model: "server-model", namespaced: "relay/server-model" },
-  ];
-  nativeOverrideAfterPut = { model: "relay/server-model", enabled: false, active: false };
-  v2Responses = [{ ok: true, body: {
-    enabled: true,
-    multiAgentMode: "v2",
-    keepNativeChatGptOnV1: false,
-    v2NativeParentOverride: { enabled: false, model: "relay/first-model", active: false },
-  } }, { ok: true, body: { enabled: true, multiAgentMode: "v2", keepNativeChatGptOnV1: false } }];
-  await mount();
-
-  await act(async () => { nativeParentSelect().click(); });
-  const option = [...testWindow.document.querySelectorAll<HTMLButtonElement>('[role="option"]')]
-    .find(candidate => candidate.textContent?.includes("first-model"));
-  await act(async () => { option!.click(); });
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
-
-  expect(nativeParentSelect().textContent).toContain("server-model");
-  expect(nativeParentSelect().textContent).not.toContain("first-model");
-});
-
-test("gates activation on the explicit V2 and keep-native state while preserving accessibility", async () => {
-  injectionAvailable = [{ provider: "relay", model: "parent-model", namespaced: "relay/parent-model" }];
-  v2Responses = [{ ok: true, body: {
-    enabled: true,
-    multiAgentMode: "v2",
-    keepNativeChatGptOnV1: true,
-    v2NativeParentOverride: { enabled: false, model: "relay/parent-model", active: false },
-  } }];
-  await mount();
-
-  expect(nativeParentSwitch().disabled).toBe(true);
-  expect(nativeParentSwitch().getAttribute("aria-pressed")).toBe("false");
-  expect(nativeParentSelect().getAttribute("aria-label")).toBe("Native parent target model");
-  expect(container.textContent).toContain("Requires explicit V2");
-  expect(container.textContent).toContain("repository context");
-});
-
-test("shows inactive guidance when the upstream V2 flag is off", async () => {
-  injectionAvailable = [{ provider: "relay", model: "parent-model", namespaced: "relay/parent-model" }];
-  v2Responses = [{ ok: true, body: {
-    enabled: false,
-    multiAgentMode: "v2",
-    keepNativeChatGptOnV1: false,
-    v2NativeParentOverride: { enabled: false, model: "relay/parent-model", active: false },
-  } }];
-  await mount();
-
-  expect(nativeParentSwitch().disabled).toBe(true);
-  expect(container.textContent).toContain("Requires explicit V2");
-});
-
-test("keeps deactivation available for a persisted enabled but inactive conflict", async () => {
-  injectionAvailable = [{ provider: "relay", model: "parent-model", namespaced: "relay/parent-model" }];
-  v2Responses = [{ ok: true, body: {
-    enabled: true,
-    multiAgentMode: "default",
-    keepNativeChatGptOnV1: true,
-    v2NativeParentOverride: { enabled: true, model: "relay/parent-model", active: false },
-  } }];
-  await mount();
-
-  expect(nativeParentSwitch().disabled).toBe(false);
-  expect(nativeParentSwitch().getAttribute("aria-pressed")).toBe("true");
-  await act(async () => { nativeParentSwitch().click(); });
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
-  expect(nativeParentPuts()).toContainEqual({ enabled: false, model: "relay/parent-model" });
-});
-
-test("clearing the selected model atomically disables native parent routing", async () => {
-  injectionAvailable = [{ provider: "relay", model: "parent-model", namespaced: "relay/parent-model" }];
-  v2Responses = [{ ok: true, body: {
-    enabled: true,
-    multiAgentMode: "v2",
-    keepNativeChatGptOnV1: false,
-    v2NativeParentOverride: { enabled: true, model: "relay/parent-model", active: true },
-  } }];
-  await mount();
-
-  await act(async () => { nativeParentSelect().click(); });
-  const none = [...testWindow.document.querySelectorAll<HTMLButtonElement>('[role="option"]')]
-    .find(candidate => candidate.textContent?.trim() === "None");
-  expect(none).toBeTruthy();
-  await act(async () => { none!.click(); });
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
-
-  expect(nativeParentPuts()).toContainEqual({ enabled: false, model: null });
-});
-
-test("ignores rapid native parent mutations while one save is pending", async () => {
-  injectionAvailable = [
-    { provider: "relay", model: "first-model", namespaced: "relay/first-model" },
-    { provider: "relay", model: "second-model", namespaced: "relay/second-model" },
-  ];
-  v2Responses = [{ ok: true, body: {
-    enabled: true,
-    multiAgentMode: "v2",
-    keepNativeChatGptOnV1: false,
-    v2NativeParentOverride: { enabled: false, model: "relay/first-model", active: false },
-  } }];
-  await mount();
-
-  await act(async () => { nativeParentSelect().click(); });
-  const second = [...testWindow.document.querySelectorAll<HTMLButtonElement>('[role="option"]')]
-    .find(candidate => candidate.textContent?.includes("second-model"));
-  await act(async () => {
-    second!.click();
-    nativeParentSwitch().click();
-  });
-
-  expect(nativeParentPuts()).toEqual([{ enabled: false, model: "relay/second-model" }]);
 });
