@@ -530,7 +530,7 @@ function UltraModeEditor({
   initialHint: string;
   disabled: boolean;
   onSave: (patch: UltraModePatch) => void;
-  preset: string;
+  preset: string | null;
   labels: { text: string; preset: string; save: string };
 }) {
   const [draft, setDraft] = useState(initialHint);
@@ -551,8 +551,8 @@ function UltraModeEditor({
       <button
         type="button"
         className="btn btn-ghost btn-sm"
-        onClick={() => setDraft(preset)}
-        disabled={disabled}
+        onClick={() => { if (preset !== null) setDraft(preset); }}
+        disabled={disabled || preset === null}
       >
         {labels.preset}
       </button>
