@@ -52,6 +52,8 @@ import { CODEX_GPT5_IDENTITY_LINE } from "../../adapters/identity";
 import { filterCursorConfiguredModelsByLiveDiscovery } from "../../adapters/cursor/discovery";
 import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
 import { recordLiveCursorClaudeModels, recordLiveCursorMaxModeModels } from "../../adapters/cursor/catalog";
+import { fetchQoderModels } from "../../adapters/qoder/live-models";
+import { resolveQoderProfile } from "../../adapters/qoder/profiles";
 import { isCanonicalOpenAiForwardProvider, OPENAI_API_PROVIDER_ID, OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
 import {
   COMBO_NAMESPACE,
@@ -952,16 +954,21 @@ function comboMemberVendorMetadata(provider: string, modelId: string): ModelMeta
  */
 function vendorMetadataComboFallback(target: { provider: string; model: string }): ComboCatalogMemberFallback | undefined {
   const metadataProvider = resolveMetadataProvider(target.provider);
-  const metadata = metadataProvider ? comboMemberVendorMetadata(metadataProvider, target.model) : undefined;
+  // Custom OpenAI-compatible routes commonly retain the canonical OpenAI model id
+  // while using a provider name that has no metadata alias. Reuse only its effort
+  // ladder below; context/modality rows remain provider-owned.
+  const metadata = metadataProvider
+    ? comboMemberVendorMetadata(metadataProvider, target.model)
+    : comboMemberVendorMetadata("openai", target.model);
   if (!metadata) return undefined;
   return {
-    ...(typeof metadata.contextWindow === "number" && metadata.contextWindow > 0
+    ...(metadataProvider && typeof metadata.contextWindow === "number" && metadata.contextWindow > 0
       ? { contextWindow: metadata.contextWindow }
       : {}),
-    ...(typeof metadata.maxTokens === "number" && metadata.maxTokens > 0
+    ...(metadataProvider && typeof metadata.maxTokens === "number" && metadata.maxTokens > 0
       ? { maxOutputTokens: metadata.maxTokens }
       : {}),
-    ...(Array.isArray(metadata.input) && metadata.input.length > 0
+    ...(metadataProvider && Array.isArray(metadata.input) && metadata.input.length > 0
       ? { inputModalities: [...metadata.input] }
       : {}),
     ...(metadata.reasoning === true ? { reasoningEfforts: [...ROUTED_COMBO_MEMBER_REASONING_EFFORTS] } : {}),
@@ -1038,15 +1045,21 @@ export function resolveComboCatalogMember(
     && typeof existing.contextWindow === "number"
     && existing.contextWindow > 0
   ) {
-    const capped = applyProviderContextCap(existing.contextWindow, contextCap);
+    // Live discovery can explicitly say text-only even when configured routing
+    // supplies a vision sidecar. Apply the same provider hints used for thin
+    // rows before deriving a combo from this complete row.
+    const hinted = prov && isModelVisionSidecarConsumer(prov, existing.id)
+      ? applyProviderConfigHints(target.provider, prov, existing, contextCap, metadataModelIdCaseFold)
+      : existing;
+    const capped = applyProviderContextCap(hinted.contextWindow, contextCap);
     if (capped === undefined || capped === existing.contextWindow) {
-      return withFallbackMetadata(existing);
+      return withFallbackMetadata(hinted);
     }
-    const maxInput = typeof existing.maxInputTokens === "number" && existing.maxInputTokens > 0
-      ? Math.min(existing.maxInputTokens, capped)
+    const maxInput = typeof hinted.maxInputTokens === "number" && hinted.maxInputTokens > 0
+      ? Math.min(hinted.maxInputTokens, capped)
       : Math.min(fallback?.maxInputTokens ?? capped, capped);
     return withFallbackMetadata({
-      ...existing,
+      ...hinted,
       contextWindow: capped,
       maxInputTokens: maxInput,
       contextCap,
@@ -1419,6 +1432,13 @@ export function catalogHintsFromModelsApiItem(providerName: string, item: Provid
       plainRecord(item.meta)?.n_ctx,
       item.default_context_size,
       plainRecord(item.meta)?.n_ctx_train,
+      // A chained OpenCodex hub (and other re-serving gateways) reports the per-model
+      // window on the same capability record this function already reads for
+      // `max_output_tokens` below (#4032). Without it every routed row fell through to
+      // the 128k compatibility floor in parsing.ts while local forward rows kept their
+      // real values. Appended after the recognized fields for the same reason as the
+      // llama.cpp entries above: no provider that already resolves changes behavior.
+      capabilityRecord?.context_length,
     );
   const maxInputTokens = positiveSafeInteger(limits?.max_input_tokens, item.max_input_tokens);
   const maxOutputTokens = positiveSafeInteger(
@@ -1589,6 +1609,50 @@ async function fetchProviderModelsWithAuth(
       ? [...models, vertexDefaultSeed]
       : models
   );
+  if (prov.adapter === "qoder") {
+    if (!apiKey) return observed(configured, "degraded");
+    const profile = resolveQoderProfile(prov.baseUrl);
+    if (!profile) return observed(configured, "degraded");
+    // Qoder's model list is entitlement-specific. Bind cache reads/writes to an irreversible PAT
+    // fingerprint so an account switch cannot observe another account's roster, even if a caller
+    // bypasses the normal config mutation path that clears provider caches.
+    const authorityIdentity = createHash("sha256").update(apiKey).digest("hex");
+    const fresh = getFreshCached(name, ttlMs, Date.now(), authorityIdentity);
+    if (fresh) {
+      return observed(withConfiguredRetention(
+        applyConfigHintsToCachedModels(name, prov, fresh, contextCap, metadataModelIdCaseFold, captured.effectiveAlias),
+      ), "authoritative");
+    }
+    const scopedStale = getStaleCached(name, authorityIdentity);
+    if (isModelsFetchCoolingDown(name) && scopedStale) {
+      return observed(withConfiguredRetention(
+        applyConfigHintsToCachedModels(name, prov, scopedStale, contextCap, metadataModelIdCaseFold, captured.effectiveAlias),
+      ), "degraded");
+    }
+    const live = await fetchQoderModels(profile, apiKey);
+    if (live.ok) {
+      const discovered = live.models.map(id => ({
+        id,
+        provider: name,
+        ...catalogHintsFromProviderConfig(name, prov, id, contextCap, metadataModelIdCaseFold, captured.effectiveAlias),
+      }));
+      const forCache = withConfiguredRetention(discovered, { retainComboTargets: false });
+      if (!setCached(name, forCache, Date.now(), cacheGeneration, authorityIdentity)) {
+        return observed(withConfiguredRetention(configured), "degraded");
+      }
+      markProviderDiscoveryOk(name, live.models.length);
+      return observed(withConfiguredRetention(forCache, { warnDrops: true }), "authoritative");
+    }
+    if (isCurrentCacheGeneration()) {
+      markModelsFetchFailure(name);
+      markProviderDiscoveryFailed(name, { reason: "provider" });
+      console.warn(`[opencodex] Qoder model discovery for "${name}" failed [${live.error}]${live.detail ? `: ${live.detail}` : ""}; using stale/static catalog degradation.`);
+    }
+    const stale = getStaleCached(name, authorityIdentity);
+    return observed(withConfiguredRetention(
+      stale ? applyConfigHintsToCachedModels(name, prov, stale, contextCap, metadataModelIdCaseFold, captured.effectiveAlias) : configured,
+    ), "degraded");
+  }
   if (prov.adapter === "cursor") {
     if (!apiKey) return observed(configured, "degraded");
     // Cursor uses a bespoke GetUsableModels RPC (not /models), returning the full effort-suffixed

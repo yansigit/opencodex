@@ -38,6 +38,19 @@ and only a stop running outside the proxy can verify that restart window before 
 your client config — so the dashboard refuses with `respawnable_service`, changes nothing,
 and asks you to run `ocx stop`.
 
+The dashboard also refuses when the proxy is running *as* the installed launchd or systemd
+service. Stopping that manager from inside the proxy would terminate the process before
+native Codex is restored, leaving your client config pointed at a proxy that is gone, so the
+dashboard returns `self_unload_service`, changes nothing, and asks you to run `ocx stop` —
+which stops the service from outside and completes the restore.
+
+A proxy exit alone does not confirm that shared Codex/Grok restoration succeeded. If the stop
+response reports failure, is unreadable, or does not confirm the assigned teardown mode, the CLI
+keeps restoration with the stopping parent after the existing ownership and respawn checks.
+It does not enter the forced-stop fallback for a process already observed to have exited. A
+receipt-backed deferral still leaves final restoration and receipt cleanup with the parent;
+failure to restore shared client configuration keeps the stop failed and its receipt outstanding.
+
 ### `ocx restart`
 
 When a proxy is running, ask that exact attested PID and port to restart in place, wait for its
@@ -49,6 +62,11 @@ closed without an `ensure` or stop/start fallback. After confirming ownership, u
 `ocx start` for a standalone proxy. For a service-managed proxy, use `ocx stop` followed by
 `ocx service start` so supervision is restored.
 
+Port recovery after stop or update respects a failed OCX process check even when the PID was
+recorded before shutdown. A rejected live holder is left running and prevents TCP-row cleanup.
+If it stays unverified, the bounded recovery wait can expire with the port still busy. Check the
+current port holder and retry the restart after the conflict is resolved.
+
 ### `ocx ensure`
 
 Idempotently ensure a background proxy is running, then sync its live model catalog. If
@@ -58,6 +76,10 @@ Idempotently ensure a background proxy is running, then sync its live model cata
 
 Restore native Codex **without** stopping the proxy — strips the injected config lines and routed
 catalog entries so plain `codex` works natively again. `eject` is an alias of `restore`.
+
+Restoration reports failure instead of replacing changed configuration files when a saved journal
+lacks the corresponding injection hashes. The current files and journal remain available for
+review; see [recovery without injection hashes](/guides/codex-integration/#recovery-without-injection-hashes).
 
 Pass `back` to either spelling to re-point plain `codex` at an already-running proxy without changing
 the proxy lifecycle:
@@ -76,6 +98,15 @@ This is a broad, destructive relabel: every user-message thread currently tagged
 changed to `openai`, `exec` is normalized to `cli`, and the event marker is set. That includes
 legitimate dedicated-provider history. Back up the state and run it only when that full scope is
 intended.
+
+### `ocx recover-history --ocx-compaction <thread-id> --yes`
+
+Repair one thread that was compacted through a routed provider before resuming it through native
+Codex. The command reads the exact thread selected by UUID, saves a private byte-for-byte backup,
+then converts only OpenCodeX-owned `ocx1:` compaction state into a plain summary that native Codex
+can replay. Native encrypted content and other threads are left unchanged. Close the selected
+thread before running the command; a concurrent rollout change makes recovery stop without
+replacing the file.
 
 ### `ocx uninstall` · `ocx remove`
 
@@ -213,6 +244,10 @@ installs, proxy environment/config, ChatGPT reachability, Codex plugin and proje
 and pending history migration. The Codex app-home targeting section also detects the narrow Windows
 Orca runtime-home mismatch and explains service migration when applicable. Paths shown by this
 diagnostic redact the OS username. Doctor prints repair hints but does not apply them.
+
+Project-config diagnostics ignore provider examples inside TOML multiline strings, including
+`developer_instructions`. Real provider and profile settings after the closing delimiter are still
+checked, even when an escaped quote immediately precedes that delimiter.
 
 The **OAuth reliability** section reports whether credential storage is writable, whether refresh
 single-flight/lock files can be created under `OPENCODEX_HOME`, non-healthy OAuth or Codex pool
@@ -440,36 +475,43 @@ ocx codex-shim status
 ocx codex-shim uninstall
 ```
 
+:::note[Windows token environment]
+Newly generated Windows CMD and PowerShell shims restore the caller's `OPENCODEX_API_AUTH_TOKEN` after execution. Codex and its child processes can still inherit the token.
+
+After updating OpenCodex, recreate an existing Windows shim with `ocx codex-shim uninstall` followed by `ocx codex-shim install` to obtain this behavior. An ordinary update does not rewrite a healthy Windows shim.
+:::
+
 :::tip[Service vs Shim]
 Use `ocx service` for an always-on background proxy (recommended). Use `ocx codex-shim` for
 lightweight, on-demand startup without a daemon — the proxy starts only when `codex` is launched.
 :::
 
-#### Token injection without the shim
+#### Token injection into Codex
 
 On a non-loopback bind the injected provider carries `env_key = "OPENCODEX_API_AUTH_TOKEN"`. That
 line tells Codex which variable to read; it does not create it. Codex refuses to start a request
 when the variable is missing (`Missing environment variable: OPENCODEX_API_AUTH_TOKEN`), and the
-proxy is never reached. The value lives in `$OPENCODEX_HOME/service-api-token`; only a process that
-exports it into Codex's environment closes the gap.
+proxy is never reached. The value lives in `$OPENCODEX_HOME/service-api-token`; the launching process
+must supply it in Codex's environment.
 
-What does carry the token into a Codex process:
+Use the maintained shim installed by `ocx codex-shim install`. When the launching context resolves
+this shim, it reads the token file created by OpenCodex and supplies the variable to Codex.
+Desktop, cron, and service launches must use a PATH or launcher path that selects the shim;
+installation does not configure those environments automatically. Codex's own child processes
+may still inherit the token.
 
-- the shim installed by `ocx codex-shim install` (reads the token file at launch; the supported path
-  for Codex started from shells, Desktop, cron, or another service);
-- exporting `OPENCODEX_API_AUTH_TOKEN` yourself in the process that starts Codex — a shell profile,
-  the cron line, or an `Environment=`/`EnvironmentFile=` on the systemd unit that launches
-  **Codex** (not the proxy). Point it at the existing token file; do not copy the value into
-  `config.toml`.
+Do not export this bearer token from a shell startup file or copy it into `config.toml`. The
+`service-api-token` file contains the raw token, not `NAME=value` assignments, so it cannot be used
+directly as a systemd `EnvironmentFile=`.
 
-What does not: an `EnvironmentFile=` or `OCX_API_TOKEN_FILE` on `opencodex-proxy.service`. Those
-configure the proxy process only and never flow into an independently launched `codex exec`.
+An `EnvironmentFile=` or `OCX_API_TOKEN_FILE` on `opencodex-proxy.service` configures the proxy process
+only and never flows into an independently launched `codex exec`.
 
 A Codex upgrade that replaces the launcher removes the shim; the next ordinary `ocx` command restores
 it (see above), but a `codex exec` that runs before that fails. `ocx doctor` reports this exact
 state under "Codex env_key launch readiness" (env_key configured, variable unset, shim missing or
 unhealthy, token file present) with the repair command, and never prints the token. Reading the token
-file directly from Codex is not something Codex supports, so there is no OpenCodex directive for it.
+file is not part of the injected `env_key` contract; the launching process must supply that variable.
 
 ### `ocx tray <install|start|stop|status|uninstall|remove> [--json] [--no-start]`
 

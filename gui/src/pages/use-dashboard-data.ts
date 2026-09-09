@@ -70,7 +70,7 @@ type CachedOverview = {
 
 type MaMode = "v1" | "default" | "v2";
 
-type CodexPreference = "codexAutoStart" | "codexDesktopAuthless";
+type CodexPreference = "codexAutoStart" | "codexDesktopAuthless" | "codexClientCompaction";
 type DashboardSettingsState = {
   settings: SettingsData | null;
   beforeSave: SettingsData | null;
@@ -81,7 +81,6 @@ type DashboardSettingsAction =
   | { type: "save-succeeded"; key: CodexPreference; settings: SettingsData }
   | { type: "save-failed" }
   | { type: "save-finished" }
-  | { type: "server-saved"; server: NonNullable<SettingsData["server"]> }
   | { type: "applied" };
 
 // Own both server snapshots and the local save/apply transaction. A poll has no
@@ -107,7 +106,9 @@ function dashboardSettingsReducer(state: DashboardSettingsState, action: Dashboa
         settings: {
           ...state.settings,
           [action.key]: action.settings[action.key],
-          catalogRefreshPending: action.key === "codexDesktopAuthless" ? true : state.settings.catalogRefreshPending,
+          catalogRefreshPending: action.key === "codexDesktopAuthless" || action.key === "codexClientCompaction"
+            ? true
+            : state.settings.catalogRefreshPending,
           startupHealth: action.settings.startupHealth ?? state.settings.startupHealth,
         },
       };
@@ -115,9 +116,6 @@ function dashboardSettingsReducer(state: DashboardSettingsState, action: Dashboa
       return state.beforeSave ? { ...state, settings: state.beforeSave } : state;
     case "save-finished":
       return { ...state, beforeSave: null };
-    case "server-saved":
-      if (!state.settings) return state;
-      return { ...state, settings: { ...state.settings, server: action.server } };
     case "applied":
       return state.settings ? { ...state, settings: { ...state.settings, catalogRefreshPending: false } } : state;
   }
@@ -216,6 +214,7 @@ export function useDashboardData(apiBase: string) {
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updateJob, setUpdateJob] = useState<UpdateJob | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
+  const [error, setError] = useState(false);
   const effortCapHelpTriggerRef = useRef<HTMLButtonElement>(null);
   const updateTriggerRef = useRef<HTMLButtonElement>(null);
   const maHelpTriggerRef = useRef<HTMLButtonElement>(null);
@@ -281,9 +280,6 @@ export function useDashboardData(apiBase: string) {
     { pollMs: 5000 },
   );
   const overviewReady = health !== null || overviewPoll.data !== undefined;
-  // A cold failure replaces the page; later failures retain the last good overview.
-  const error = overviewPoll.error !== undefined && health === null && !overviewPoll.hasSucceeded;
-  const overviewReconnecting = overviewPoll.error !== undefined && !error;
 
   // Preferences that are just config — never gate on overview or injection.
   const maModePoll = useKeyedClientResource(
@@ -374,6 +370,7 @@ export function useDashboardData(apiBase: string) {
         providers: data.providers,
       });
     }
+    setError(data.error);
   }, [overviewPoll.data, apiBase]);
 
   useEffect(() => {
@@ -682,36 +679,19 @@ export function useDashboardData(apiBase: string) {
       const data = await requireJson<SettingsData>(res, "save failed");
       settingsMutationEpochRef.current += 1;
       dispatchSettings({ type: "save-succeeded", key, settings: data });
-      if (key === "codexDesktopAuthless") await runSync();
-    } catch (err) {
+      if (key === "codexDesktopAuthless" || key === "codexClientCompaction") await runSync();
+    } catch {
       dispatchSettings({ type: "save-failed" });
-      setSyncError(err instanceof Error ? err.message : String(err));
+      setError(true);
     } finally {
       settingsMutationInFlightRef.current = false;
       dispatchSettings({ type: "save-finished" });
     }
   };
 
-  const saveServerSettings = async (
-    server: NonNullable<SettingsData["server"]>["configured"],
-  ): Promise<NonNullable<SettingsData["server"]>> => {
-    settingsMutationInFlightRef.current = true;
-    try {
-      const res = await fetch(`${apiBase}/api/settings`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ server }),
-      });
-      const data = await requireJson<{ server: NonNullable<SettingsData["server"]> }>(res, t("dash.serverSaveFailed"));
-      settingsMutationEpochRef.current += 1;
-      dispatchSettings({ type: "server-saved", server: data.server });
-      return data.server;
-    } finally {
-      settingsMutationInFlightRef.current = false;
-    }
-  };
   const toggleCodexAutoStart = () => toggleCodexSetting("codexAutoStart");
   const toggleCodexDesktopAuthless = () => toggleCodexSetting("codexDesktopAuthless");
+  const toggleCodexClientCompaction = () => toggleCodexSetting("codexClientCompaction");
 
   // Clears the sync result/error in this hook. The dashboard toast owns its own dismissal
   // timer but must publish the dismissal here: syncResult/syncError live above the dashboard
@@ -870,13 +850,12 @@ export function useDashboardData(apiBase: string) {
     effortCap, subagentEffortCap, effortCapSaving, setEffortCap, setSubagentEffortCap, setEffortCapSaving,
     syncResult, syncError, projectConfigWarnings,
     updateOpen, updateChannel, setUpdateRestart, updateRestart, updateLoading,
-    updateCheck, updateError, updateJob, reconnecting, error, overviewReconnecting,
-    retryOverview: overviewPoll.refresh,
+    updateCheck, updateError, updateJob, reconnecting, error,
     effortCapHelpTriggerRef, updateTriggerRef, maHelpTriggerRef, shadowCallHelpTriggerRef,
     effortCapHelpDialogRef, updateDialogRef, maHelpDialogRef, shadowCallHelpDialogRef,
     filteredGroups, sidecarModels, visionModels,
     saveSidecar, saveShadowCall, switchMaMode, toggleCodexAutoStart, toggleCodexDesktopAuthless,
-    saveServerSettings, runSync, clearSyncFeedback,
+    toggleCodexClientCompaction, runSync, clearSyncFeedback,
     fetchUpdateCheck, closeUpdateDialog, openUpdateDialog, changeUpdateChannel, runUpdate,
   };
 }
