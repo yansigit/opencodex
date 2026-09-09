@@ -1,5 +1,5 @@
 import {
-  closeSync, constants, fchmodSync, fstatSync, linkSync, lstatSync,
+  closeSync, fchmodSync, fstatSync, linkSync, lstatSync,
   openSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
@@ -15,10 +15,12 @@ export class InitialConfigPublicationError extends Error {
     readonly publication: PublicationState,
     readonly residualTemp: boolean,
     readonly hardLinkUnavailable: boolean,
-    options?: ErrorOptions,
+    options?: ErrorOptions & { hardeningFailed?: boolean },
   ) {
-    super(hardLinkUnavailable
-      ? "Initial config requires hard-link publication; the filesystem or its permissions denied it."
+    super(options?.hardeningFailed
+      ? "Initial config permissions could not be secured. Choose an OPENCODEX_HOME location that supports private file permissions (NTFS ACLs on Windows), then rerun `ocx init`."
+      : hardLinkUnavailable
+      ? "Initial config requires hard-link publication; the filesystem or its permissions denied it. Inspect the config directory before retrying. Choose an OPENCODEX_HOME location that supports hard links and private file permissions, then rerun `ocx init`."
       : "Initial config publication did not finish.", options);
     this.name = "InitialConfigPublicationError";
   }
@@ -104,10 +106,13 @@ export function publishInitialConfigNoReplace(
   let failure: unknown;
   let failed = false;
   let hardLinkUnavailable = false;
+  let hardeningFailed = false;
   let residualTemp = false;
   try {
-    fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+    fd = openSync(temp, "wx", 0o600);
+    hardeningFailed = true;
     (io.harden ?? hardenInitialConfig)(fd, temp, target);
+    hardeningFailed = false;
     verifyPrivateTemp(fd, temp);
     (io.write ?? ((descriptor: number, value: string) => writeFileSync(descriptor, value, { encoding: "utf8" })))(fd, bytes);
     verifyPrivateTemp(fd, temp);
@@ -143,7 +148,7 @@ export function publishInitialConfigNoReplace(
     }
   }
   if (failed || residualTemp) {
-    throw new InitialConfigPublicationError(publication, residualTemp, hardLinkUnavailable, { cause: failure });
+    throw new InitialConfigPublicationError(publication, residualTemp, hardLinkUnavailable, { cause: failure, hardeningFailed });
   }
   return !collided;
 }

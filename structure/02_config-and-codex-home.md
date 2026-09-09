@@ -20,6 +20,16 @@ $CODEX_HOME/.opencodex-native-main-profiles/
 Never assume macOS-only paths. Windows, service installs, and app-launched Codex can all depend on
 the resolved `CODEX_HOME`.
 
+Journal restoration compares config and profile independently against their saved originals and
+recorded injected hashes. If either changed artifact lacks its injected hash, the config/profile
+pair and journal remain untouched and the result is explicitly unverified; callers must not
+convert that refusal into successful fallback cleanup. Already-original bytes need no rewrite,
+and absence is distinct from an empty file. The injector checks a retained hashless journal against
+the same `baselineContent` it snapshots, plus the current profile, before writing or assigning a new
+injected hash. Native content can establish a fresh snapshot; routed content cannot promote an
+unverified older original. Existing hash-backed edit preservation and external-provider opt-out
+remain separate paths.
+
 The source-built Docker image explicitly keeps `CODEX_HOME=/home/bun/.codex` separate
 from `OPENCODEX_HOME=/home/bun/.opencodex`. Compose persists them in `codex-state` and
 `ocx-state` respectively, retaining a read-only root. The image creates owner-only
@@ -283,6 +293,12 @@ and publication followed by a later failure can leave a complete config or priva
 `saveConfig` replacement behavior remains unchanged. This protects init-time config bytes, not a
 foreign winner's ownership under future uninstall; the existing ownership manifest and global CLI
 shim preflight keep their separate contracts.
+
+Initial publication diagnostics distinguish required permission-hardening failures from denied
+hard-link publication without exposing raw filesystem causes. Both identify `OPENCODEX_HOME`
+as the supported-location recovery path; uncertain publication and cleanup warnings remain in
+the CLI. The quickstart documents inspection before retry, private-permission requirements,
+and fresh-location examples. Diagnostics do not introduce a fallback or alter file I/O ordering.
 
 `src/config/paths.ts` is the single owner of `OPENCODEX_HOME` expansion and resolution. It exposes
 the config directory and `config.json` path and retains the existing cache rule: a relative home is

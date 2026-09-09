@@ -116,11 +116,15 @@ published long-context bands on `openai` and `openai-apikey`. The two Daybreak B
 follow the Sol API reference. These are comparison estimates, not invoices or credit-balance
 predictions. Explicit provider/model price overrides still take precedence.
 
+## Provider namespace aliases
+
+Providers can expose a built-in shorthand, such as `agy` for `google-antigravity`. A configured provider name or explicit alias claims that shorthand case-insensitively; a different provider's built-in shorthand is then suppressed in both catalog names and alias routing. For example, configuring a provider named `agy` keeps Google's models under `google-antigravity/<model>`, while `agy/<model>` selects the configured provider. Canonical provider names still require an exact case match, and unrecognized prefixes retain the existing model-routing fallback.
+
 ## Provider entries (`OcxProviderConfig`)
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `adapter` | `string` | One of `openai-chat`, `openai-responses`, `anthropic`, `google`, `kiro`, `cursor`, `ollama-native`, `azure-openai` (or alias `azure`). |
+| `adapter` | `string` | One of `openai-chat`, `openai-responses`, `anthropic`, `google`, `kiro`, `cursor`, `ollama-native`, `azure-openai` (or alias `azure`), `codebuddy`, `qoder`. |
 | `baseUrl` | `string` | Upstream API base URL. Most built-in fixed endpoints ignore a mismatch; collision-safe key presets preserve an older same-named custom destination. |
 | `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, jitterMs?, models? }` | Optional client-side outbound request-start pacing, separate from upstream usage, billing, and rate-limit indicators. RPM is converted to an even interval; `minIntervalMs` may impose a longer interval; `jitterMs` adds only a positive random delay (0–60,000 ms). Provider limits apply across all models, while `models` entries use exact upstream model IDs and can only add delay. Queue waits do not consume the upstream response-header timeout. HTTP, Responses WebSocket, and explicit adapter `fetchResponse`/`runTurn` dispatches are covered. |
 | `tlsProfile?` | `"antigravity-browser"` | Explicit, experimental Antigravity-only TLS/HTTP2 compatibility profile. It requires Google OAuth Cloud Code Assist and canonical Antigravity hosts. It is unofficial, does not ensure Terms-of-Service compliance or prevent suspension, may make traffic more distinctive, and falls back to Bun if initialization fails. OAuth/token/onboarding traffic remains on standard Bun TLS. Prefer official Gemini API-key, Vertex, or documented Code Assist routes when policy safety matters. |
@@ -950,6 +954,32 @@ ids with context `922000` and max input `922000`; OpenRouter seeds `openai/gpt-5
 }
 ```
 
+## OpenCode Go Responses compatibility
+
+On non-forward requests whose resolved endpoint is `https://opencode.ai/zen/go/v1/responses`, OpenCodex moves
+Codex's `additional_tools` input declarations into top-level `tools` after tool and namespace
+normalization. Supported hosted tools are preserved until model-specific filtering; malformed
+wrappers remain unchanged. This does not discard ciphertext or unknown agent-message content.
+The check uses the final URL, so endpoint-inclusive base URLs and split `baseUrl`/`responsesPath`
+configurations receive the same behavior. A custom path resolving elsewhere does not.
+
+The canonical `opencode-go` preset defaults to `statelessResponses: true`: requests use explicit
+history with `store: false`, without `previous_response_id`, `conversation`, `background`,
+`metadata`, or stored `prompt` references. This avoids Go's rejection of reasoning ciphertext
+combined with `previous_response_id`. The continuation cache records reasoning in the same
+representation returned to the client, including the visible content-to-summary rewrite, so
+echoing full history with `previous_response_id` does not duplicate that history. Hidden-summary
+requests and opaque reasoning blobs retain their existing representation. Cache hits can also
+supply earlier history for delta continuations;
+after a cache miss, resend the complete conversation without `previous_response_id`. Stateless
+repair labels orphan results and missing tool results; it cannot reconstruct lost history or
+prove whether a missing tool execution succeeded.
+
+An explicit `statelessResponses: false` is preserved. Existing canonical preset configurations
+receive the default only when the setting is absent; custom renamed entries keep their configured
+value and do not acquire this default by destination matching. Chat model routes keep their
+existing protocol. The stateless flag does not force Responses streaming into JSON.
+
 ## OpenCode Go reasoning efforts
 
 Go catalog rows preserve their configured reasoning efforts exactly, including during
@@ -969,14 +999,21 @@ their previous behavior. See the
 [ordering migration note](/guides/model-ordering/#migration-note-native-ids-in-existing-orders).
 `modelDisplayNames` on a provider controls readable labels without changing wire ids.
 
-## OpenCode Go session and agent messages
+## Routed agent messages
 
-With the [`openai-responses` adapter](/reference/adapters/#openai-responses) and
-base URL `https://opencode.ai/zen/go/v1`, plaintext Codex `agent_message` items
-become user messages when `authMode` is not `"forward"` (for example, `"key"`).
-Providers using `authMode: "forward"` retain these items unchanged. This conversion is scoped to that destination, including
-renamed provider entries; other Responses destinations keep their input unchanged.
+With the [`openai-responses` adapter](/reference/adapters/#openai-responses), Codex
+`agent_message` items containing nonempty arrays of supported plaintext parts become user messages when `authMode` is not `"forward"`
+(for example, `"key"`). Providers using `authMode: "forward"` retain these items unchanged.
+`agent_message` is private to the ChatGPT Codex backend, and the routed destinations
+reported so far answer the whole request with
+`422 unknown item type "agent_message"`; Codex replays sub-agent history on every
+subsequent turn, so the thread keeps failing until the item is converted.
 Author and recipient remain explicit text metadata, and the content parts are preserved.
+For HTTPS `api.x.ai` and `cli-chat-proxy.grok.com` on the standard port, non-forward
+Responses dispatch also accepts a nonblank string child result and turns it into one
+`input_text` part. The original string, including leading/trailing whitespace and newlines,
+is preserved. Other destinations keep string-valued agent messages unchanged. Empty or
+whitespace-only strings remain unchanged, as do incomplete and mixed encrypted/unknown shapes.
 Encrypted and unknown content is not normalized; native encrypted tasks still require the
 separate opt-in [task recovery](/reference/configuration/agents/#encrypted-v2-task-recovery).
 
@@ -994,6 +1031,6 @@ current tail message (ignoring trailing `compaction_trigger` or `additional_tool
 It does not batch-recover unseen historical messages; those remain unchanged. A cache miss
 or expiry does not extend the history-recovery contract.
 
-Sender and recipient on Go Responses are context for the receiving model, not a new
+Sender and recipient on routed Responses are context for the receiving model, not a new
 machine-readable routing protocol. Tool routing continues to use the existing collaboration
 contracts.

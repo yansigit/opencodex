@@ -3,6 +3,7 @@ import { existsSync, mkdirSync} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setFetchCursorUsableModelsForTests } from "../../src/adapters/cursor/live-models";
+import { setFetchQoderModelsForTests } from "../../src/adapters/qoder/live-models";
 import { handleManagementAPI } from "../../src/server/management-api";
 import { saveConfig } from "../../src/config";
 import { OAUTH_PROVIDERS } from "../../src/oauth";
@@ -24,6 +25,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setFetchCursorUsableModelsForTests(null);
+  setFetchQoderModelsForTests(null);
   globalThis.fetch = originalFetch;
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
@@ -54,6 +56,38 @@ async function probe(config: OcxConfig, name: string): Promise<{ status: number;
 }
 
 describe("POST /api/providers/test (WP040 connectivity probe)", () => {
+  test("Qoder probes the official CLI model list for the configured PAT", async () => {
+    const calls: Array<{ providerId: string; token: string }> = [];
+    setFetchQoderModelsForTests((profile, token) => {
+      calls.push({ providerId: profile.providerId, token });
+      return { ok: true, models: ["Qwen3.8-Max", "GLM-5.3"] };
+    });
+    const config = baseConfig({
+      qoder: { adapter: "qoder", baseUrl: "https://qoder.com", apiKey: "qoder-pat", authMode: "key", liveModels: true },
+    });
+
+    const { body } = await probe(config, "qoder");
+
+    expect(body).toMatchObject({ ok: true, models: 2, message: "Connected. 2 models." });
+    expect(calls).toEqual([{ providerId: "qoder", token: "qoder-pat" }]);
+  });
+
+  test("Qoder CN probes its own CLI profile and PAT", async () => {
+    const calls: Array<{ providerId: string; token: string }> = [];
+    setFetchQoderModelsForTests((profile, token) => {
+      calls.push({ providerId: profile.providerId, token });
+      return { ok: true, models: ["Qwen3.8-Flash"] };
+    });
+    const config = baseConfig({
+      "qoder-cn": { adapter: "qoder", baseUrl: "https://qoder.cn", apiKey: "cn-pat", authMode: "key", liveModels: true },
+    });
+
+    const { body } = await probe(config, "qoder-cn");
+
+    expect(body).toMatchObject({ ok: true, models: 1, message: "Connected. 1 models." });
+    expect(calls).toEqual([{ providerId: "qoder-cn", token: "cn-pat" }]);
+  });
+
   test("Cursor probes GetUsableModels and reports the live model count", async () => {
     const calls: { apiKey: string; baseUrl?: string }[] = [];
     setFetchCursorUsableModelsForTests(async options => {
@@ -314,6 +348,40 @@ describe("POST /api/providers/test (WP040 connectivity probe)", () => {
       expect(body.ok).toBe(true);
       expect(body.models).toBe(1);
     });
+  });
+
+  test("Nous probe accepts 390 synthetic paid/free rows above 256 KiB (#3939)", async () => {
+    const payload = JSON.stringify({
+      data: Array.from({ length: 390 }, (_, index) => ({
+        id: index === 0 ? "tencent/hy3:free" : `vendor/model-${index}`,
+        metadata: { description: "x".repeat(1_400) },
+      })),
+    });
+    const bytes = new TextEncoder().encode(payload).byteLength;
+    expect(bytes).toBeGreaterThan(262_144);
+    expect(bytes).toBeLessThan(1_048_576);
+    let fetches = 0;
+    globalThis.fetch = (async (input, init) => {
+      fetches += 1;
+      expect(String(input)).toBe("https://inference-api.nousresearch.com/v1/models");
+      expect(init?.method ?? "GET").toBe("GET");
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer access-token-nous-probe-fixture");
+      return new Response(payload, { headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    await saveCredential("nous", {
+      access: "access-token-nous-probe-fixture",
+      refresh: "nous-probe-fixture-refresh",
+      expires: Date.now() + 3_600_000,
+    });
+    const config = baseConfig({
+      nous: { ...structuredClone(OAUTH_PROVIDERS.nous!.providerConfig) },
+    });
+
+    const { status, body } = await probe(config, "nous");
+
+    expect(status).toBe(200);
+    expect(fetches).toBe(1);
+    expect(body).toMatchObject({ ok: true, models: 390 });
   });
 
   test("Google's models-array response shape is accepted (x-goog-api-key path)", async () => {

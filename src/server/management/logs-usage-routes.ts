@@ -419,6 +419,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
         bytes: result.bytes,
         ...(result.trashDir ? { trashDir: result.trashDir } : {}),
         removedPaths: result.removedPaths,
+        ...(result.skippedReferencedPaths?.length ? { skippedReferencedPaths: result.skippedReferencedPaths } : {}),
       });
     } catch {
       return jsonResponse({

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { saveConfigPreservingClaudeCode } from "../config";
-import { isCodexAccountGenerationLive, readCodexAccountRecord } from "./account-store";
+import { isCodexAccountGenerationLive, readCodexAccountRecord, type CodexRefreshProvenance } from "./account-store";
 import { codexAccountLogLabel } from "./account-label";
 import { NATIVE_RESERVE_MODEL } from "./catalog/native-models";
 import { isCodexAccountPaused } from "./account-pause";
@@ -373,8 +373,6 @@ function deleteScopedHealth(accountId: string, scope: CodexQuotaScope): void {
 export function computeCodexUsageScore(quota: {
   weeklyPercent?: number;
   monthlyPercent?: number;
-  fiveHourPercent?: number;
-  fiveHourResetAt?: number;
   shortPercent?: number;
   shortResetAt?: number;
   shortObservedAt?: number;
@@ -396,28 +394,10 @@ export function computeCodexUsageScore(quota: {
   // right now, whatever its monthly position turns out to be. Unknown-means-selectable is
   // correct for uncertainty and wrong for a measured refusal: the account stays selected,
   // `applyQuotaAutoSwitch` never fires, and the pool wedges on an exhausted credential.
-  // `fiveHour*` is the public compatibility alias for the canonical `short*` tuple.
-  // Some callers and hydrated snapshots legitimately carry only that alias, so collapse both
-  // shapes before applying the shared freshness rule rather than silently discarding evidence.
-  const burst = {
-    shortPercent: quota.fiveHourPercent ?? quota.shortPercent,
-    shortResetAt: quota.fiveHourResetAt ?? quota.shortResetAt,
-    shortObservedAt: quota.shortObservedAt,
-  };
   if (knownLong.length === 0) {
-    return isTerminalShortWindow(burst, now) ? CODEX_EXHAUSTED_USAGE_PERCENT : CODEX_UNKNOWN_USAGE_SCORE;
+    return isTerminalShortWindow(quota, now) ? CODEX_EXHAUSTED_USAGE_PERCENT : CODEX_UNKNOWN_USAGE_SCORE;
   }
-  // A terminal burst reading is useful only while its own freshness evidence says the
-  // window is still live. This applies even when a weekly/monthly bar is also known:
-  // otherwise a canonical short-primary + weekly-secondary snapshot remains scored at
-  // 100 forever after the short reset, and both Pool and subagent routing strand a
-  // recovered account. Non-terminal short readings retain their historical refinement
-  // behaviour; only a measured refusal needs the stricter freshness gate.
-  const shortPercent = finite(burst.shortPercent)
-    && (burst.shortPercent < CODEX_EXHAUSTED_USAGE_PERCENT || isTerminalShortWindow(burst, now))
-    ? burst.shortPercent
-    : undefined;
-  const values = shortPercent !== undefined ? [...knownLong, shortPercent] : knownLong;
+  const values = finite(quota.shortPercent) ? [...knownLong, quota.shortPercent] : knownLong;
   return Math.max(...values);
 }
 
@@ -662,6 +642,80 @@ export function claimDueCodexQuotaRecoveryProbes(
   });
 }
 
+type CooldownRecoveryLease = Pick<CodexQuotaRecoveryProbeClaim,
+  "accountId" | "scope" | "leaseId" | "cooldownGeneration">;
+
+export type ManualResetCooldownClaim =
+  | { kind: "pool"; probe: CodexQuotaRecoveryProbeClaim }
+  | { kind: "main"; probe: CooldownRecoveryLease };
+
+function manualResetAccountEligible(config: OcxConfig, accountId: string): boolean {
+  return !isCodexAccountPaused(config, accountId) && !isAccountNeedsReauth(accountId)
+    && (accountId === MAIN_CODEX_ACCOUNT_ID
+      || (config.codexAccounts ?? []).some(account => account.id === accountId && isSelectableCodexPoolAccount(account)));
+}
+
+/** Explicit reset bypasses probe pacing, never another owner's lease or quota scope. */
+export function claimManualResetCooldowns(
+  config: OcxConfig,
+  accountId: string,
+  now = Date.now(),
+  expectedPoolGeneration?: number,
+): ManualResetCooldownClaim[] {
+  if (!manualResetAccountEligible(config, accountId)) return [];
+  const record = accountId === MAIN_CODEX_ACCOUNT_ID ? undefined : readCodexAccountRecord(accountId);
+  if (accountId !== MAIN_CODEX_ACCOUNT_ID && (!record?.credential || record.deletedAt != null)) return [];
+  if (record && expectedPoolGeneration !== undefined && record.generation !== expectedPoolGeneration) return [];
+  const claims: ManualResetCooldownClaim[] = [];
+  for (const scope of [undefined, "shared"] as const) {
+    const health = scope ? scopedHealthFor(accountId, scope) : upstreamHealth.get(accountId);
+    if (!health || health.cooldownSource !== "reset-derived" || health.probeLeaseId !== undefined
+      || !Number.isFinite(health.cooldownUntil) || !(health.cooldownUntil! > now)) continue;
+    const leaseId = randomUUID();
+    const cooldownGeneration = health.cooldownGeneration ?? 0;
+    const next = { ...health, probeLeaseId: leaseId, probeLeaseGeneration: cooldownGeneration, lastProbeAt: now };
+    if (scope) setScopedHealth(accountId, scope, next);
+    else upstreamHealth.set(accountId, next);
+    const probe = { accountId, scope, leaseId, cooldownGeneration };
+    claims.push(record ? { kind: "pool", probe: {
+      ...probe, credentialGeneration: record.generation, credentialReplacedAt: record.replacedAt,
+    } } : { kind: "main", probe });
+  }
+  return claims;
+}
+
+export type ManualResetRefreshLineage = Readonly<{
+  fromGeneration: number;
+  toGeneration: number;
+  provenance: CodexRefreshProvenance;
+}>;
+
+type ManualResetQuotaProof = CodexQuotaRecoveryProbeProof & {
+  refreshLineage?: ManualResetRefreshLineage;
+};
+
+/** Main proof is checked by the already-owned auth operation, never by a Pool record. */
+export function settleManualResetCooldown(
+  config: OcxConfig,
+  claim: ManualResetCooldownClaim,
+  recovered: boolean,
+  proof: ManualResetQuotaProof = {},
+  now = Date.now(),
+): boolean {
+  if (!recovered) return settleCooldownRecoveryLease(claim.probe, false, now);
+  const eligible = manualResetAccountEligible(config, claim.probe.accountId);
+  if (claim.kind === "main") return settleCooldownRecoveryLease(claim.probe, eligible, now);
+  const lineage = proof.refreshLineage;
+  // Equal wall-clock replacement stamps do not establish ancestry. Manual +1
+  // recovery additionally needs the actual forced-refresh result for this edge.
+  const ownedGeneration = proof.credentialGeneration === claim.probe.credentialGeneration
+    || (proof.credentialGeneration === claim.probe.credentialGeneration + 1
+      && lineage?.fromGeneration === claim.probe.credentialGeneration
+      && lineage.toGeneration === proof.credentialGeneration
+      && (lineage.provenance === "self-refresh" || lineage.provenance === "joined-lineage"));
+  return settleCodexQuotaRecoveryProbe(claim.probe, eligible && ownedGeneration, proof, now);
+}
+
 /** Settle one background recovery claim without mutating account-wide outcome state. */
 export function settleCodexQuotaRecoveryProbe(
   claim: CodexQuotaRecoveryProbeClaim,
@@ -685,9 +739,16 @@ export function settleCodexQuotaRecoveryProbe(
       : proofGeneration === claim.credentialGeneration + 1
         && currentRecord?.replacedAt === claim.credentialReplacedAt
         && isCodexAccountGenerationLive(claim.accountId, proofGeneration));
-  const fenced = (health.cooldownGeneration ?? 0) === claim.cooldownGeneration
-    && (health.probeLeaseGeneration ?? 0) === claim.cooldownGeneration
-    && generationFenced;
+  return settleCooldownRecoveryLease(claim, recovered && generationFenced, now);
+}
+
+function settleCooldownRecoveryLease(claim: CooldownRecoveryLease, recovered: boolean, now: number): boolean {
+  const health = claim.scope ? scopedHealthFor(claim.accountId, claim.scope) : upstreamHealth.get(claim.accountId);
+  if (!health || health.probeLeaseId !== claim.leaseId) return false;
+  const fenced = (claim.scope === undefined || claim.scope === "shared")
+    && health.cooldownSource === "reset-derived"
+    && (health.cooldownGeneration ?? 0) === claim.cooldownGeneration
+    && (health.probeLeaseGeneration ?? 0) === claim.cooldownGeneration;
   if (!recovered || !fenced) {
     const released = withProbeLeaseReleased(health, now);
     if (claim.scope) setScopedHealth(claim.accountId, claim.scope, released);
@@ -1653,26 +1714,24 @@ function releaseDrainedCodexAccountPin(
     "nativeMainSelectionOnly" | "isMainAccountTokenLive"
   >,
   now: number = Date.now(),
-  persist = true,
-): boolean {
+): void {
   const pinned = pinnedCodexAccountId(config);
-  if (pinned === undefined) return false;
+  if (pinned === undefined) return;
   const knownUnavailable = isAccountNeedsReauth(pinned) || isCodexAccountPaused(config, pinned);
   if (knownUnavailable) {
     clearCodexAccountPin(config);
-    if (persist) saveConfigPreservingClaudeCode(config);
-    return true;
+    saveConfigPreservingClaudeCode(config);
+    return;
   }
   // Temporary drain deliberately forbids every native-main read. A pin on main
   // cannot be classified by credential liveness or quota until the fenced profile
   // is readable. Cached reauth and configured pause state were handled above.
-  if (pinned === MAIN_CODEX_ACCOUNT_ID && selectionOptions?.nativeMainSelectionOnly === true) return false;
+  if (pinned === MAIN_CODEX_ACCOUNT_ID && selectionOptions?.nativeMainSelectionOnly === true) return;
   const drained = !isCodexAccountUsable(config, pinned, selectionOptions)
     || !hasCodexQuotaHeadroom(config, pinned, selectionOptions, now);
-  if (!drained) return false;
+  if (!drained) return;
   clearCodexAccountPin(config);
-  if (persist) saveConfigPreservingClaudeCode(config);
-  return true;
+  saveConfigPreservingClaudeCode(config);
 }
 
 function applyQuotaAutoSwitch(
@@ -1968,15 +2027,6 @@ export function resolveCodexAccountForThreadDetailed(
   selectionOptions?: CodexAccountUsabilityOptions,
   modelId?: string,
 ): CodexThreadResolution {
-  const persistedActiveBeforePinRelease = config.activeCodexAccountId;
-  const releasedDrainedPin = !isIndependentCodexQuotaScope(quotaScope)
-    && releaseDrainedCodexAccountPin(
-      config,
-      sharedStateSelectionOptions(selectionOptions),
-      now,
-      false,
-    );
-  try {
   // An entitlement roster constrains only this model request. It must not rewrite
   // the operator's shared active/pin choice or the task's ordinary-model affinity.
   const modelScopedSelection = selectionOptions?.modelEligibleAccountIds !== undefined;
@@ -1988,6 +2038,9 @@ export function resolveCodexAccountForThreadDetailed(
   // keeps its account below, but the operator's tier ceiling must not silently
   // revive after quota resets. Independent model scopes must never persist a
   // change to shared routing state.
+  if (!isIndependentCodexQuotaScope(quotaScope)) {
+    releaseDrainedCodexAccountPin(config, sharedStateSelectionOptions(selectionOptions), now);
+  }
   const sharedActiveBeforeSelection = getEffectiveActiveCodexAccountId(config);
   const preserveSharedSelectionForModelDetour = modelScopedSelection && (
     sharedActiveBeforeSelection === undefined
@@ -2222,13 +2275,6 @@ export function resolveCodexAccountForThreadDetailed(
     }
   }
   return { status: "selected", accountId: active };
-  } finally {
-    // A later quota/failure promotion persists both mutations in one write. If routing kept the
-    // same persisted account, this deferred write is the sole pin retirement write.
-    if (releasedDrainedPin && config.activeCodexAccountId === persistedActiveBeforePinRelease) {
-      saveConfigPreservingClaudeCode(config);
-    }
-  }
 }
 
 export function recordCodexUpstreamOutcome(
