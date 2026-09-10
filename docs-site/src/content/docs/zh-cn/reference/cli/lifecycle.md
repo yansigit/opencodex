@@ -53,6 +53,10 @@ ocx eject back
 
 这是范围很广且具有破坏性的重标记：所有包含用户消息且当前标记为 `opencodex` 的线程都会改标为 `openai`，`exec` 会规范化为 `cli`，并设置事件标记。正常的专用提供方历史记录也在范围内。请先备份状态，并且仅在确实需要这一完整范围时执行。
 
+### `ocx recover-history --ocx-compaction <thread-id> --yes`
+
+在通过原生 Codex 恢复某个曾由路由提供方压缩的任务前，修复该任务的历史记录。此命令按 UUID 精确选择一个任务，先保存私有的逐字节备份，然后仅将 OpenCodeX 自有的 `ocx1:` 压缩状态转换为原生 Codex 可重放的普通摘要。原生加密内容和其他任务保持不变。运行前请关闭所选任务；如果 rollout 在处理期间发生变化，恢复会停止且不会替换原文件。
+
 ### `ocx uninstall` · `ocx remove`
 
 停止服务和代理，移除服务和 Codex shim，恢复原生 Codex，然后仅在所有恢复步骤都成功时才删除 opencodex 本地配置。`remove` 是 `uninstall` 的别名。配置清理需要由全新安装创建的所有权元数据；旧版或共享目录会保留原样。
@@ -209,9 +213,27 @@ ocx codex-shim status
 ocx codex-shim uninstall
 ```
 
+:::note[Windows 令牌环境]
+新生成的 Windows CMD 和 PowerShell shim 会在执行后恢复调用方原有的 `OPENCODEX_API_AUTH_TOKEN` 状态。Codex 及其子进程仍可能继承令牌。
+
+更新 OpenCodex 后，如需让现有 Windows shim 采用此行为，请先运行 `ocx codex-shim uninstall`，再运行 `ocx codex-shim install` 重新安装。常规更新不会重写正常的 Windows shim。
+:::
+
 :::tip[Service vs Shim]
 将 `ocx service` 用于始终在线的后台代理（推荐）。将 `ocx codex-shim` 用于无需守护进程的轻量按需启动——代理只会在启动 `codex` 时运行。
 :::
+
+#### 向 Codex 注入令牌
+
+绑定到非回环地址时，注入的提供程序包含 `env_key = "OPENCODEX_API_AUTH_TOKEN"`。这一行告诉 Codex 应读取哪个变量，但不会创建该变量。如果变量不存在，Codex 会拒绝发起请求（`Missing environment variable: OPENCODEX_API_AUTH_TOKEN`），请求也不会到达代理。变量值保存在 `$OPENCODEX_HOME/service-api-token` 中；启动进程必须将其传入 Codex 的环境。
+
+请使用通过 `ocx codex-shim install` 安装且受维护的 shim。如果启动上下文选择此 shim，它会读取 OpenCodex 创建的令牌文件，并将变量传给 Codex。从桌面、cron 或服务启动时，必须使用能够选中该 shim 的 PATH 或启动器路径；安装过程不会自动配置这些环境。Codex 自身的子进程也可能继承令牌。
+
+不要在 shell 启动文件中导出此 Bearer 令牌，也不要将其复制到 `config.toml`。`service-api-token` 文件包含的是原始令牌，而不是 `NAME=value` 形式的赋值，因此不能直接用作 systemd 的 `EnvironmentFile=`。
+
+`opencodex-proxy.service` 中的 `EnvironmentFile=` 或 `OCX_API_TOKEN_FILE` 仅配置代理进程，绝不会传入独立启动的 `codex exec`。
+
+替换启动器的 Codex 升级会移除 shim；下一次执行普通的 `ocx` 命令时会将其恢复（见上文），但在此之前运行的 `codex exec` 会失败。`ocx doctor` 会在 "Codex env_key launch readiness" 项下报告这一确切状态（env_key 已配置、变量未设置、shim 缺失或不正常、令牌文件存在），并给出修复命令，且绝不会输出令牌。读取令牌文件不属于注入的 `env_key` 的约定；启动进程必须提供该变量。
 
 ### `ocx tray <install|start|stop|status|uninstall|remove> [--json] [--no-start]`
 
