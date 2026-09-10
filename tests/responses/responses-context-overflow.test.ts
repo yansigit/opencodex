@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync} from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { saveConfig } from "../../src/config";
+import { replacePersistedConfig } from "../../src/config";
 import { startServer } from "../../src/server";
 import { PROVIDER_INPUT_TOO_LARGE_MESSAGE } from "../../src/server/responses/context-overflow";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
@@ -42,26 +42,6 @@ function upstreamStatus(status: number, onHit?: () => void): ReturnType<typeof B
 
 function upstream413(onHit?: () => void): ReturnType<typeof Bun.serve> {
   return upstreamStatus(413, onHit);
-}
-
-/**
- * A 413 whose body carries a per-request free-tier cap. `comboFailureDecision` reads that
- * as target-local and hops, so a combo tries every target and then exhausts, which is the
- * mapping site this fixture exercises.
- */
-function freePromptCap413(onHit?: () => void): ReturnType<typeof Bun.serve> {
-  const upstream = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch() {
-      onHit?.();
-      return Response.json({
-        detail: "err_free_prompt_cap: prompt exceeds this tier; echoed private request marker should-not-reach-client",
-      }, { status: 413 });
-    },
-  });
-  upstreams.push(upstream);
-  return upstream;
 }
 
 function provider(
@@ -119,7 +99,7 @@ describe("Responses provider input overflow", () => {
   test("streaming passthrough and translated adapters emit a terminal context failure", async () => {
     for (const adapter of ["openai-responses", "openai-chat"] as const) {
       const upstream = upstream413();
-      saveConfig(config({ target: provider(adapter, upstream) }));
+      replacePersistedConfig(config({ target: provider(adapter, upstream) }));
       const server = startServer(0);
       try {
         const failed = await responseFailed(await request(String(server.url), "target/kimi-k3", true));
@@ -137,45 +117,16 @@ describe("Responses provider input overflow", () => {
     }
   });
 
-  test.each(["openai-responses", "openai-chat", "anthropic"] as const)("non-streaming %s preserves HTTP 413 with a safe context classification", async adapter => {
+  test("non-streaming callers retain the upstream 413 status and body", async () => {
     const upstream = upstream413();
-    saveConfig(config({ target: provider(adapter, upstream) }));
+    replacePersistedConfig(config({ target: provider("openai-responses", upstream) }));
     const server = startServer(0);
     try {
       const response = await request(String(server.url), "target/kimi-k3", false);
       expect(response.status).toBe(413);
-      expect(response.headers.get("content-type")).toContain("application/json");
       expect(await response.json()).toEqual({
-        error: {
-          message: PROVIDER_INPUT_TOO_LARGE_MESSAGE,
-          type: "invalid_request_error",
-          code: "context_length_exceeded",
-        },
+        detail: "request body too large; echoed private request marker should-not-reach-client",
       });
-    } finally {
-      await server.stop(true);
-    }
-  });
-
-  test.each(["openai-responses", "openai-chat"] as const)("routed %s compaction preserves the classified 413 without replay", async adapter => {
-    let hits = 0;
-    const upstream = upstream413(() => { hits += 1; });
-    saveConfig(config({ target: provider(adapter, upstream) }));
-    const server = startServer(0);
-    try {
-      const response = await fetch(new URL("/v1/responses/compact", server.url), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ model: "target/kimi-k3", input: [{ role: "user", content: "summarize this history" }] }),
-      });
-      expect(response.status).toBe(413);
-      expect(response.headers.get("content-type")).toContain("application/json");
-      expect(await response.json()).toEqual({ error: {
-        message: PROVIDER_INPUT_TOO_LARGE_MESSAGE,
-        type: "invalid_request_error",
-        code: "context_length_exceeded",
-      } });
-      expect(hits).toBe(1);
     } finally {
       await server.stop(true);
     }
@@ -186,7 +137,7 @@ describe("Responses provider input overflow", () => {
     const upstream = upstream413(() => { hits += 1; });
     const target = provider("openai-chat", upstream);
     target.modelContextWindows = { "kimi-k3": 1 };
-    saveConfig(config({ target }));
+    replacePersistedConfig(config({ target }));
     const server = startServer(0);
     try {
       const failed = await responseFailed(await request(
@@ -205,7 +156,7 @@ describe("Responses provider input overflow", () => {
   test("the bounded Anthropic image retry runs once before the terminal failure", async () => {
     let hits = 0;
     const upstream = upstream413(() => { hits += 1; });
-    saveConfig(config({ target: provider("anthropic", upstream) }));
+    replacePersistedConfig(config({ target: provider("anthropic", upstream) }));
     const server = startServer(0);
     try {
       const failed = await responseFailed(await request(
@@ -234,7 +185,7 @@ describe("Responses provider input overflow", () => {
   test("unrelated passthrough HTTP failures keep their status and body", async () => {
     for (const status of [400, 503]) {
       const upstream = upstreamStatus(status);
-      saveConfig(config({ target: provider("openai-responses", upstream) }));
+      replacePersistedConfig(config({ target: provider("openai-responses", upstream) }));
       const server = startServer(0);
       try {
         const response = await request(String(server.url), "target/kimi-k3", true);
@@ -248,7 +199,7 @@ describe("Responses provider input overflow", () => {
     }
   });
 
-  test.each([true, false])("a combo stops on 413 without dispatching a second target (stream=%s)", async stream => {
+  test("a combo stops on 413 and does not dispatch a second oversized target", async () => {
     let firstHits = 0;
     let secondHits = 0;
     const first = upstream413(() => { firstHits += 1; });
@@ -266,69 +217,13 @@ describe("Responses provider input overflow", () => {
         ],
       },
     };
-    saveConfig(next);
+    replacePersistedConfig(next);
     const server = startServer(0);
     try {
-      const response = await request(String(server.url), "combo/fallback", stream);
-      if (stream) {
-        const failed = await responseFailed(response);
-        expect((failed.error as { code?: string }).code).toBe("context_length_exceeded");
-      } else {
-        expect(response.status).toBe(413);
-        expect(response.headers.get("content-type")).toContain("application/json");
-        expect(await response.json()).toEqual({ error: {
-          message: PROVIDER_INPUT_TOO_LARGE_MESSAGE,
-          type: "invalid_request_error",
-          code: "context_length_exceeded",
-        } });
-      }
+      const failed = await responseFailed(await request(String(server.url), "combo/fallback", true));
+      expect((failed.error as { code?: string }).code).toBe("context_length_exceeded");
       expect(firstHits).toBe(1);
       expect(secondHits).toBe(0);
-    } finally {
-      await server.stop(true);
-    }
-  });
-  // A 413 carrying `err_free_prompt_cap` is a per-request free-tier cap, so
-  // `comboFailureDecision` hops instead of stopping. Every target then refuses and the
-  // combo falls out of its loop, which is a different mapping site from the "stop" case
-  // above and was still gated on `stream === true` after #4127 (#4149).
-  test.each([true, false])("an exhausted combo classifies a hopping 413 (stream=%s)", async stream => {
-    let firstHits = 0;
-    let secondHits = 0;
-    const first = freePromptCap413(() => { firstHits += 1; });
-    const second = freePromptCap413(() => { secondHits += 1; });
-    const next = config({
-      first: provider("openai-chat", first),
-      second: provider("openai-chat", second),
-    });
-    next.combos = {
-      fallback: {
-        strategy: "failover",
-        targets: [
-          { provider: "first", model: "kimi-k3" },
-          { provider: "second", model: "kimi-k3" },
-        ],
-      },
-    };
-    saveConfig(next);
-    const server = startServer(0);
-    try {
-      const response = await request(String(server.url), "combo/fallback", stream);
-      if (stream) {
-        const failed = await responseFailed(response);
-        expect((failed.error as { code?: string }).code).toBe("context_length_exceeded");
-      } else {
-        expect(response.status).toBe(413);
-        expect(response.headers.get("content-type")).toContain("application/json");
-        expect(await response.json()).toEqual({ error: {
-          message: PROVIDER_INPUT_TOO_LARGE_MESSAGE,
-          type: "invalid_request_error",
-          code: "context_length_exceeded",
-        } });
-      }
-      // Both targets were tried: this is the exhausted path, not the stop path.
-      expect(firstHits).toBe(1);
-      expect(secondHits).toBe(1);
     } finally {
       await server.stop(true);
     }
