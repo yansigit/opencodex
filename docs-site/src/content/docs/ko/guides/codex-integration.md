@@ -7,6 +7,12 @@ opencodex는 Codex가 읽는 두 가지, 즉 설정(`$CODEX_HOME/config.toml`, �
 
 프록시는 bare `openai` Codex 로그인 경로 하나와 Pool(기본) 및 Direct 계정 모드, 그리고 설정된 API 키용 `openai-apikey/<model>`을 제공합니다. Pool은 메인 계정과 추가된 계정을 포함하고, Direct는 호출자/메인 bearer만 사용합니다. 경로들은 서로 fallback하지 않습니다. shipped v1 config는 marker 2로 이관되며, 수동 복원을 위해 `config.json.pre-openai-tiers-v2.bak`를 보존합니다.
 
+Pool 모드에서는 선택된 저장 계정이 쿨다운 중이고 사용 가능한 다른 저장 계정이나 복구 probe가
+없을 때, 요청에 포함된 검증된 native Codex 로그인을 사용할 수 있습니다. 상류 거절 후 재시도와
+같은 호출자 검증을 적용하므로, 전송 전에 막힌 새 요청도 이 경로를 사용할 수 있습니다. 기존 모델
+권한과 main 계정 정책 검사는 유지됩니다. 이 fallback은 저장 계정의 쿨다운을 해제하거나 호출자
+인증을 Pool 선택으로 저장하지 않습니다. 특정 계정에 정확히 고정된 요청은 그 계정에 계속 묶입니다.
+
 ## 설정 주입
 
 `ocx init`, `ocx start`, `ocx sync`는 모두 인젝터를 호출합니다. 기본 loopback 바인드에서는 Codex의 빌트인 `openai` 프로바이더 id를 그대로 유지한 채, 그 프로바이더가 opencodex를 바라보게 합니다.
@@ -118,6 +124,15 @@ WSL에서는 `CODEX_HOME`이 비어 있고 Linux `~/.codex/config.toml`도 없�
 Windows에서 Orca shell은 `CODEX_HOME`과 `ORCA_CODEX_HOME`을 Orca의 번들 런타임 home으로 설정할 수 있지만, ChatGPT/Codex app은 여전히 `%USERPROFILE%\\.codex`를 읽습니다. `ocx status`와 `ocx doctor`는 이 정확한 불일치를 경고하고, 경로는 가린 채 대상 home을 출력합니다. 해당 Orca shell에서 background service를 설치했다면 먼저 원래 shell에서 uninstall하고, `CODEX_HOME`을 app home으로 설정한 뒤 `ORCA_CODEX_HOME`을 해제하고, sync/restore를 다시 실행한 다음 service를 다시 설치하세요.
 
 전용 provider 모드의 `requires_openai_auth = true`는 Codex App/TUI의 계정 게이트 화면을 네이티브 Codex와 같은 조건으로 맞춥니다. opencodex는 `/v1/responses`도 WebSocket으로 제공합니다. 전용 provider는 `"websockets": true`일 때만 `supports_websockets = true`를 광고합니다. loopback에서는 Codex의 빌트인 provider가 먼저 WebSocket을 시도할 수 있으며, 비활성화된 proxy는 `426`을 반환해서 Codex가 HTTP/SSE로 fallback합니다.
+
+네이티브 ChatGPT forward 요청의 로컬 재생 상태가 만료되었거나 없으면 opencodex는
+upstream 요청 전에 `previous_response_not_found`를 반환합니다. Codex WebSocket 클라이언트는
+일반 스트림 재시도 한도 안에서 다시 연결하고, 완료된 도구 호출과 결과를 포함한 현재 보유
+컨텍스트 전체를 다시 보낼 수 있습니다. 따라서 프록시의 1시간 캐시가 만료되었다는 이유만으로
+새 작업을 만들 필요는 없습니다. 캐시 한도와 보존 기간은 그대로이며, 클라이언트가 더 이상
+보유하지 않는 기록을 복구하는 기능은 아닙니다. HTTP 클라이언트는 이 오류를 직접 처리하고
+`previous_response_id` 없이 전체 컨텍스트를 다시 보내야 합니다. 같은 ID만 재시도해서는
+누락된 상태를 복구할 수 없습니다.
 
 ## 스레드 식별자와 대화 기록
 
@@ -237,11 +252,19 @@ catalog sync는 선택된 서브에이전트 모델을 Codex가 쓸 수 있게 �
 
 ## Codex 계정 워밍업
 
-ChatGPT 계정을 Codex account pool에 추가하면, opencodex는 이를 저장하기 전에 Codex Responses backend로 작은 streaming request를 보내 확인합니다. 요청은 실제 Responses item array(`input: [{ type: "message", ... }]`)를 사용하고, `response.completed`를 기다리며, 기본값은 `gpt-5.4-mini`입니다. 그 모델이 HTTP 400을 반환하면 `gpt-5.5`로 다시 시도합니다. 구조화된 upstream error detail은 보여 주되 raw response body는 노출하지 않습니다. background revalidation은 별도 기능이며 기본값은 꺼져 있습니다. Token Guardian이 활성화되고, `chatgpt` refresh policy가 `proactive`이며, `tokenGuardian.codexWarmupEnabled`가 true일 때만 실행됩니다.
+ChatGPT 계정을 추가하거나 재인증할 때 OpenCodex는 일반적으로 저장 전에 작은 모델 요청으로 확인합니다. `gpt-5.4-mini`의 `response.completed`를 기다리며 HTTP 400이면 `gpt-5.5`로 재시도합니다. 오류에는 고정된 실패 분류만 표시하고 원본 응답 본문은 노출하지 않습니다.
+
+새 OAuth 토큰으로 인증된 사용량 조회에서 5시간·주간·월간 한도 소진이 확인되면 모델 요청 없이 계정을 저장하고 **검증 대기**로 표시합니다. 재시작이나 토큰 갱신 후에도 요청에 사용되지 않습니다. 한도 회복 후 **사용량 새로고침**을 실행하면, 여유가 있는 완전한 최신 사용량을 확인한 뒤 작은 모델 요청을 보내고 완료 응답을 받아야 계정을 사용할 수 있습니다. 조회나 검증 실패 시 대기 상태를 유지합니다. 일반적인 화면 상태 조회는 이 모델 요청을 보내지 않습니다. 최초 등록 때 사용량이 불명확하면 기존 워밍업 검증이 필요합니다.
+
+`ocx account refresh openai`와 `ocx account list openai --quota --refresh`는 사용량만 조회합니다. 모델 검증은 할당량을 사용하므로 사람의 대시보드 세션이 필요합니다. 할당량이 복구되면 `ocx gui`를 열고 **Refresh quotas**를 클릭하세요. 헤드리스 호스트도 브라우저에서 해당 대시보드에 접속해야 하며, 관리자 토큰만으로는 검증할 수 없습니다. 일시 정지된 계정도 검증할 수 있지만 일시 정지를 해제하거나 계정을 선택하지는 않습니다. 모델 인증 실패 표시는 검증 또는 재인증에 성공할 때까지 유지됩니다.
+
+별도의 백그라운드 재검증은 기본적으로 꺼져 있습니다. Token Guardian, `openai`의 `proactive` 갱신 정책, `tokenGuardian.codexWarmupEnabled`가 필요하며 등록 검증 대기 계정은 제외합니다.
 
 ## 네이티브 Codex 복원
 
-opencodex는 절대 사용자를 가두지 않습니다. **`ocx stop`은 네이티브 Codex로 완전히 되돌리는 단일 명령입니다**. proxy를 중지하고, 설치된 background service가 있으면 그것도 중지한 뒤, 주입된 모든 라인과 라우팅된 catalog 항목을 제거해서 plain `codex`가 opencodex가 처음부터 없었던 것처럼 정확히 동작하게 합니다:
+`ocx stop`은 proxy와 설치된 background service를 중지한 뒤 네이티브 Codex 복원을 시도합니다. OpenCodex 소유로 확인된 라우팅 항목을 제거하며, 설정 파일을 안전하게 복구할 수 없으면 미완료로 보고합니다.
+
+현재 config 또는 profile이 저장된 원본과 다르고 해당 파일의 주입 상태 해시가 저널에 없으면, 자동 snapshot 복원은 두 파일과 저널을 변경하지 않고 검토용으로 남깁니다. 이미 원본과 같은 파일은 다시 쓰지 않습니다. 기존 라우팅 설정의 재주입도 이 불확실한 원본을 사용하지 않으며, 네이티브 설정에서는 새 snapshot을 만들 수 있습니다. [자세한 복구 규칙](/guides/codex-integration/#recovery-without-injection-hashes)을 참고하세요.
 
 ```bash
 ocx stop       # stop the proxy + service, restore native Codex

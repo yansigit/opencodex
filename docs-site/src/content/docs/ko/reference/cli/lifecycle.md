@@ -34,6 +34,12 @@ ocx start --port 8080
 백그라운드 서비스가 설치되어 있으면 `ocx stop`이 먼저 그 서비스를 중지하므로 프록시가 다시
 올라올 수 없습니다. 웹 대시보드의 **Stop** 버튼도 같은 동작(`POST /api/stop`)을 하지만, Windows 작업 스케줄러는 예외입니다. 작업이 끝나도 래퍼가 프록시를 다시 띄울 수 있어서, 대시보드는 `respawnable_service`로 거절하고 아무것도 바꾸지 않은 채 `ocx stop` 실행을 안내합니다.
 
+프록시가 종료된 것만으로 Codex/Grok 공유 설정 복원까지 성공했다고 판단하지 않습니다. 종료 응답이
+실패를 보고하거나, 읽을 수 없거나, 요청한 복원 처리 방식을 확인해 주지 않으면 기존 소유권·재시작
+검사를 거친 부모 CLI가 복원을 맡습니다. 이미 종료가 확인된 프로세스를 강제 종료하는 경로로는
+넘어가지 않습니다. 영수증에 근거한 지연 복원도 최종 복원과 영수증 정리를 부모가 담당하며,
+부모의 공유 설정 복원이 실패하면 종료 실패로 남기고 미완료 영수증을 보존합니다.
+
 ### `ocx restart`
 
 프록시가 실행 중이면 확인된 정확한 PID와 포트에 in-place 재시작을 요청하고, 정상 드레인을
@@ -44,6 +50,11 @@ ocx start --port 8080
 stop/start 대체 동작 없이 안전하게 실패합니다. 소유권을 확인한 뒤 `ocx stop`과 `ocx start`를
 순서대로 한 번 실행하세요.
 
+중지·업데이트 후 포트 회수 중에는 종료 전에 기록한 PID라도 OCX 프로세스 확인 실패를 무시하지 않습니다.
+확인이 거부된 살아 있는 프로세스는 종료하지 않으며 TCP 연결 정보도 정리하지 않습니다.
+계속 확인할 수 없으면 포트가 사용 중인 채로 대기 제한 시간에 도달할 수 있습니다.
+현재 포트 사용 프로세스를 확인하고 충돌을 해소한 뒤 재시작을 다시 시도하세요.
+
 ### `ocx ensure`
 
 백그라운드 프록시가 실행 중인지 멱등적으로 보장한 다음, 살아 있는 모델 카탈로그를 동기화합니다.
@@ -53,6 +64,10 @@ stop/start 대체 동작 없이 안전하게 실패합니다. 소유권을 확�
 
 프록시를 중지하지 않고 기본 Codex를 **복원**합니다. 주입된 설정 줄과 라우팅된 카탈로그 항목을
 제거하므로 일반 `codex`가 다시 네이티브로 동작합니다. `eject`는 `restore`의 별칭입니다.
+
+저장된 저널에 해당 파일의 주입 상태 해시가 없으면, 변경된 설정 파일을 덮어쓰는 대신 복원 실패를
+보고합니다. 현재 파일과 저널은 검토용으로 보존됩니다.
+[해시 없는 저널의 복구 규칙](/guides/codex-integration/#recovery-without-injection-hashes)을 참고하세요.
 
 둘 중 어느 표기든 `back`을 붙이면 이미 실행 중인 프록시를 가리키도록 일반 `codex`를 다시
 연결하되, 프록시 수명 주기는 바꾸지 않습니다.
@@ -70,6 +85,10 @@ ocx eject back
 이 명령은 광범위하고 파괴적인 재태깅입니다. 사용자 메시지가 있고 현재 `opencodex`로 표시된 모든
 thread를 `openai`로 바꾸고, `exec`를 `cli`로 정규화하며 event marker를 설정합니다. 정상적인
 dedicated-provider history도 포함됩니다. 상태를 백업하고 이 전체 범위를 의도한 경우에만 실행하세요.
+
+### `ocx recover-history --ocx-compaction <thread-id> --yes`
+
+라우팅된 provider를 통해 압축된 작업을 native Codex에서 다시 열기 전에 해당 기록을 복구합니다. 이 명령은 UUID로 정확히 하나의 작업을 선택하고 비공개 바이트 단위 백업을 저장한 뒤, OpenCodeX가 소유한 `ocx1:` 압축 상태만 native Codex가 재생할 수 있는 일반 요약으로 변환합니다. native 암호화 콘텐츠와 다른 작업은 변경하지 않습니다. 실행 전에 선택한 작업을 닫으십시오. 처리 중 rollout이 변경되면 파일을 교체하지 않고 복구를 중단합니다.
 
 ### `ocx uninstall` · `ocx remove`
 
@@ -185,6 +204,10 @@ probe이며, `--wait`는 준비 또는 timeout까지 polling하지만 종단 `fa
 해당할 때 서비스 마이그레이션을 설명합니다. 이 진단에 표시되는 경로는 OS 사용자 이름을 마스킹합니다.
 doctor는 복구 힌트를 보여 주지만 직접 적용하지는 않습니다.
 
+프로젝트 설정 진단은 `developer_instructions` 같은 TOML 여러 줄 문자열 안의 공급자 예시를
+무시합니다. 종료 구분자 바로 앞에 이스케이프된 따옴표가 있어도, 문자열이 끝난 뒤의 실제
+공급자 및 프로필 설정은 계속 검사합니다.
+
 **OAuth 안정성** 섹션은 자격 증명 저장소에 쓰기 가능한지, `OPENCODEX_HOME` 아래에 refresh
 single-flight/lock 파일을 만들 수 있는지, 건강하지 않은 OAuth 또는 Codex pool 계정(마스킹된 ID)과
 복구용 `Action:`, 그리고 Codex 전달 경로가 공식 클라이언트 메타데이터를 꾸며 내지 않는다는
@@ -293,10 +316,28 @@ ocx codex-shim status
 ocx codex-shim uninstall
 ```
 
+:::note[Windows 토큰 환경]
+새로 생성된 Windows CMD 및 PowerShell shim은 실행 후 호출자의 `OPENCODEX_API_AUTH_TOKEN`을 원래 상태로 복원합니다. Codex와 자식 프로세스는 여전히 토큰을 상속할 수 있습니다.
+
+OpenCodex를 업데이트한 뒤 기존 Windows shim에 이 동작을 적용하려면 `ocx codex-shim uninstall`을 실행한 다음 `ocx codex-shim install`로 다시 설치하세요. 일반 업데이트는 정상인 Windows shim을 다시 작성하지 않습니다.
+:::
+
 :::tip[서비스와 shim]
 항상 켜져 있는 백그라운드 프록시에는 `ocx service`를 사용합니다(권장). 데몬 없이 가볍게 필요할
 때만 시작하려면 `ocx codex-shim`을 사용합니다. 이 경우 프록시는 `codex`를 실행할 때만 시작됩니다.
 :::
+
+#### Codex에 토큰 주입
+
+루프백이 아닌 주소에 바인딩하면 주입된 공급자에 `env_key = "OPENCODEX_API_AUTH_TOKEN"`이 포함됩니다. 이 줄은 Codex가 읽을 변수를 지정할 뿐, 변수를 생성하지는 않습니다. 변수가 없으면 Codex는 요청 시작을 거부하며(`Missing environment variable: OPENCODEX_API_AUTH_TOKEN`), 요청은 프록시에 도달하지 않습니다. 값은 `$OPENCODEX_HOME/service-api-token`에 저장되며, 실행을 시작하는 프로세스가 Codex의 환경에 이 값을 제공해야 합니다.
+
+`ocx codex-shim install`로 설치되는 shim을 사용하세요. 실행 환경에서 이 shim이 선택되면 OpenCodex가 생성한 토큰 파일을 읽고 Codex에 변수를 제공합니다. 데스크톱, cron, 서비스에서 실행할 때는 shim을 선택하는 PATH 또는 실행기 경로를 사용해야 합니다. 설치 과정에서 이러한 환경이 자동으로 구성되지는 않습니다. Codex 자체의 자식 프로세스도 토큰을 상속할 수 있습니다.
+
+이 Bearer 토큰을 셸 시작 파일에서 내보내거나 `config.toml`에 복사하지 마세요. `service-api-token` 파일에는 `NAME=value` 형식의 대입문이 아닌 토큰 원문이 들어 있으므로 systemd의 `EnvironmentFile=`로 직접 사용할 수 없습니다.
+
+`opencodex-proxy.service`의 `EnvironmentFile=` 또는 `OCX_API_TOKEN_FILE`은 프록시 프로세스만 구성하며, 별도로 실행된 `codex exec`에 전달되지 않습니다.
+
+실행기를 교체하는 Codex 업그레이드는 shim을 제거합니다. 다음 일반 `ocx` 명령이 shim을 복원하지만(위 내용 참조), 그보다 먼저 실행되는 `codex exec`는 실패합니다. `ocx doctor`는 이 상태(env_key 구성됨, 변수 미설정, shim 누락 또는 비정상, 토큰 파일 존재)를 "Codex env_key launch readiness" 항목에서 복구 명령과 함께 보고하며, 토큰은 출력하지 않습니다. 토큰 파일 읽기는 주입된 `env_key`의 계약에 포함되지 않습니다. 실행을 시작하는 프로세스가 해당 변수를 제공해야 합니다.
 
 ### `ocx tray <install|start|stop|status|uninstall|remove> [--json] [--no-start]`
 
