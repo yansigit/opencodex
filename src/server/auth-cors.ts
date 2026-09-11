@@ -6,7 +6,6 @@ import {
   codexAutoStartEnabled,
   modelPreferHostedToolsConfigError,
   providerModelCostsConfigError,
-  providerWebSearchBridgeConfigError,
   requestPacingConfigError,
   retryOn429PolicyConfigError,
   transientRetryOn5xxPolicyConfigError,
@@ -457,11 +456,6 @@ export const AUTH_MATRIX: readonly ApiAuthMatrixRow[] = [
   // /v1/models and for the same reason — it forwards no caller credential upstream — so a
   // remote client no longer needs an admin token just to read the model catalog.
   { endpoint: "/v1/catalog", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
-  // #4236: the hub-state read a connected client uses instead of reporting its own empty
-  // credential store. Same admission set and the same justification as the two rows above —
-  // it forwards no caller credential upstream and its body is booleans plus model ids — and it
-  // 404s on any host whose runtimeRole is not "hub", so no standalone install gains a surface.
-  { endpoint: "/v1/hub-state", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
 ];
 
 /** Whether `token` is the environment-provided management secret. */
@@ -685,10 +679,6 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   if (requestPacingError) {
     return `provider ${JSON.stringify(redactSecretString(name))} ${requestPacingError}`;
   }
-  const webSearchBridgeError = providerWebSearchBridgeConfigError(raw.webSearchBridge);
-  if (webSearchBridgeError) {
-    return `provider ${JSON.stringify(redactSecretString(name))} ${webSearchBridgeError}`;
-  }
   const upstreamHttpVersionError = upstreamHttpVersionConfigError(raw.upstreamHttpVersion);
   if (upstreamHttpVersionError) {
     return `provider ${JSON.stringify(redactSecretString(name))} ${upstreamHttpVersionError}`;
@@ -902,7 +892,6 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   xaiResponsesDefaultVersion: "runtime",
   supportsResponsesCustomTools: "editor",
   responsesSnapshotRepair: "editor",
-  webSearchBridge: "editor",
   reasoningEffortMap: "editor",
   modelReasoningEffortMap: "editor",
   reasoningWireFormat: "editor",
@@ -940,6 +929,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   unsafeAllowNativeLocalExec: "editor",
   nativeLocalExec: "editor",
   tlsProfile: "editor",
+  webSearchBridge: "editor",
   azureCredential: "redacted",
 } as const satisfies Record<keyof OcxProviderConfig, ProviderConfigFieldPolicy>;
 
