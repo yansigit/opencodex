@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -7,11 +7,8 @@ import type { AdapterEvent, OcxParsedRequest } from "../../src/types";
 import type { ImageBridgePlan, ImageCallResult } from "../../src/images/types";
 import type { ImageBridgeDeps } from "../../src/images/loop";
 import { createTestTranslatorBudget } from "../helpers/translator-budget";
-import { getDebugLogEntries, resetDebugLogBufferForTests } from "../../src/lib/debug-log-buffer";
-import { resetDebugSettingsForTests } from "../../src/lib/debug-settings";
 
 const PREV_HOME = process.env.OPENCODEX_HOME;
-const PREV_DEBUG = process.env.OCX_DEBUG;
 let runWithImageBridgeProduction: typeof import("../../src/images/loop")["runWithImageBridge"];
 let clampImageMaxRounds: typeof import("../../src/images/loop")["clampImageMaxRounds"];
 let DEFAULT_MAX_ROUNDS: typeof import("../../src/images/loop")["DEFAULT_MAX_ROUNDS"];
@@ -55,12 +52,6 @@ function runWithImageBridge(
   });
 }
 afterAll(() => { if (PREV_HOME === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = PREV_HOME; mock.restore(); });
-afterEach(() => {
-  resetDebugSettingsForTests();
-  resetDebugLogBufferForTests();
-  if (PREV_DEBUG === undefined) delete process.env.OCX_DEBUG;
-  else process.env.OCX_DEBUG = PREV_DEBUG;
-});
 
 // --- Mock adapter: yields canned events per iteration from a queue ---
 let streamQueue: AdapterEvent[][] = [];
@@ -113,24 +104,36 @@ async function runAndGetSSE(streams: AdapterEvent[][], fulfill?: ImageCallResult
 }
 
 describe("runWithImageBridge", () => {
-  test("routed image streams carry adapter and bridge diagnostics", async () => {
-    process.env.OCX_DEBUG = "1";
-    const error = spyOn(console, "error").mockImplementation(() => {});
+  test.each([307, 308])("the direct image-loop send does not follow %i", async status => {
+    let targetHits = 0;
+    let originHits = 0;
+    const target = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => {
+      targetHits++;
+      return new Response("{}");
+    } });
+    const origin = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => {
+      originHits++;
+      return new Response("redirect", { status, headers: { location: `http://127.0.0.1:${target.port}/target` } });
+    } });
     try {
-      streamQueue = [[{ type: "text_delta", text: "image diagnostic secret" }, { type: "done" }]];
       const response = await runWithImageBridge({
-        parsed: makeParsed(),
-        adapter: mockAdapter,
-        plan,
-        diagnostic: { requestId: "image-diagnostic", adapterName: "test" },
+        parsed: makeParsed(), plan,
+        adapter: {
+          ...mockAdapter,
+          fetchResponse: undefined,
+          buildRequest: async () => ({ url: `http://127.0.0.1:${origin.port}/model`, method: "POST", headers: { "x-api-key": "synthetic-key" }, body: "synthetic prompt" }),
+        },
       });
-      await response.text();
-      const lines = getDebugLogEntries().map(entry => entry.line);
-      expect(lines.some(line => line.includes('"stage":"adapter"') && line.includes('"eventType":"text_delta"'))).toBe(true);
-      expect(lines.some(line => line.includes('"stage":"bridge"') && line.includes('"eventType":"text_delta"'))).toBe(true);
-      expect(lines.every(line => !line.includes("image diagnostic secret"))).toBe(true);
+      const error = await response.json() as { error: { type: string; message: string } };
+      expect(targetHits).toBe(0);
+      expect(originHits).toBe(1);
+      expect(response.status).toBe(status);
+      expect(error.error.type).toBe("upstream_error");
+      expect(error.error.message).toBe(`Provider error ${status}`);
+      expect(response.headers.get("location")).toBeNull();
     } finally {
-      error.mockRestore();
+      await origin.stop(true);
+      await target.stop(true);
     }
   });
 
