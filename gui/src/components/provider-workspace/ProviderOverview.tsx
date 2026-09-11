@@ -20,6 +20,7 @@ type ConnectionTestResult = {
   applicable?: boolean;
   ok?: boolean;
   latencyMs?: number;
+  authState?: "connected" | "checking" | "needs_reauth" | "unsupported";
   reason?: string;
   message?: string;
   error?: string;
@@ -36,6 +37,7 @@ export default function ProviderOverview({
   apiBase, connectionIdentity,
   onEditSettings, onViewUsage, onUpdateProvider,
   onReauthenticate, onCancelLogin, reauthBusy = false,
+  onRefreshConfig,
 }: {
   item: WorkspaceItem;
   preset?: CatalogPreset;
@@ -55,16 +57,34 @@ export default function ProviderOverview({
   onReauthenticate?: () => void;
   onCancelLogin?: () => void;
   reauthBusy?: boolean;
+  onRefreshConfig?: () => void | Promise<void>;
 }) {
   const t = useT();
   const { locale } = useI18n();
   const status = binProviderStatus(item);
   const needsAttention = Boolean(item.activeNeedsReauth);
-  const statusText = status === "ready"
-    ? t("pws.status.connected")
-    : status === "needs-setup"
-      ? (needsAttention ? t("pws.status.needsAttention") : t("pws.status.needsSetup"))
-      : t("prov.disabledBadge");
+  const isAiStudioWeb = item.googleMode === "ai-studio-web" || item.name === "google-aistudio";
+  const [localAiStudioAuthState, setLocalAiStudioAuthState] = useState<"connected" | "checking" | "needs_reauth" | "unsupported" | null>(null);
+  const aiStudioAuthState = localAiStudioAuthState ?? item.aiStudioAuthState ?? (item.hasAiStudioSession ? "checking" : "needs_reauth");
+  const aiStudioStatusText = aiStudioAuthState === "connected"
+    ? t("pws.aiStudio.connected")
+    : aiStudioAuthState === "checking"
+      ? t("pws.aiStudio.checking")
+      : aiStudioAuthState === "unsupported"
+        ? t("pws.aiStudio.unsupported")
+        : t("pws.aiStudio.needsReauth");
+  const needsAiStudioReauth = isAiStudioWeb && aiStudioAuthState === "needs_reauth";
+  const [aiStudioReauthBusy, setAiStudioReauthBusy] = useState(false);
+  const [aiStudioReauthMsg, setAiStudioReauthMsg] = useState<string | null>(null);
+  const aiStudioReauthAbortRef = useRef<AbortController | null>(null);
+  const aiStudioAutoTestKeyRef = useRef<string | null>(null);
+  const statusText = isAiStudioWeb
+    ? aiStudioStatusText
+    : status === "ready"
+      ? t("pws.status.connected")
+      : status === "needs-setup"
+        ? (needsAttention ? t("pws.status.needsAttention") : t("pws.status.needsSetup"))
+        : t("prov.disabledBadge");
   const requests = usageTotals?.requests;
   const tokens = usageTotals?.totalTokens;
   const connectionProbeKey = JSON.stringify([
@@ -81,6 +101,7 @@ export default function ProviderOverview({
     item.allowPrivateNetwork === true,
     item.keyOptional === true,
     item.activeNeedsReauth === true,
+    aiStudioAuthState,
     connectionIdentity ?? null,
   ]);
   const [connectionTest, setConnectionTest] = useState<ConnectionTestState | null>(null);
@@ -94,6 +115,8 @@ export default function ProviderOverview({
         connectionAbortRef.current.controller.abort();
         connectionAbortRef.current = null;
       }
+      aiStudioReauthAbortRef.current?.abort();
+      aiStudioReauthAbortRef.current = null;
     };
   }, [connectionProbeKey]);
 
@@ -112,6 +135,15 @@ export default function ProviderOverview({
       if (!result) throw new Error(t("pws.connectionFailed"));
       if (!controller.signal.aborted) {
         setConnectionTest({ key: connectionProbeKey, testing: false, result });
+        if (isAiStudioWeb) {
+          if (result.authState) {
+            setLocalAiStudioAuthState(result.authState);
+          } else if (result.ok === true) {
+            setLocalAiStudioAuthState("connected");
+          } else if (result.error && /re-?authentication/i.test(result.error)) {
+            setLocalAiStudioAuthState("needs_reauth");
+          }
+        }
       }
     } catch (error) {
       if (!controller.signal.aborted) {
@@ -130,7 +162,63 @@ export default function ProviderOverview({
         connectionAbortRef.current = null;
       }
     }
-  }, [apiBase, connectionProbeKey, item.name, t]);
+  }, [apiBase, connectionProbeKey, isAiStudioWeb, item.name, t]);
+
+  const handleAiStudioReauth = useCallback(async () => {
+    if (!apiBase) return;
+    aiStudioReauthAbortRef.current?.abort();
+    const controller = new AbortController();
+    aiStudioReauthAbortRef.current = controller;
+    setAiStudioReauthBusy(true);
+    setAiStudioReauthMsg(null);
+    try {
+      const res = await fetch(`${apiBase}/api/aistudio/login/native`, {
+        method: "POST",
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as { error?: string | { message?: string } } | null;
+        const error = typeof data?.error === "string" ? data.error : data?.error?.message;
+        setAiStudioReauthMsg(error || t("pws.aiStudio.loginFailed"));
+        return;
+      }
+      const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string | { message?: string } } | null;
+      const error = typeof data?.error === "string" ? data.error : data?.error?.message;
+      if (data?.ok) {
+        setLocalAiStudioAuthState("connected");
+        setAiStudioReauthMsg(t("pws.aiStudio.reauthenticated"));
+        await onRefreshConfig?.();
+        return;
+      }
+      if (error) {
+        setAiStudioReauthMsg(error);
+        return;
+      }
+      setAiStudioReauthMsg(t("pws.aiStudio.loginFailed"));
+    } catch (error) {
+      if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) return;
+      setAiStudioReauthMsg(error instanceof Error ? error.message : t("pws.aiStudio.loginFailed"));
+    } finally {
+      if (aiStudioReauthAbortRef.current === controller) {
+        aiStudioReauthAbortRef.current = null;
+      }
+      if (!controller.signal.aborted) {
+        setAiStudioReauthBusy(false);
+      }
+    }
+  }, [apiBase, onRefreshConfig, t]);
+
+  useEffect(() => {
+    if (!isAiStudioWeb || aiStudioAuthState !== "checking" || !apiBase) return;
+    const autoTestKey = `${item.name}:${connectionProbeKey}`;
+    if (aiStudioAutoTestKeyRef.current === autoTestKey) return;
+    aiStudioAutoTestKeyRef.current = autoTestKey;
+    const timer = window.setTimeout(() => {
+      void testConnection();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [aiStudioAuthState, apiBase, connectionProbeKey, isAiStudioWeb, item.name, testConnection]);
 
   const connectionState = connectionResult?.applicable === false
     ? "not-applicable"
@@ -171,7 +259,36 @@ export default function ProviderOverview({
             <dt>{t("modal.defaultModel")}</dt>
             <dd>{item.defaultModel ?? <span className="muted">—</span>}</dd>
           </div>
+          {isAiStudioWeb && (
+            <div className="pws-kv-row">
+              <dt>{t("pws.aiStudio")}</dt>
+              <dd>{aiStudioStatusText}</dd>
+            </div>
+          )}
+          {item.note && (
+            <div className="pws-kv-row">
+              <dt>{t("pws.cell.note")}</dt>
+              <dd className="muted">{item.note}</dd>
+            </div>
+          )}
         </dl>
+        {isAiStudioWeb && (needsAiStudioReauth || aiStudioReauthMsg) && (
+          <div className="row" style={{ marginTop: 12, alignItems: "center" }}>
+            {needsAiStudioReauth && (
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={aiStudioReauthBusy}
+                onClick={() => void handleAiStudioReauth()}
+              >
+                {aiStudioReauthBusy ? t("common.loading") : status !== "ready" ? t("pws.aiStudio.connect") : t("pws.reauthenticate")}
+              </button>
+            )}
+            {aiStudioReauthMsg && (
+              <span role="status" className="muted">{aiStudioReauthMsg}</span>
+            )}
+          </div>
+        )}
         {apiBase && (
           <div className="row" style={{ marginTop: 12, alignItems: "center" }}>
             <button
@@ -249,7 +366,6 @@ export default function ProviderOverview({
           </div>
         )}
       </section>
-      <NotesSection item={item} onUpdateProvider={onUpdateProvider} />
       </div>
 
       <aside className="pws-overview-sidebar">
@@ -280,6 +396,7 @@ export default function ProviderOverview({
       </section>
 
       <ProviderCurrentQuota key={`${item.name}:${connectionIdentity ?? ""}`} report={quotaReport} reading={currentQuotaReading} onRefreshQuota={onRefreshQuota} />
+      <NotesSection item={item} onUpdateProvider={onUpdateProvider} />
       </aside>
     </div>
     </>

@@ -7,7 +7,7 @@ import type { AppServerStateOutcome } from "../codex-app-server-state";
 import { useCodexRestart } from "../use-codex-restart";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Switch, Notice, EmptyState, Select, Tooltip } from "../ui";
-import { IconChevron, IconBoxes, IconInfo, IconCheck, IconAlert, IconRefresh, IconPencil } from "../icons";
+import { IconChevron, IconBoxes, IconInfo, IconCheck, IconAlert, IconRefresh, IconPencil, IconTrash } from "../icons";
 import { useT } from "../i18n/shared";
 import type { TFn, TKey } from "../i18n/shared";
 import { modelLabel } from "../model-display";
@@ -67,17 +67,14 @@ import {
   THREAD_OPTIONS,
   writeCollapsedProviders,
   discoveryFailureLabel,
-  filterFreeModelRows,
-  freeOnlyInForce,
-  modelPricingKnown,
   REASONING_EFFORT_LEVELS,
   type ModelRow,
   type ProviderContextCapsResponse,
   type ShadowCallData,
   type V2Status,
 } from "./models-shared";
-import { DiscoveryDependencyHint, EmptyProviderHint } from "./models-provider-hints";
-import { shadowCallModelOptions } from "./dashboard-shared";
+import { EmptyProviderHint } from "./models-provider-hints";
+import { shadowCallModelOptions, useModalDialog } from "./dashboard-shared";
 import { shadowSourceModelBadge, shadowSourceModelLabel } from "./shadow-call-source";
 
 type CachedModelsPage = {
@@ -190,6 +187,8 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   useEffect(() => {
     // Once on mount/base change or restart completion, never on a timer.
     appServerReadBase.current = apiBase;
+    // Clear the previous server's observation before this resource starts its bounded read.
+    // oxlint-disable-next-line react/react-compiler
     setAppServerState(null);
     void reloadAppServerState();
     return cancelAppServerRead;
@@ -245,10 +244,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const [disabled, setDisabled] = useState<Set<string>>(() => new Set(cached?.disabled ?? []));
   const [selectedModels, setSelectedModels] = useState<ProviderModelMap | null>(() => cached?.selectedModels ?? null);
   const [search, setSearch] = useState<Record<string, string>>({});
-  // Per-provider Free-only narrowing (#3666). Session UX, not persisted config: it answers
-  // "what can I run for nothing right now", which is a question about this sitting, and the
-  // provider list it applies to changes underneath a stored value.
-  const [freeOnly, setFreeOnly] = useState<Record<string, boolean>>({});
   const [limit, setLimit] = useState<Record<string, number>>({});
   const [contextCaps, setContextCaps] = useState<Record<string, number>>(() => cached?.contextCaps ?? {});
   const [contextCapValues, setContextCapValues] = useState<Record<string, number>>(() => cached?.contextCapValues ?? {});
@@ -275,11 +270,14 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     { isEmpty: () => false, enabled: catalogActive, deadlineMs: 15_000, initialData: cachedPicker },
   );
   const pickerSettings = pickerResource.state.data;
+  const refreshPicker = pickerResource.refresh;
   const pickerMode = pickerDraft ?? modelPickerOrderMode(
     pickerSettings?.pickerAvailable ?? [], pickerSettings?.pickerOrder ?? [], pickerSettings?.pickerOrderMode,
   );
   useLayoutEffect(() => {
     pickerGeneration.current++;
+    // A changed server or inactive catalog invalidates this resource's local mutation draft.
+    // oxlint-disable-next-line react/react-compiler
     setPickerDraft(null);
     setPickerBusy(false);
     return () => {
@@ -290,10 +288,8 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
       cancelAppServerRead();
     };
   }, [apiBase, catalogActive, cancelAppServerRead]);
-  useLayoutEffect(() => {
-    // Pin inferred Custom before any late GET can switch mode and unmount its draft.
-    if (catalogActive && pickerDraft === null && pickerMode === "custom") setPickerDraft("custom");
-  }, [catalogActive, pickerDraft, pickerMode]);
+  // Pin inferred Custom before children render; a later GET must not unmount its draft.
+  if (catalogActive && pickerDraft === null && pickerMode === "custom") setPickerDraft("custom");
   const [customCap, setCustomCap] = useState("");
   const [showCustom, setShowCustom] = useState(false);
   const [providerCapCustomOpen, setProviderCapCustomOpen] = useState<Record<string, boolean>>({});
@@ -344,7 +340,11 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const [threadsCustom, setThreadsCustom] = useState("");
   const [showThreadsCustom, setShowThreadsCustom] = useState(false);
   const [v2HelpOpen, setV2HelpOpen] = useState(false);
+  const v2HelpTriggerRef = useRef<HTMLButtonElement>(null);
+  const v2HelpDialogRef = useModalDialog(v2HelpOpen, v2HelpTriggerRef);
   const [customModalOpen, setCustomModalOpen] = useState(false);
+  const customModalTriggerRef = useRef<HTMLButtonElement>(null);
+  const customDialogRef = useModalDialog(customModalOpen, customModalTriggerRef);
   const [displayNameModel, setDisplayNameModel] = useState<ModelRow | null>(null);
   const [priceModel, setPriceModel] = useState<ModelRow | null>(null);
   const priceTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -371,8 +371,11 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   }, [apiBase]);
   useEffect(() => {
     const controller = new AbortController();
-    void reloadAliases(controller.signal);
-    return () => controller.abort();
+    const timeout = window.setTimeout(() => void reloadAliases(controller.signal), 0);
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
   }, [reloadAliases]);
 
   const saveProviderAlias = async (provider: string) => {
@@ -440,6 +443,8 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const [contextDefaultTouched, setContextDefaultTouched] = useState(false);
   const [contextSaving, setContextSaving] = useState(false);
   const [contextError, setContextError] = useState("");
+  const contextModalTriggerRef = useRef<HTMLButtonElement>(null);
+  const contextDialogRef = useModalDialog(contextModalProvider !== null, contextModalTriggerRef);
   const [hoveredModel, setHoveredModel] = useState<{ namespaced: string; rect: DOMRect } | null>(null);
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [shadowCall, setShadowCall] = useState<ShadowCallData | null>(null);
@@ -581,7 +586,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
       // Follow-up mutation refreshes retain their existing awaitable contract while publishing
       // the result through the same shared store used by the initial catalog subscription.
       setClientResourceData(cacheKey, next);
-      pickerResource.refresh();
+      refreshPicker();
       return true;
     } catch {
       return false;
@@ -590,7 +595,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
         loadPendingRef.current = false;
       }
     }
-  }, [applyCatalog, cacheKey, fetchCatalog, pickerResource.refresh]);
+  }, [applyCatalog, cacheKey, fetchCatalog, refreshPicker]);
 
   const finishDisplayNameEdit = useCallback(() => {
     const trigger = displayNameTriggerRef.current;
@@ -704,6 +709,31 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     }
   }, [apiBase, displayNameModel, displayNameRecovery, finishDisplayNameEdit, load, publishFeedback, t]);
 
+  /** #2465: load the per-provider preset preview. */
+  const loadPresets = useCallback(async () => {
+    const bounded = createBoundedFetch(15_000);
+    try {
+      const response = await fetch(`${apiBase}/api/model-presets`, { signal: bounded.signal });
+      const data = await readJsonIfOk<{ providers?: Record<string, ModelPresetView> }>(response);
+      setPresets(data?.providers ?? {});
+    } catch {
+      // A preset preview is decoration on top of a working Models page; failing to load it must
+      // not take the page down.
+      setPresets({});
+    } finally {
+      bounded.clear();
+    }
+  }, [apiBase]);
+
+  const loadModelDiscovery = useCallback(async () => {
+    try {
+      const response = await fetch(`${apiBase}/api/model-discovery`);
+      setModelDiscovery((await readJsonIfOk<ModelDiscoveryView>(response)) ?? null);
+    } catch {
+      setModelDiscovery(null);
+    }
+  }, [apiBase]);
+
   // Shadow/v2 controls must not wait on the models catalog (live discovery can be slow).
   useEffect(() => {
     // Both belong to the catalog tab; a hidden panel polling /api/v2 every ten seconds
@@ -725,18 +755,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
       window.clearTimeout(timeout);
       stop();
     };
-    // oxlint-disable-next-line react/react-compiler -- existing exhaustive-deps exception is intentional
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadPresets is a plain async loader
-    // like the rest of this file's; a useCallback wrapper trips PreserveManualMemo, and the
-    // effect only ever needs the current closure. Verified 2026-08-27: converting both loaders
-    // to useCallback and completing the dep array turns ONE warning into five react-compiler
-    // errors - two PreserveManualMemo, two Immutability (they are declared ~430 lines below this
-    // effect), and one EffectSetState - so the note above still holds against oxlint 1.78.
-    // Both gates suppress this one rule for this one file by config rather than by comment:
-    // gui/.oxlintrc.json (override) and gui/doctor.config.json (ignore.overrides). An in-file
-    // react-doctor-disable comment was tried and removed - it changed nothing, and
-    // react/react-compiler penalises a component for carrying suppressions at all.
-  }, [catalogActive, loadShadowCall, loadV2]);
+  }, [catalogActive, loadModelDiscovery, loadPresets, loadShadowCall, loadV2]);
 
   const groups = useMemo(
     () => buildProviderModelGroups(models, providers),
@@ -751,6 +770,9 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const catalogCountReady = models.length > 0 || catalogState.data !== undefined;
 
   const openContextSettings = (group: ProviderModelGroup<ModelRow>) => {
+    contextModalTriggerRef.current = document.activeElement?.tagName === "BUTTON"
+      ? document.activeElement as HTMLButtonElement
+      : null;
     const modelIds = [...new Set([
       ...group.rows.map(model => model.id),
       ...group.configuredModels,
@@ -1152,32 +1174,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     if (!v2 || v2.multiAgentMode === mode) return;
     await putV2Setting({ multiAgentMode: mode });
   };
-
-
-  /**
-   * #2465: load the per-provider preset preview. Rules are evaluated server-side against the
-   * CURRENT catalog, so the count shown is the count an apply would produce.
-   */
-  const loadPresets = async () => {
-    try {
-      const bounded = createBoundedFetch(15_000);
-      const r = await fetch(`${apiBase}/api/model-presets`, { signal: bounded.signal });
-      const data = await readJsonIfOk<{ providers?: Record<string, ModelPresetView> }>(r);
-      setPresets(data?.providers ?? {});
-    } catch {
-      // A preset preview is decoration on top of a working Models page; failing to load it must
-      // not take the page down.
-      setPresets({});
-    }
-  };
-
-  const loadModelDiscovery = async () => {
-    try {
-      const r = await fetch(`${apiBase}/api/model-discovery`);
-      setModelDiscovery((await readJsonIfOk<ModelDiscoveryView>(r)) ?? null);
-    } catch { setModelDiscovery(null); }
-  };
-
   const saveModelDiscovery = async (policy: "on" | "off", provider?: string) => {
     const r = await fetch(`${apiBase}/api/model-discovery`, {
       method: "PUT", headers: { "content-type": "application/json" },
@@ -1299,10 +1295,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     hoverTimerRef.current = setTimeout(() => setHoveredModel(null), 120);
   };
 
-  const keepRowTipOpen = () => {
-    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
-  };
-
   const addCustomModel = async (
     provider: string,
     modelId: string,
@@ -1403,26 +1395,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
       model.native === true,
       disabled.has(model.namespaced),
     );
-    const freeOnlyOn = freeOnly[provider] === true;
-    // The control is offered only where the provider actually published per-token prices.
-    // A provider whose rows are all unclassified — Ollama, a static catalog, anything with no
-    // pricing in /models — would otherwise get a switch whose only possible effect is to empty
-    // the list, which reads as a bug rather than as "this provider does not say".
-    const pricingKnown = modelPricingKnown(rows);
-    // Free-only narrows BEFORE the header counts, search, the enabled-first sort, and the PAGE
-    // slice below. Filtering after the slice would leave free models stranded behind Show more
-    // on a 200-row OpenRouter list, which is the exact case the issue reports.
-    //
-    // `scoped` is the set every count and bulk action reads. Search is deliberately NOT part of
-    // it: the search box has always been a transient find-as-you-type that leaves the counts
-    // alone, while Free only is a narrowing the user holds on, so a header still reading the
-    // whole provider would claim more models than the list under it shows.
-    // Gated on `pricingKnown` through `freeOnlyInForce`: the switch below is hidden when the
-    // provider stops publishing prices, so a narrowing left on from an earlier render must lapse
-    // with it rather than empty the list behind a control that is no longer there.
-    const freeOnlyActive = freeOnlyInForce(freeOnlyOn, rows);
-    const scoped = filterFreeModelRows(rows, freeOnlyActive);
-    const activeCount = scoped.filter(isVisible).length;
+    const activeCount = rows.filter(isVisible).length;
     const recentForProvider = modelDiscovery?.recentArrivals[provider] ?? [];
     const recentIds = new Set(recentForProvider.map(row => row.id));
     const capOn = contextCaps[provider] !== undefined;
@@ -1435,7 +1408,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     const capOptionSet = group.nativeProviderGroup ? NATIVE_CAP_OPTION_SET : CAP_OPTION_SET;
     const discoveryFailure = liveModels && discovery?.status === "failed" ? discovery : undefined;
     const q = (search[provider] ?? "").trim().toLowerCase();
-    const filtered = q ? scoped.filter(m => m.id.toLowerCase().includes(q)) : scoped;
+    const filtered = q ? rows.filter(m => m.id.toLowerCase().includes(q)) : rows;
     // Display-only: enabled models float to the top of each provider group so they
     // stay findable in long lists. The sort is stable, so the server order is kept
     // inside each partition, and this does not affect the picker order above
@@ -1446,20 +1419,16 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     const remaining = filtered.length - visible.length;
      // An empty provider has nothing to send: keep both bulk buttons inert so we never PUT an
      // empty target list (the management API rejects it with 400).
-     // Bulk follows the same scoped set as the counts it sits beside: with Free only on, an
-     // "All on" that enabled the 197 paid rows the header is not counting would be the exact
-     // surprise the header fix exists to prevent. Pending stays keyed to the whole provider,
-     // because initial discovery is a provider state that no display filter can clear.
-     const hasRows = scoped.length > 0;
+     const hasRows = rows.length > 0;
      const selectionPending = rows.some(model => model.initialSelectionPending);
-     const allOn = !hasRows || scoped.every(isVisible);
-     const allOff = !hasRows || scoped.every(m => !isVisible(m));
+     const allOn = !hasRows || rows.every(isVisible);
+     const allOff = !hasRows || rows.every(m => !isVisible(m));
      const bulkToggle = (enable: boolean) => {
        if (!hasRows || selectionPending) return;
        void applyVisibility(
          "provider",
          provider,
-         scoped.map(m => ({ id: m.id, native: m.native === true })),
+         rows.map(m => ({ id: m.id, native: m.native === true })),
          enable,
        );
      };
@@ -1486,7 +1455,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
              {t("models.discoveryFailedBadge")}
            </span>
          )}
-          <span className="muted mono text-label">{t("models.active", { active: activeCount, total: scoped.length })}</span>
+          <span className="muted mono text-label">{t("models.active", { active: activeCount, total: rows.length })}</span>
           {recentForProvider.length > 0 && <span className="models-chip mono text-caption">{t("models.newCount", { count: recentForProvider.length })}</span>}
           </button>
            <div className="row models-provider-actions">
@@ -1503,6 +1472,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                 className="btn btn-ghost btn-sm text-caption"
                 onClick={(e) => {
                   e.stopPropagation();
+                  customModalTriggerRef.current = e.currentTarget;
                   setCustomModalMode("add");
                    setCustomModalProvider(provider);
                    setCustomModalId("");
@@ -1680,25 +1650,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
             {rows.length === 0 && (
               <EmptyProviderHint liveModels={liveModels} discovery={discovery} showFailureBadge={false} />
             )}
-            {/* A group WITH rows and a failed fetch got the amber header badge and nothing that
-                explains the dependency; #4075 is the reporter having to discover on their own
-                that turning discovery off is what makes a manually added model usable. */}
-            {rows.length > 0 && discoveryFailure && <DiscoveryDependencyHint />}
-            {pricingKnown && (
-              <div className="row models-provider-hint">
-                <Switch
-                  on={freeOnlyOn}
-                  onClick={() => setFreeOnly(prev => ({ ...prev, [provider]: !freeOnlyOn }))}
-                  label={t("models.freeOnly")}
-                  showLabel
-                />
-              </div>
-            )}
-            {/* Reads `scoped`, not `filtered`: with a search term that matches nothing, the
-                honest message is the search one, not "this provider has no free models". */}
-            {freeOnlyActive && scoped.length === 0 && rows.length > 0 && (
-              <p className="muted text-label" role="status">{t("models.noFreeMatch")}</p>
-            )}
             {rows.length > PAGE / 2 && (
               <input
                 className="input"
@@ -1724,15 +1675,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                  >
                    <div className="row models-model-row">
                      <Switch on={!off} onClick={() => void applyVisibility("models", provider, [{ id: m.id, native: m.native === true }], off)} disabled={busy || m.initialSelectionPending} label={m.native ? m.id : m.namespaced} />
-                    {m.initialSelectionPending && <span className="models-chip muted" role="status">{t("models.initialSelectionPending")}</span>}
-                    {/* #1711: listed and selectable, but every usable target is out of credit.
-                        Not a visibility change and not the operator's disable flag — the row is
-                        still offered, which is what the issue asks for. */}
-                    {m.quotaInactiveReason === "no_credit" && (
-                      <span className="models-chip muted" role="status" title={t("models.inactiveNoCreditHint")}>
-                        {t("models.inactiveNoCredit")}
-                      </span>
-                    )}
+                     {m.initialSelectionPending && <span className="models-chip muted" role="status">{t("models.initialSelectionPending")}</span>}
                      {aliases.models[provider]?.[m.id] && <strong className="mono text-control">{aliases.models[provider][m.id].alias}</strong>}
                      <span className="models-model-identity">
                        <code className="mono text-control" style={{ color: off ? "var(--faint)" : "var(--text)", textDecoration: off ? "line-through" : "none" }}>{m.native ? modelLabel(m.id) : m.namespaced}</code>
@@ -1765,7 +1708,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                        </span>
                      )}
                      {!m.native && m.provider !== "combo" && (
-                       <>
+                      <>
                          {m.manualPricing === true && <span className="models-chip muted text-caption">{t("pricing.override.badge")}</span>}
                          <button
                            type="button"
@@ -1781,26 +1724,71 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                          </button>
                        </>
                      )}
+                     {m.custom && m.customId && (
+                       <span className="models-model-row-actions">
+                         <button
+                           type="button"
+                           className="btn btn-ghost btn-sm text-caption"
+                           aria-label={t("models.customEditNamed", { name: m.displayName ?? m.id })}
+                           onClick={event => {
+                             customModalTriggerRef.current = event.currentTarget;
+                             setCustomModalMode("edit");
+                             setCustomModalProvider(m.provider);
+                             setCustomModalId(m.customId!);
+                             setCustomFormModelId(m.id);
+                             setCustomFormDisplayName(m.displayName ?? "");
+                             setCustomFormContextWindow(m.contextWindow ? String(m.contextWindow) : "");
+                             setCustomFormShowCustomCtx(false);
+                             setCustomFormModalities(m.inputModalities ?? ["text"]);
+                             setCustomFormReasoning(Array.isArray(m.reasoningEfforts));
+                             setCustomFormReasoningEfforts(m.reasoningEfforts ?? []);
+                             customFormReasoningInitializedRef.current = Array.isArray(m.reasoningEfforts);
+                             setCustomError("");
+                             setCustomModalOpen(true);
+                             setHoveredModel(null);
+                           }}
+                         ><IconPencil width={13} height={13} aria-hidden="true" /></button>
+                         <button
+                           type="button"
+                           className="btn btn-ghost btn-sm text-caption"
+                           aria-label={t("models.customDeleteNamed", { name: m.displayName ?? m.id })}
+                           style={{ color: "var(--red)" }}
+                           onClick={() => {
+                             if (window.confirm(t("models.customDeleteConfirm", { name: m.displayName ?? m.id }))) {
+                               void deleteCustomModel(m.customId!);
+                             }
+                             setHoveredModel(null);
+                           }}
+                         ><IconTrash width={13} height={13} aria-hidden="true" /></button>
+                       </span>
+                     )}
                      {!m.custom && recentIds.has(m.id) && <span className="badge badge-amber">{t("models.newBadge")}</span>}
                      {m.contextCapped && <span className="models-chip muted mono text-caption">{t("models.contextCappedValue", { value: fmtK(m.contextCap ?? contextCapValue) })}</span>}
                    </div>
                    {hoveredModel?.namespaced === m.namespaced && (() => {
                      const r = hoveredModel.rect;
-                     const tipTop = r.bottom + 4;
-                     const flipUp = tipTop + 360 > window.innerHeight;
+                     const tipWidth = Math.max(0, Math.min(480, window.innerWidth - 16));
+                     const tipLeft = Math.max(8, Math.min(r.left + 24, window.innerWidth - tipWidth - 8));
+                     const tipTop = Math.max(8, r.bottom + 4);
+                     const roomBelow = Math.max(0, window.innerHeight - tipTop - 8);
+                     const roomAbove = Math.max(0, r.top - 12);
+                     const flipUp = roomBelow < Math.min(360, roomAbove);
+                     const tipMaxHeight = Math.min(360, flipUp ? roomAbove : roomBelow);
                      return (
                        <div
-                         className={`model-tip${m.custom ? " has-actions" : ""}${flipUp ? " flip-up" : ""}`}
+                         className={`model-tip${flipUp ? " flip-up" : ""}`}
                          role="tooltip"
                          style={{
                            position: "fixed",
-                           left: r.left + 24,
+                           left: tipLeft,
+                           width: "max-content",
+                           minWidth: Math.min(320, tipWidth),
+                           maxWidth: tipWidth,
+                           maxHeight: tipMaxHeight,
                            ...(flipUp
-                             ? { bottom: window.innerHeight - r.top + 4 }
+                             ? { bottom: Math.max(8, window.innerHeight - r.top + 4) }
                              : { top: tipTop }),
                          }}
-                         onMouseEnter={keepRowTipOpen}
-                         onMouseLeave={onRowLeave}
                        >
                           <div className="model-tip-id">{m.native ? m.id : m.namespaced}</div>
                          {m.displayName && <div className="model-tip-display">{m.displayName}</div>}
@@ -1827,46 +1815,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                            <span className="model-tip-key">{t("models.tipStatus")}</span>
                            <span className="model-tip-val">{off ? t("models.tipDisabled") : t("models.tipActive")}</span>
                          </div>
-                         {m.custom && m.customId && (
-                           <div className="model-tip-actions">
-                             <button
-                               type="button"
-                               className="btn btn-ghost btn-sm text-caption"
-                               onClick={() => {
-                                 setCustomModalMode("edit");
-                                 setCustomModalProvider(m.provider);
-                                 setCustomModalId(m.customId!);
-                                 setCustomFormModelId(m.id);
-                                 setCustomFormDisplayName(m.displayName ?? "");
-                                 setCustomFormContextWindow(m.contextWindow ? String(m.contextWindow) : "");
-                                 setCustomFormShowCustomCtx(false);
-                                 setCustomFormModalities(m.inputModalities ?? ["text"]);
-                                 // Only a STORED ladder counts as "configured": an inherited one
-                                 // would show a phantom override that saves "inherit" over the
-                                 // provider row's current metadata.
-                                 setCustomFormReasoning(Array.isArray(m.reasoningEfforts));
-                                 setCustomFormReasoningEfforts(m.reasoningEfforts ?? []);
-                                 // A stored ladder — even an explicit empty one — is a real
-                                 // configuration: re-enabling must preserve it, not reseed.
-                                 customFormReasoningInitializedRef.current = Array.isArray(m.reasoningEfforts);
-                                 setCustomError("");
-                                 setCustomModalOpen(true);
-                                 setHoveredModel(null);
-                               }}
-                             >{t("models.customEdit")}</button>
-                             <button
-                               type="button"
-                               className="btn btn-ghost btn-sm text-caption"
-                               style={{ color: "var(--red)" }}
-                               onClick={() => {
-                                 if (window.confirm(t("models.customDeleteConfirm", { name: m.displayName ?? m.id }))) {
-                                   void deleteCustomModel(m.customId!);
-                                 }
-                                 setHoveredModel(null);
-                               }}
-                             >{t("models.customDelete")}</button>
-                           </div>
-                         )}
                        </div>
                      );
                    })()}
@@ -1994,7 +1942,10 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               className="btn btn-ghost btn-sm"
               style={{ width: 24, height: 24, minWidth: 24, flex: "0 0 24px", padding: 0, borderRadius: "var(--radius-pill)", color: "var(--muted)" }}
               disabled={!v2}
-              onClick={() => setV2HelpOpen(true)}
+              onClick={event => {
+                v2HelpTriggerRef.current = event.currentTarget;
+                setV2HelpOpen(true);
+              }}
               aria-label={t("models.v2Label")}
               aria-haspopup="dialog"
             >
@@ -2182,10 +2133,11 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const modalsBlock = (
     <>
       {v2HelpOpen && (
-        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label={t("models.v2Label")} onClick={() => setV2HelpOpen(false)} onKeyDown={e => { if (e.key === "Escape") setV2HelpOpen(false); }}>
+        <dialog ref={v2HelpDialogRef} className="modal-overlay" aria-labelledby="models-v2-help-title" onCancel={event => { event.preventDefault(); setV2HelpOpen(false); }}>
+          <button type="button" className="modal-backdrop-dismiss" aria-label={t("common.close")} tabIndex={-1} onClick={() => setV2HelpOpen(false)} />
           <div className="modal-card" onClick={e => e.stopPropagation()}>
             <div className="modal-head">
-              <h3>{t("models.v2Label")}</h3>
+              <h3 id="models-v2-help-title">{t("models.v2Label")}</h3>
               <button type="button" className="btn btn-ghost btn-sm" onClick={() => setV2HelpOpen(false)} aria-label={t("common.close")}>&times;</button>
             </div>
             <div className="modal-desc leading-relaxed" style={{ whiteSpace: "pre-line" }}>
@@ -2200,23 +2152,24 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               <button type="button" className="btn btn-primary" onClick={() => setV2HelpOpen(false)}>{t("common.ok")}</button>
             </div>
           </div>
-        </div>
+        </dialog>
       )}
 
       {contextModalProvider && (
-        <div
+        <dialog
+          ref={contextDialogRef}
           className="modal-overlay"
-          role="dialog"
-          aria-modal="true"
           aria-label={t("models.contextSettings")}
-          onClick={() => { if (!contextSaving) setContextModalProvider(null); }}
-          onKeyDown={(event) => {
-            if (event.key === "Escape" && !contextSaving) setContextModalProvider(null);
+          aria-labelledby="models-context-dialog-title"
+          onCancel={event => {
+            event.preventDefault();
+            if (!contextSaving) setContextModalProvider(null);
           }}
         >
+          <button type="button" className="modal-backdrop-dismiss" aria-label={t("common.close")} tabIndex={-1} disabled={contextSaving} onClick={() => setContextModalProvider(null)} />
           <div className="modal-card" onClick={event => event.stopPropagation()}>
             <div className="modal-head">
-              <h3>{t("models.contextSettingsTitle", {
+              <h3 id="models-context-dialog-title">{t("models.contextSettingsTitle", {
                 provider: formatProviderDisplayName(contextModalProvider, t),
               })}</h3>
               <button
@@ -2298,23 +2251,23 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               </button>
             </div>
           </div>
-        </div>
+        </dialog>
       )}
 
       {customModalOpen && (
-        <div
+        <dialog
+          ref={customDialogRef}
           className="modal-overlay"
-          role="dialog"
-          aria-modal="true"
-          aria-label={t("models.customAdd")}
-          onClick={() => { if (!customSaving) setCustomModalOpen(false); }}
-          onKeyDown={(e) => {
-            if (e.key === "Escape" && !customSaving) setCustomModalOpen(false);
+          aria-labelledby="models-custom-dialog-title"
+          onCancel={event => {
+            event.preventDefault();
+            if (!customSaving) setCustomModalOpen(false);
           }}
         >
+          <button type="button" className="modal-backdrop-dismiss" aria-label={t("common.close")} tabIndex={-1} disabled={customSaving} onClick={() => setCustomModalOpen(false)} />
           <div className="modal-card" onClick={e => e.stopPropagation()}>
             <div className="modal-head">
-              <h3>
+              <h3 id="models-custom-dialog-title">
                 {customModalMode === "add"
                   ? t("models.customAddTitle", { provider: formatProviderDisplayName(customModalProvider, t) })
                   : t("models.customEditTitle", { provider: formatProviderDisplayName(customModalProvider, t) })}
@@ -2510,7 +2463,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               </button>
             </div>
           </div>
-        </div>
+        </dialog>
       )}
     </>
   );
