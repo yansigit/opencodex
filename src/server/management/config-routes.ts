@@ -364,6 +364,8 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       oauthOpenBrowser: config.oauthOpenBrowser !== false,
       server: serverSettings(config, deps.activeServerOrigin, deps.activeServerConfig),
       codexDesktopAuthless: config.codexDesktopAuthless === true,
+      // Absent keeps Design B remote compaction; true selects the dedicated provider identity.
+      codexClientCompaction: config.codexClientCompaction === true,
       startupHealth: await readStartupHealth(config),
       codexRuntime: {
         path: displayCodexRuntimePath(resolved.runtime.command),
@@ -455,6 +457,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       ultraFastTier?: unknown;
       codexMainAccountHardLock?: unknown;
       codexDesktopAuthless?: unknown;
+      codexClientCompaction?: unknown;
     };
     if (body.codexAutoStart === undefined
       && body.streamMode === undefined
@@ -466,7 +469,8 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       && body.server === undefined
       && body.ultraFastTier === undefined
       && body.codexMainAccountHardLock === undefined
-      && body.codexDesktopAuthless === undefined) {
+      && body.codexDesktopAuthless === undefined
+      && body.codexClientCompaction === undefined) {
       return jsonResponse({ error: "provide a supported settings field" }, 400);
     }
     if (body.codexAutoStart !== undefined && typeof body.codexAutoStart !== "boolean") {
@@ -493,6 +497,9 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     }
     if (body.codexDesktopAuthless !== undefined && typeof body.codexDesktopAuthless !== "boolean") {
       return jsonResponse({ error: "codexDesktopAuthless boolean is required" }, 400);
+    }
+    if (body.codexClientCompaction !== undefined && typeof body.codexClientCompaction !== "boolean") {
+      return jsonResponse({ error: "codexClientCompaction boolean is required" }, 400);
     }
     let nextServer: {
       hostname: string;
@@ -577,9 +584,12 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       hasCodexMainAccountHardLock: Object.hasOwn(config, "codexMainAccountHardLock"),
       codexDesktopAuthless: config.codexDesktopAuthless,
       hasCodexDesktopAuthless: Object.hasOwn(config, "codexDesktopAuthless"),
+      codexClientCompaction: config.codexClientCompaction,
+      hasCodexClientCompaction: Object.hasOwn(config, "codexClientCompaction"),
     };
     const pickerWasEnabled = codexAccountPickerEnabled(config);
     const authlessWasEnabled = config.codexDesktopAuthless === true;
+    const clientCompactionWasEnabled = config.codexClientCompaction === true;
     const applySettings = (target: OcxConfig): boolean => {
       if (typeof body.codexAutoStart === "boolean") {
         target.codexAutoStart = body.codexAutoStart;
@@ -614,6 +624,8 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       else if (body.codexMainAccountHardLock === false) deleteConfigTopLevelKey(target, "codexMainAccountHardLock");
       if (body.codexDesktopAuthless === true) target.codexDesktopAuthless = true;
       else if (body.codexDesktopAuthless === false) deleteConfigTopLevelKey(target, "codexDesktopAuthless");
+      if (body.codexClientCompaction === true) target.codexClientCompaction = true;
+      else if (body.codexClientCompaction === false) deleteConfigTopLevelKey(target, "codexClientCompaction");
       if (quotaAutoRefreshChange) {
         const { id, window, enabled } = quotaAutoRefreshChange;
         const setting = { ...(target.codexQuotaAutoRefresh?.[id] ?? {}) };
@@ -691,6 +703,9 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (previousSettings.hasCodexDesktopAuthless) {
         config.codexDesktopAuthless = previousSettings.codexDesktopAuthless;
       } else deleteConfigTopLevelKey(config, "codexDesktopAuthless");
+      if (previousSettings.hasCodexClientCompaction) {
+        config.codexClientCompaction = previousSettings.codexClientCompaction;
+      } else deleteConfigTopLevelKey(config, "codexClientCompaction");
       throw error;
     }
     if (typeof body.appOwnedMemoryBudgetMb === "number") {
@@ -698,7 +713,10 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       enforceAppOwnedMemoryBudget();
     }
     const authlessIsEnabled = config.codexDesktopAuthless === true;
-    const catalogRefresh = pickerWasEnabled !== pickerIsEnabled || authlessWasEnabled !== authlessIsEnabled
+    const clientCompactionIsEnabled = config.codexClientCompaction === true;
+    const catalogRefresh = pickerWasEnabled !== pickerIsEnabled
+      || authlessWasEnabled !== authlessIsEnabled
+      || clientCompactionWasEnabled !== clientCompactionIsEnabled
       ? await convergeCodexCatalog()
       : undefined;
     const catalogRefreshPending = catalogRefresh
@@ -717,6 +735,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       catalogRefreshPending,
       showCodexSparkQuota: config.showCodexSparkQuota === true,
       codexDesktopAuthless: authlessIsEnabled,
+      codexClientCompaction: clientCompactionIsEnabled,
       codexMainAccountHardLock: config.codexMainAccountHardLock === true,
       mainAccountHardLock: getMainAccountHardLockStatus(config),
       startupHealth: await readStartupHealth(config),

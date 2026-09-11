@@ -70,7 +70,7 @@ type CachedOverview = {
 
 type MaMode = "v1" | "default" | "v2";
 
-type CodexPreference = "codexAutoStart" | "codexDesktopAuthless";
+type CodexPreference = "codexAutoStart" | "codexDesktopAuthless" | "codexClientCompaction";
 type DashboardSettingsState = {
   settings: SettingsData | null;
   beforeSave: SettingsData | null;
@@ -712,6 +712,7 @@ export function useDashboardData(apiBase: string) {
   };
   const toggleCodexAutoStart = () => toggleCodexSetting("codexAutoStart");
   const toggleCodexDesktopAuthless = () => toggleCodexSetting("codexDesktopAuthless");
+  const toggleCodexClientCompaction = () => toggleCodexSetting("codexClientCompaction");
 
   // Clears the sync result/error in this hook. The dashboard toast owns its own dismissal
   // timer but must publish the dismissal here: syncResult/syncError live above the dashboard
@@ -876,7 +877,7 @@ export function useDashboardData(apiBase: string) {
     effortCapHelpDialogRef, updateDialogRef, maHelpDialogRef, shadowCallHelpDialogRef,
     filteredGroups, sidecarModels, visionModels,
     saveSidecar, saveShadowCall, switchMaMode, toggleCodexAutoStart, toggleCodexDesktopAuthless,
-    saveServerSettings, runSync, clearSyncFeedback,
+    toggleCodexClientCompaction, saveServerSettings, runSync, clearSyncFeedback,
     fetchUpdateCheck, closeUpdateDialog, openUpdateDialog, changeUpdateChannel, runUpdate,
   };
 }

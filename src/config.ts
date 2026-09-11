@@ -49,6 +49,7 @@ import {
   MAIN_CODEX_ACCOUNT_NAMESPACE_TARGET,
 } from "./codex/account-namespace-match";
 import { isCodexAccountPriorityKey } from "./codex/account-priority";
+import { loopbackCompanionAllowed } from "./codex/loopback-target";
 import { UPSTREAM_HOST_CIRCUIT_MAX_THRESHOLD } from "./codex/upstream-host-health";
 import {
   adoptCustomModelCatalogMigration,
@@ -1020,6 +1021,18 @@ function canonicalHttpOrigin(value: string): string | null {
 
 const hubConfigSchema = z.object({
   managementPublicOrigin: z.string().transform((value, ctx) => {
+    const origin = canonicalHttpOrigin(value);
+    if (!origin) {
+      ctx.addIssue({ code: "custom", message: "must be a canonical http(s) origin without credentials, path, query, or fragment" });
+      return z.NEVER;
+    }
+    return origin;
+  }).optional(),
+  // Same canonical-origin rule as managementPublicOrigin, and deliberately NOT `.catch`ed:
+  // a mistyped data origin must be rejected at write time, because silently dropping it
+  // makes `ocx hub invite` print the `http://<hostname>:<port>` fallback that the operator
+  // set this field precisely to replace.
+  dataPublicOrigin: z.string().transform((value, ctx) => {
     const origin = canonicalHttpOrigin(value);
     if (!origin) {
       ctx.addIssue({ code: "custom", message: "must be a canonical http(s) origin without credentials, path, query, or fragment" });
@@ -2890,15 +2903,44 @@ function loopbackListenerPortError(value: unknown): string | null {
     return "schema_invalid: unauthenticatedLoopbackListener.enabled: must be a boolean";
   }
   if (entry.enabled !== true) return null;
-  const listenerPort = entry.port;
-  if (typeof listenerPort !== "number" || !Number.isInteger(listenerPort) || listenerPort < 1 || listenerPort > 65535) {
-    return "schema_invalid: unauthenticatedLoopbackListener.port: must be an integer port when enabled";
-  }
+  const hostname = typeof (value as Record<string, unknown>).hostname === "string"
+    ? (value as Record<string, unknown>).hostname as string
+    : undefined;
   const proxyPort = (value as Record<string, unknown>).port;
+  const listenerPort = entry.port;
+  // The companion form. `port` omitted means "same port as the public listener, on 127.0.0.1",
+  // which only exists as a free address when the public listener is bound somewhere else.
+  if (listenerPort === undefined) {
+    return loopbackCompanionBindError(
+      hostname,
+      typeof proxyPort === "number" ? proxyPort : 10100,
+    );
+  }
+  if (typeof listenerPort !== "number" || !Number.isInteger(listenerPort) || listenerPort < 1 || listenerPort > 65535) {
+    return "schema_invalid: unauthenticatedLoopbackListener.port: must be an integer port when enabled, or omitted to share the proxy port";
+  }
   if (typeof proxyPort === "number" && proxyPort === listenerPort) {
     return "schema_invalid: unauthenticatedLoopbackListener.port: must differ from the proxy port";
   }
   return null;
+}
+
+/**
+ * The one sentence both the write boundary and startup use for an impossible companion bind.
+ *
+ * Exported so `startServer` can fail with the identical text: an operator who hand-edited the
+ * file past `validateConfigCandidate` must read the same diagnosis, not EADDRINUSE.
+ */
+export function loopbackCompanionBindError(
+  hostname: string | undefined,
+  proxyPort: number,
+): string | null {
+  if (loopbackCompanionAllowed(hostname)) return null;
+  const bind = (hostname ?? "").trim() || "127.0.0.1";
+  return "schema_invalid: unauthenticatedLoopbackListener: a port-less listener binds "
+    + `127.0.0.1:${proxyPort}, which the public listener on hostname "${bind}" already holds. `
+    + "Either set a distinct unauthenticatedLoopbackListener.port, or remove the listener — a "
+    + "loopback bind already admits local callers without a credential.";
 }
 
 /**

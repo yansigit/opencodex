@@ -6,7 +6,7 @@ import SubagentsWorkspace, { FEATURED_MAX } from "../components/subagents-worksp
 import { readSessionListCache, writeSessionListCache } from "../session-list-cache";
 import { useDataSurface } from "../data-surface";
 import { DataSurfaceSkeleton } from "../components/data-surface";
-import { useSubagentDelegation, type UltraModePatch, type UltraModeState, type V2NativeParentOverrideState, type AgentTaskRecoveryState, type V2RoutedDelegationBridgeState } from "./use-subagent-delegation";
+import { useSubagentDelegation, type UltraModeHintRecommendation, type UltraModePatch, type UltraModeState, type V2NativeParentOverrideState, type AgentTaskRecoveryState, type V2RoutedDelegationBridgeState } from "./use-subagent-delegation";
 import { CodexStaleBanner } from "../components/codex-stale-banner";
 import { useCodexRestart } from "../use-codex-restart";
 
@@ -50,7 +50,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   const catalogLoadGeneration = useRef(0);
   const delegation = useSubagentDelegation(apiBase);
   const [catalogState, setCatalogState] = useState<CatalogState>(() => readCatalogState(cached));
-  const [ultraMode, setUltraMode] = useState<UltraModeState>({ enabled: false, hintText: null, multiAgentV2Enabled: false, multiAgentMode: "default" });
+  const [ultraMode, setUltraMode] = useState<UltraModeState>({ enabled: false, hintText: null, recommendation: null, multiAgentV2Enabled: false, multiAgentMode: "default" });
   const [nativeParentOverride, setNativeParentOverride] = useState<V2NativeParentOverrideState>({ enabled: false, model: null, active: false });
   const [agentTaskRecovery, setAgentTaskRecovery] = useState<AgentTaskRecoveryState>({ enabled: false, model: null });
   const [routedDelegationBridge, setRoutedDelegationBridge] = useState<V2RoutedDelegationBridgeState>({ enabled: false });
@@ -85,6 +85,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       multiAgentMode?: "v1" | "default" | "v2";
       keepNativeChatGptOnV1?: boolean;
       multiAgentModeHintText?: string | null;
+      multiAgentModeHintRecommendation?: UltraModeHintRecommendation | null;
       subagentDeveloperInstructions?: string | null;
       v2NativeParentOverride?: Partial<V2NativeParentOverrideState>;
       agentTaskRecovery?: Partial<AgentTaskRecoveryState>;
@@ -101,6 +102,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       loaded: true,
       keepNativeChatGptOnV1: data.keepNativeChatGptOnV1 === true,
       hintText: data.multiAgentModeHintText ?? null,
+      recommendation: data.multiAgentModeHintRecommendation ?? null,
       // Ultra mode replaces Codex's effort-derived policy for every model. The
       // `default` surface still preserves upstream V1 pins (for example luna),
       // so only an explicitly forced V2 catalog is an effective surface here.

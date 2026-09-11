@@ -13,6 +13,8 @@ import type { AccountQuotaReading, ProviderUsageTotals } from "./types";
 import { authModeLabel } from "./ProviderRail";
 import type { ProviderUpdatePatch, ProviderUpdateResult } from "./types";
 import ProviderCurrentQuota from "./ProviderCurrentQuota";
+import type { CatalogPreset } from "../provider-catalog/provider-presets";
+import ProviderSponsor from "./ProviderSponsor";
 
 type ConnectionTestResult = {
   applicable?: boolean;
@@ -31,13 +33,14 @@ type ConnectionTestState = {
 };
 
 export default function ProviderOverview({
-  item, usageTotals, quotaReport, currentQuotaReading, onRefreshQuota, oauthEmail, oauth,
+  item, preset, usageTotals, quotaReport, currentQuotaReading, onRefreshQuota, oauthEmail, oauth,
   apiBase, connectionIdentity,
   onEditSettings, onViewUsage, onUpdateProvider,
   onReauthenticate, onCancelLogin, reauthBusy = false,
   onRefreshConfig,
 }: {
   item: WorkspaceItem;
+  preset?: CatalogPreset;
   usageTotals?: ProviderUsageTotals;
   quotaReport?: ProviderQuotaReportView;
   currentQuotaReading?: AccountQuotaReading;
@@ -228,6 +231,8 @@ export default function ProviderOverview({
       ? (connectionResult.message || t("pws.connectionOk"))
       : (connectionResult?.error || t("pws.connectionFailed"));
   return (
+    <>
+    <ProviderSponsor item={item} preset={preset} />
     <div className="pws-overview-layout">
       <div className="pws-overview-main">
       <section className="pws-section" aria-label={t("pws.connection")}>
@@ -394,6 +399,7 @@ export default function ProviderOverview({
       <NotesSection item={item} onUpdateProvider={onUpdateProvider} />
       </aside>
     </div>
+    </>
   );
 }
 
