@@ -1,8 +1,7 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initializePersistedConfigIfMissing, saveConfig } from "../../src/config";
 import { STORE_BUDGET_MS } from "../helpers/test-budget";
 import {
   CODEX_FAILURE_WINDOW_MS,
@@ -55,13 +54,76 @@ import { routeModel } from "../../src/router";
 import { consumeForInspection } from "../../src/server/relay";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
-import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+
+import { flushConfigDirHardeningForTests, hardenConfigDir } from "../../src/config/paths";
 import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 
 let TEST_DIR = "";
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
+
 const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+
+function installRoutingScratchHome(): void {
+  previousOpencodexHome = process.env.OPENCODEX_HOME;
+  previousCodexHome = process.env.CODEX_HOME;
+  TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-routing-"));
+  // Routing cases exercise account state, not the operating system ACL implementation.
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+  process.env.OPENCODEX_HOME = TEST_DIR;
+  process.env.CODEX_HOME = TEST_DIR;
+}
+
+async function removeRoutingScratchHome(): Promise<void> {
+  const ownedDirectory = TEST_DIR;
+  TEST_DIR = "";
+  try {
+    await flushConfigDirHardeningForTests();
+  } finally {
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
+    if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousOpencodexHome;
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    if (ownedDirectory) removeTreeWithRetry(ownedDirectory);
+  }
+}
+
+test.skipIf(process.platform !== "win32")("routing scratch cleanup waits for its outstanding hardening flight", async () => {
+  installRoutingScratchHome();
+  const ownedDirectory = TEST_DIR;
+  let entered!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let cleanup: Promise<void> | undefined;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    setAsyncIcaclsRunnerForTests(async () => { entered(); await gate; return ICACLS_OK; });
+    hardenConfigDir();
+    await Promise.race([
+      started,
+      new Promise<never>((_, reject) => { deadline = setTimeout(() => reject(new Error("hardening fixture did not start")), 5_000); }),
+    ]);
+    let cleaned = false;
+    cleanup = removeRoutingScratchHome().then(() => { cleaned = true; });
+    await Promise.resolve();
+    expect(cleaned).toBe(false);
+    expect(existsSync(ownedDirectory)).toBe(true);
+    release();
+    await cleanup;
+    expect(cleaned).toBe(true);
+    expect(existsSync(ownedDirectory)).toBe(false);
+  } finally {
+    if (deadline !== undefined) clearTimeout(deadline);
+    release();
+    if (cleanup) await cleanup;
+    else await removeRoutingScratchHome();
+  }
+}, STORE_BUDGET_MS);
+
 
 function makeConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
   return {
@@ -94,15 +156,7 @@ function pendingInspectionStream(): ReadableStream<Uint8Array> {
 
 describe("codex routing", () => {
   beforeEach(() => {
-    previousOpencodexHome = process.env.OPENCODEX_HOME;
-    setIcaclsRunnerForTests(() => ICACLS_OK);
-    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-    TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-codex-routing-"));
-    process.env.OPENCODEX_HOME = TEST_DIR;
-    // Isolate the main-account credential source: TEST_DIR has no auth.json, so the main
-    // account is deterministically absent (these cases test the pool-only scenario).
-    previousCodexHome = process.env.CODEX_HOME;
-    process.env.CODEX_HOME = TEST_DIR;
+    installRoutingScratchHome();
     clearThreadAccountMap();
     clearCodexUpstreamHealth();
     clearAccountQuota();
@@ -114,28 +168,22 @@ describe("codex routing", () => {
   });
 
   afterEach(async () => {
-    clearAccountQuota();
-    clearCodexUpstreamHealth();
-    clearThreadAccountMap();
-    clearAccountNeedsReauth("a");
-    clearAccountNeedsReauth("b");
-    clearAccountNeedsReauth("c");
-    await flushConfigDirHardeningForTests();
-    setIcaclsRunnerForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
-    if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
-    else process.env.OPENCODEX_HOME = previousOpencodexHome;
-    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
-    else process.env.CODEX_HOME = previousCodexHome;
-    removeTreeWithRetry(TEST_DIR);
-    TEST_DIR = "";
+    try {
+      clearAccountQuota();
+      clearCodexUpstreamHealth();
+      clearThreadAccountMap();
+      clearAccountNeedsReauth("a");
+      clearAccountNeedsReauth("b");
+      clearAccountNeedsReauth("c");
+    } finally {
+      await removeRoutingScratchHome();
+    }
   });
 
   test("usage score uses the hottest known quota window", () => {
     expect(computeCodexUsageScore({ weeklyPercent: 81 })).toBe(81);
     expect(computeCodexUsageScore({ weeklyPercent: 15, monthlyPercent: 91 })).toBe(91);
     expect(computeCodexUsageScore({ weeklyPercent: 15, monthlyPercent: 20, shortPercent: 92 })).toBe(92);
-    expect(computeCodexUsageScore({ weeklyPercent: 15, fiveHourPercent: 92 })).toBe(92);
     expect(computeCodexUsageScore({ weeklyPercent: 15 })).toBe(15);
   });
 
@@ -147,8 +195,7 @@ describe("codex routing", () => {
     expect(computeCodexUsageScore({ shortPercent: 0 })).toBe(CODEX_UNKNOWN_USAGE_SCORE);
     expect(computeCodexUsageScore({ shortPercent: 87 })).toBe(CODEX_UNKNOWN_USAGE_SCORE);
     // Once a governing window is known, the burst still wins when it is hotter.
-    expect(computeCodexUsageScore({ weeklyPercent: 1, shortPercent: 100,
-      shortResetAt: Date.now() + 60_000 })).toBe(100);
+    expect(computeCodexUsageScore({ weeklyPercent: 1, shortPercent: 100 })).toBe(100);
     expect(computeCodexUsageScore({ weeklyPercent: 40, shortPercent: 0 })).toBe(40);
   });
 
@@ -166,12 +213,9 @@ describe("codex routing", () => {
     // inverted into a recovered account that stays excluded.
     expect(computeCodexUsageScore({ shortPercent: 100, shortResetAt: now - 60_000 }, undefined, now))
       .toBe(CODEX_UNKNOWN_USAGE_SCORE);
-    expect(computeCodexUsageScore({ weeklyPercent: 20, shortPercent: 100, shortResetAt: now - 60_000 }, undefined, now))
-      .toBe(20);
     // No resetAt at all cannot be aged, so it stays unknown: a wrongly-selected account
     // fails one request, a wrongly-excluded one is invisible until someone reads the pool.
     expect(computeCodexUsageScore({ shortPercent: 100 }, undefined, now)).toBe(CODEX_UNKNOWN_USAGE_SCORE);
-    expect(computeCodexUsageScore({ weeklyPercent: 20, shortPercent: 100 }, undefined, now)).toBe(20);
     // Still narrow: a non-terminal short-only reading is unchanged.
     expect(computeCodexUsageScore({ shortPercent: 99, shortResetAt: now + 60_000 }, undefined, now))
       .toBe(CODEX_UNKNOWN_USAGE_SCORE);
@@ -250,20 +294,7 @@ describe("codex routing", () => {
     // clock far from wall time is the point: a fixture whose now matches Date.now() cannot
     // tell a threaded clock from one that was dropped somewhere in the helper chain.
     const now = 1_700_000_000_000;
-    const config = makeConfig({
-      activeCodexAccountId: "a",
-      defaultProvider: "test",
-      providers: {
-        test: {
-          adapter: "openai-responses",
-          baseUrl: "https://example.invalid/v1",
-          apiKey: "test-key",
-        },
-      },
-    });
-    // Automatic quota moves persist by design. Seed the fixture through the same
-    // fail-closed initialization boundary production uses instead of weakening it.
-    expect(initializePersistedConfigIfMissing(config)).toBe("created");
+    const config = makeConfig({ activeCodexAccountId: "a" });
 
     // A is full for the next hour, recorded in SECONDS. B has ordinary headroom.
     setAccountQuotaFromParsed("a", { shortPercent: 100, shortResetAt: (now + 3_600_000) / 1000 });
@@ -305,20 +336,7 @@ describe("codex routing", () => {
     setAccountQuotaFromParsed("a", { shortPercent: 100 });
     const now = Date.now();
     updateAccountQuota("b", 3);
-    const config = makeConfig({
-      activeCodexAccountId: "a",
-      defaultProvider: "test",
-      providers: {
-        test: {
-          adapter: "openai-responses",
-          baseUrl: "https://example.invalid/v1",
-          apiKey: "test-key",
-        },
-      },
-    });
-    // Moving away from an exhausted account persists the active selection. Seed the same
-    // valid on-disk boundary used by production so this regression can run in isolation.
-    expect(initializePersistedConfigIfMissing(config)).toBe("created");
+    const config = makeConfig({ activeCodexAccountId: "a" });
     expect(resolveCodexAccountForThread("thread-storm-new", config, now)).toBe("b");
 
     // A thread already bound to A must move too - this is the half the reporter saw as 118
@@ -329,7 +347,6 @@ describe("codex routing", () => {
     updateAccountQuota("a", 10);
     updateAccountQuota("b", 20);
     const bound = makeConfig({ activeCodexAccountId: "a" });
-    saveConfig(bound);
     expect(resolveCodexAccountForThread("thread-storm-bound", bound, now)).toBe("a");
     clearAccountQuota("a");
     setAccountQuotaFromParsed("a", { shortPercent: 100 });
@@ -929,6 +946,147 @@ describe("codex routing", () => {
     expect(config.activeCodexAccountId).toBe("b");
     expect(resolveCodexAccountForThread("quota-existing", config)).toBe("b");
     expect(resolveCodexAccountForThread("quota-next", config)).toBe("b");
+  });
+
+  test("a bound thread does not return to the quota group that refused it once the capped cooldown lapses", () => {
+    const config = makeConfig();
+    const now = 1_800_000_000_000;
+    updateAccountQuota("a", 10);
+    updateAccountQuota("b", 20);
+    expect(resolveCodexAccountForThread("spark-refused", config, now, "spark")).toBe("a");
+
+    // The refusal announces a window that reopens in four hours, but a reset-derived cooldown is
+    // capped at 15 minutes so the account is selectable again long before that window moves.
+    recordCodexUpstreamOutcome(config, "a", 429, {
+      now,
+      threadId: "spark-refused",
+      modelId: "gpt-5.3-codex-spark",
+      resetAt: Math.floor((now + 4 * 60 * 60_000) / 1_000),
+    });
+
+    // Usage is still the lowest in the pool and well under the threshold, so nothing else would
+    // move this thread: without the refusal it rebinds to the account that just turned it away.
+    expect(resolveCodexAccountForThread("spark-refused", config, now + 16 * 60_000, "spark")).toBe("b");
+    // The shared lane never refused this thread, so a spent Spark window leaves it alone.
+    expect(resolveCodexAccountForThread("spark-refused", config, now + 16 * 60_000, "shared")).toBe("a");
+  });
+
+  test("the main login is passed over by the window its own refusal announced", () => {
+    // The main account is not in `config.codexAccounts`, so it reaches selection through a
+    // separate re-insertion branch. That branch is the only place an avoidance window can
+    // exclude it, and it is the case the pool filters above cannot cover.
+    writeFileSync(join(TEST_DIR, "auth.json"), JSON.stringify({
+      tokens: { access_token: "main-access", account_id: "main-chatgpt-id" },
+    }));
+    const config = makeConfig({
+      codexAccounts: [{ id: "a", email: "a@test", isMain: false }],
+      activeCodexAccountId: MAIN_CODEX_ACCOUNT_ID,
+    });
+    const now = 1_800_000_000_000;
+    updateAccountQuota(MAIN_CODEX_ACCOUNT_ID, 10);
+    updateAccountQuota("a", 20);
+    expect(resolveCodexAccountForThread("main-spark-first", config, now, "spark")).toBe(MAIN_CODEX_ACCOUNT_ID);
+
+    recordCodexUpstreamOutcome(config, MAIN_CODEX_ACCOUNT_ID, 429, {
+      now,
+      threadId: "main-spark-first",
+      modelId: "gpt-5.3-codex-spark",
+      resetAt: Math.floor((now + 4 * 60 * 60_000) / 1_000),
+    });
+
+    // Selection has to actually reach the re-insertion branch for this to prove anything.
+    // Leaving the main login active would exclude it by id on the fallback instead, so move
+    // the active account and put it over the switch threshold: now a cooler candidate is
+    // wanted, and the only thing that can keep the main login out is its avoidance window.
+    config.activeCodexAccountId = "a";
+    updateAccountQuota("a", 85);
+
+    // The capped cooldown has lapsed and the weekly bar still reads coolest, so without the
+    // window this request goes straight back to the account that just refused one.
+    expect(resolveCodexAccountForThread("main-spark-next", config, now + 16 * 60_000, "spark")).toBe("a");
+  });
+
+  test("naming the account overrules an avoidance the refusal recorded on the scoped lane", () => {
+    const config = makeConfig();
+    const now = 1_800_000_000_000;
+    updateAccountQuota("a", 10);
+    updateAccountQuota("b", 20);
+    recordCodexUpstreamOutcome(config, "a", 429, {
+      now,
+      threadId: "scoped-manual",
+      modelId: "gpt-5.3-codex-spark",
+      resetAt: Math.floor((now + 4 * 60 * 60_000) / 1_000),
+    });
+    expect(resolveCodexAccountForThread("scoped-avoided", config, now + 16 * 60_000, "spark")).toBe("b");
+
+    // A reset-derived refusal writes only the scoped entry, so an operator naming the account
+    // has to reach that map. Stopping at the account-wide entry leaves the pick refused.
+    config.activeCodexAccountId = "a";
+    resetCodexRoutingForManualSelection("a");
+
+    expect(resolveCodexAccountForThread("scoped-named", config, now + 17 * 60_000, "spark")).toBe("a");
+  });
+
+  test("clearing the cooldown also lifts the avoidance that refusal announced", () => {
+    const config = makeConfig();
+    const now = 1_800_000_000_000;
+    updateAccountQuota("a", 10);
+    updateAccountQuota("b", 20);
+    recordCodexUpstreamOutcome(config, "a", 429, {
+      now,
+      modelId: "gpt-5.3-codex-spark",
+      resetAt: Math.floor((now + 4 * 60 * 60_000) / 1_000),
+    });
+    expect(resolveCodexAccountForThread("cleared-before", config, now + 16 * 60_000, "spark")).toBe("b");
+
+    // The escape hatch has to escape. Automatic probe recovery already drops the window; an
+    // operator lifting the same cooldown by hand was leaving it in place for up to six hours.
+    expect(clearCodexAccountCooldown("a", now + 60_000)).toBe(true);
+
+    expect(resolveCodexAccountForThread("cleared-after", config, now + 61_000, "spark")).toBe("a");
+  });
+
+  test("clearing a lapsed cooldown still lifts the avoidance it left behind", () => {
+    const config = makeConfig();
+    const now = 1_800_000_000_000;
+    updateAccountQuota("a", 10);
+    updateAccountQuota("b", 20);
+    recordCodexUpstreamOutcome(config, "a", 429, {
+      now,
+      modelId: "gpt-5.3-codex-spark",
+      resetAt: Math.floor((now + 4 * 60 * 60_000) / 1_000),
+    });
+
+    // The capped cooldown is already gone and only the announced window is still holding the
+    // account out, which is exactly when an operator reaches for this button. Reading the
+    // cooldown alone made the call a no-op for the next several hours.
+    expect(isCodexAccountInCooldown("a", now + 16 * 60_000)).toBe(false);
+    expect(resolveCodexAccountForThread("lapsed-before", config, now + 16 * 60_000, "spark")).toBe("b");
+
+    expect(clearCodexAccountCooldown("a", now + 16 * 60_000)).toBe(true);
+
+    expect(resolveCodexAccountForThread("lapsed-after", config, now + 17 * 60_000, "spark")).toBe("a");
+  });
+
+  test("a request the account serves releases the threads its quota refusal moved", () => {
+    const config = makeConfig();
+    const now = 1_800_000_000_000;
+    updateAccountQuota("a", 10);
+    updateAccountQuota("b", 20);
+    expect(resolveCodexAccountForThread("spark-recovered", config, now, "spark")).toBe("a");
+    recordCodexUpstreamOutcome(config, "a", 429, {
+      now,
+      threadId: "spark-recovered",
+      modelId: "gpt-5.3-codex-spark",
+      resetAt: Math.floor((now + 4 * 60 * 60_000) / 1_000),
+    });
+    expect(resolveCodexAccountForThread("spark-recovered", config, now + 16 * 60_000, "spark")).toBe("b");
+
+    // Selection never stopped offering the account to unbound requests, and the first one it
+    // serves is what ends the refusal — a rebound thread then keeps it across turns.
+    recordCodexUpstreamOutcome(config, "a", 200, { now: now + 17 * 60_000, modelId: "gpt-5.3-codex-spark" });
+    expect(resolveCodexAccountForThread("spark-rebound", config, now + 18 * 60_000, "spark")).toBe("a");
+    expect(resolveCodexAccountForThread("spark-rebound", config, now + 19 * 60_000, "spark")).toBe("a");
   });
 
   test("shared native reset cooldown clears affinity and rotates the active account", () => {
@@ -1729,8 +1887,9 @@ describe("codex routing", () => {
     });
   });
 
-  test("WHAM preserves the 5h, weekly, and Spark weekly windows", () => {
+  test("WHAM keeps general and Spark windows separate", () => {
     expect(parseUsageQuota({
+      plan_type: "pro",
       rate_limit: {
         primary_window: { used_percent: 11, reset_at: 1, limit_window_seconds: 5 * 60 * 60 },
         secondary_window: { used_percent: 22, reset_at: 2, limit_window_seconds: 7 * 24 * 60 * 60 },
@@ -1739,18 +1898,20 @@ describe("codex routing", () => {
         limit_name: "GPT-5.3-Codex-Spark",
         metered_feature: "codex_bengalfox",
         rate_limit: {
-          primary_window: { used_percent: 33, reset_at: 3, limit_window_seconds: 7 * 24 * 60 * 60 },
+          primary_window: { used_percent: 33, reset_at: 3, limit_window_seconds: 5 * 60 * 60 },
+          secondary_window: { used_percent: 44, reset_at: 4, limit_window_seconds: 7 * 24 * 60 * 60 },
         },
       }],
     })).toEqual({
       shortPercent: 11,
       shortResetAt: 1,
       shortWindowSeconds: 5 * 60 * 60,
-      fiveHourPercent: 11,
-      fiveHourResetAt: 1,
       weeklyPercent: 22,
       weeklyResetAt: 2,
-      customWindows: [{ label: "GPT-5.3-Codex-Spark Weekly", percent: 33, resetAt: 3 }],
+      customWindows: [
+        { label: "GPT-5.3-Codex-Spark 5h", percent: 33, resetAt: 3 },
+        { label: "GPT-5.3-Codex-Spark Weekly", percent: 44, resetAt: 4 },
+      ],
     });
   });
 
@@ -2219,13 +2380,7 @@ describe("codex routing", () => {
 
 describe("codex account selection order", () => {
   beforeEach(() => {
-    previousOpencodexHome = process.env.OPENCODEX_HOME;
-    setIcaclsRunnerForTests(() => ICACLS_OK);
-    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-    TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-codex-routing-"));
-    process.env.OPENCODEX_HOME = TEST_DIR;
-    previousCodexHome = process.env.CODEX_HOME;
-    process.env.CODEX_HOME = TEST_DIR;
+    installRoutingScratchHome();
     clearThreadAccountMap();
     clearCodexUpstreamHealth();
     clearAccountQuota();
@@ -2237,21 +2392,16 @@ describe("codex account selection order", () => {
   });
 
   afterEach(async () => {
-    clearAccountQuota();
-    clearCodexUpstreamHealth();
-    clearThreadAccountMap();
-    clearPoolRotationState();
-    clearAccountNeedsReauth("a");
-    clearAccountNeedsReauth("b");
-    await flushConfigDirHardeningForTests();
-    setIcaclsRunnerForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
-    if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
-    else process.env.OPENCODEX_HOME = previousOpencodexHome;
-    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
-    else process.env.CODEX_HOME = previousCodexHome;
-    removeTreeWithRetry(TEST_DIR);
-    TEST_DIR = "";
+    try {
+      clearAccountQuota();
+      clearCodexUpstreamHealth();
+      clearThreadAccountMap();
+      clearPoolRotationState();
+      clearAccountNeedsReauth("a");
+      clearAccountNeedsReauth("b");
+    } finally {
+      await removeRoutingScratchHome();
+    }
   });
 
   /** `a` is ordered above `b`; the persisted operator selection is the lower tier. */

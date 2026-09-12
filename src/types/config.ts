@@ -6,6 +6,12 @@ import type { CodexAccount } from "./accounts";
  * /v1/messages surface, the `ocx claude` launcher, and the GUI Claude page.
  */
 export interface OcxClaudeCodeConfig {
+  /**
+   * Opt-in relocation of supported trailing Claude harness notices from system instructions
+   * to a user input message on translated routes. Changes the Desktop cache-key prefix.
+   * Default: false; only literal true enables it. Native passthrough is unchanged.
+   */
+  stabilizePromptCache?: boolean;
   /** Claude ingress compatibility gate. Defaults to enforce. Native passthrough is exempt. */
   compatibility?: "shadow" | "enforce";
   /** Kill switch for the /v1/messages inbound (GUI "Claude ON" toggle). Default: enabled. */
@@ -283,6 +289,11 @@ export interface OcxHubConfig {
   /** Canonical browser-reachable management origin advertised by a hub. */
   managementPublicOrigin?: string;
   /**
+   * Canonical client-reachable DATA origin of this hub — what a remote machine passes as the
+   * positional URL to `ocx connect`, and what `ocx hub invite` prints.
+   */
+  dataPublicOrigin?: string;
+  /**
    * Optional management-only listener for a local HTTPS frontend such as Tailscale Serve.
    * The hostname is deliberately not configurable: when enabled the socket is always bound
    * to 127.0.0.1, and only GUI, session-bootstrap, and management API routes are admitted.
@@ -310,6 +321,14 @@ export interface OcxRemoteGuiConfig {
 }
 
 export type OcxConnectedClientId = "codex" | "claude";
+
+/**
+ * Redaction policy for management and CLI projections (#3859).
+ */
+export interface OcxPrivacyConfig {
+  /** Mask stored account emails before they leave the proxy. Omitted or `true` is the default. */
+  maskEmails?: boolean;
+}
 
 export interface OcxClientConnectionConfig {
   serverUrl: string;
@@ -358,6 +377,8 @@ export interface OcxConfig {
   remoteGui?: OcxRemoteGuiConfig;
   /** Remote-hub client state. The admission secret is stored only in service-api-token. */
   client?: OcxClientConnectionConfig;
+  /** Operator-facing redaction policy for management and CLI projections. */
+  privacy?: OcxPrivacyConfig;
   /** Opt in to one identical-turn retry when a Responses completion has no text or tool call. */
   emptyCompletionRetry?: boolean;
   /**
@@ -737,6 +758,12 @@ export interface OcxConfig {
    */
   codexDesktopAuthless?: boolean;
   /**
+   * Opt into Codex-owned client compaction while keeping OpenCodex routing. On an authenticated
+   * loopback bind, inject the dedicated `opencodex` model provider instead of overriding the
+   * built-in `openai` provider, so Codex does not select native remote compaction. Default off.
+   */
+  codexClientCompaction?: boolean;
+  /**
    * Compatibility mode: temporarily rewrite Codex resume-history metadata while the proxy is active
    * so Codex App can show old OpenAI chats and opencodex-created exec chats under its default
    * interactive-source/provider filters. Default true; originals are backed up and restored by
@@ -759,6 +786,8 @@ export interface OcxConfig {
   search?: OcxSearchConfig;
   /** Codex multi-account pool. */
   codexAccounts?: CodexAccount[];
+  /** Opt-in per-account activation policy for newly reset Codex quota windows by plan tier. */
+  codexPool?: OcxCodexPoolConfig;
   /** Account ids administratively excluded from future pool selection until resumed. */
   pausedCodexAccountIds?: string[];
   /** Opt-in per-account activation of newly reset Codex quota windows. */
@@ -839,6 +868,12 @@ export interface OcxConfig {
    */
   maxUpstreamBodyBytes?: number;
   /**
+   * Bounded on purpose. `resolveInboundBodyLimitBytes()` clamps to
+   * [1 MiB, 512 MiB]; an unbounded inbound cap is a memory DoS because the reader materializes
+   * the body several times over.
+   */
+  maxInboundBodyBytes?: number;
+  /**
    * Opt-in Anthropic OAuth PROACTIVE routing (#294). Default OFF.
    * Sticky session affinity; new sessions may pick lowest known 5h usage.
    * Experimental — see docs and GUI warning before enabling.
@@ -872,6 +907,13 @@ export interface OcxConfig {
    */
   oauthAccountFailover?: {
     enabled?: boolean;
+  };
+  /**
+   * Generic OAuth pool kernel and cache-affinity ordering. Off restores the pre-kernel path.
+   */
+  pool?: {
+    kernel?: boolean;
+    cacheAffinity?: boolean;
   };
   /** Opt-in Cursor OAuth account pool (fork; default off). */
   cursorAccountPool?: {
@@ -1176,6 +1218,14 @@ export interface OcxWebSearchSidecarConfig {
    * answer. Default: false (buffered, previous behavior).
   */
   streamRoutedModelOutput?: boolean;
+}
+
+/**
+ * Codex pool selection policy for plan-tier exclusions during ordinary rotation.
+ */
+export interface OcxCodexPoolConfig {
+  /** Plan keys ordinary rotation skips, matched case-insensitively against each account plan. */
+  excludedPlans?: string[];
 }
 
 /**

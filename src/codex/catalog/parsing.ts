@@ -151,6 +151,29 @@ export interface CatalogModel {
   codexToolMode?: "code_mode_only" | "shell";
   /** Normalized upstream capability names retained for management/API consumers (#485 follow-up). */
   capabilities?: string[];
+  /**
+   * This row is listed but cannot currently serve a request (#1711). Today the only value is
+   * "no_credit", set when every usable target has positive quota-exhaustion evidence.
+   *
+   * It is NOT visibility. The row stays `visibility: "list"` on purpose: the issue explicitly
+   * rejects hiding, and Codex Desktop only understands "list" and "hide" anyway, so hiding would
+   * be the one outcome the reporter asked not to have. An OpenCodex-aware consumer greys the
+   * entry; the native picker ignores the field, which is the honest limit of what a custom
+   * catalog field can do.
+   */
+  quotaInactiveReason?: "no_credit";
+  /**
+   * Discovered per-token cost class for this routed model (#3666). "free" means the provider's
+   * own /models row reported a numeric zero for BOTH the prompt and the completion rate;
+   * "paid" means at least one rate is above zero. ABSENT means unknown — the provider published
+   * no usable pair, or this row never came from a models API at all.
+   *
+   * Fail closed: a partial, non-numeric, or negative rate leaves the field absent, never "free",
+   * because showing a paid model under a Free filter costs the user money while hiding a free
+   * one costs a click. This is a management/Dashboard projection only — deriveEntry never
+   * serializes it into the Codex catalog, and it never affects routing or visibility.
+   */
+  pricingStatus?: "free" | "paid";
   /** OpenCodex-only catalog ownership marker; Codex ignores the serialized extension field. */
   catalogKind?: typeof CODEX_CUSTOM_MODEL_CATALOG_KIND | typeof CODEX_PROVIDER_MODEL_CATALOG_KIND;
 }
@@ -167,6 +190,23 @@ export const ROUTED_MODEL_COMPATIBILITY_EXCLUSIONS = new Set([
   // Issue #2330: OpenCode Go models absent from current documentation or returning terminal HTTP 400 errors.
   "opencode-go/mimo-v2-omni",
   "opencode-go/mimo-v2-pro",
+  /*
+   * DeepSeek retired `deepseek-v4-pro` on 2026-09-14 04:00 UTC and routes its requests to
+   * V4.1-Flash (api-docs.deepseek.com/news/news260910). Deleting the registry rows removes
+   * the model on providers that publish a static roster, but every provider below discovers
+   * its models live — there, a deleted row does not remove anything, it only strips the
+   * context window, the effort ladder and the text-only hint, so the retired model would
+   * keep appearing with its capabilities broken. Excluding the slug is what actually takes
+   * it out of the routed catalog.
+   */
+  "command-code/deepseek-deepseek-v4-pro",
+  "commandcode/deepseek-deepseek-v4-pro",
+  "orcarouter/deepseek-deepseek-v4-pro",
+  "cline-pass/cline-pass-deepseek-v4-pro",
+  "baseten/deepseek-ai-DeepSeek-V4-Pro",
+  "digitalocean/deepseek-v4-pro",
+  "qoder/DeepSeek-V4-Pro",
+  "codebuddy/deepseek-v4-pro",
 ]);
 
 export function isRoutedModelCompatibilityExcluded(slug: string): boolean {
@@ -485,7 +525,8 @@ export function applyNativeOpenAiContextOverride(entry: RawEntry, limits?: Nativ
   }
   // providerContextCaps.openai is a ceiling for native OpenAI rows regardless of where the
   // advertised window came from (#1430): preserved rows without a hardcoded override (e.g.
-  // gpt-5.4-mini) must stay under the cap too, and auto-compaction follows the capped window.
+  // gpt-5.3-codex-spark) must stay under the cap too, and auto-compaction follows the capped
+  // window.
   // The per-model window narrows the same rows for the same reason.
   const currentContext = typeof entry.context_window === "number" ? entry.context_window : undefined;
   const cappedContext = narrowNativeMaxContextWindow(nativeSlug, currentContext, limits);

@@ -11,8 +11,7 @@ runs helper features around provider requests.
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `port` | `number` | `10100` | Proxy listen port. |
-| `hostname?` | `string` | `"127.0.0.1"` | Bind address. Non-loopback binds require TLS and a data-plane credential. |
-| `tls?` | `{ certFile: string; keyFile: string; publicOrigin: string }` | — | Serve HTTPS with the supplied readable certificate and private-key files. `publicOrigin` must be the exact HTTPS origin (for example `https://proxy.example.com`) used for generated callback and client URLs; paths, credentials, queries, and fragments are rejected. |
+| `hostname?` | `string` | `"127.0.0.1"` | Bind address. A non-loopback bind requires a data-admission token, resolved from `OPENCODEX_API_AUTH_TOKEN`, then `OCX_API_TOKEN_FILE`, then the installed owner-only `service-api-token` — nothing has to be exported by hand. See [Remote access](#remote-access). |
 | `proxy?` | `string` | — | Outbound HTTP(S) proxy URL, `${ENV_VAR}`, or `"auto"`. Applied to `HTTP_PROXY` / `HTTPS_PROXY` only when those variables are unset; loopback remains in `NO_PROXY`. `"auto"` reads the Windows system proxy (WinINET `ProxyEnable`/`ProxyServer`, `https=` then `http=` entry) once at process start and logs the host it chose. On other platforms, or when the system proxy is off, SOCKS-only, or unreadable, it uses direct egress and says so. PAC/WPAD and live proxy changes are not followed; restart the service after changing the system proxy. |
 | `noProxy?` | `string \| string[]` | — | Hosts that bypass `proxy`, merged with inherited `NO_PROXY` and loopback entries. A string may use comma-separated `NO_PROXY` syntax or `${ENV_VAR}`. |
 | `emptyCompletionRetry?` | `boolean` | `false` | Opt in to one identical Responses retry when a turn has no text or tool call, including a stream that ends before a terminal event. The retry may be billable. `OCX_EMPTY_COMPLETION_RETRY=0` disables it without changing config; combo and routed-compaction turns remain excluded. |
@@ -22,18 +21,33 @@ runs helper features around provider requests.
 | `shutdownTimeoutMs?` | `number` | `5000` | Graceful drain deadline before active turns are aborted. |
 | `websockets?` | `boolean` | `false` | Advertise and admit the client-facing Responses WebSocket path. False keeps clients on HTTP/SSE; it does not disable an eligible canonical ChatGPT upstream WS optimization. Complete-input requests may reuse an upstream connection within the same selected credential, account, thread and turn; changed handshake policy or missing identity keeps requests on separate connections. This does not trim HTTP input or create previous-response IDs. |
 | `corsAllowOrigins?` | `string[]` | `[]` | Additional exact origins allowed by CORS. Loopback origins are always allowed. Authority-based browser extension origins such as `chrome-extension://<extension-id>` are supported; `*` is not a wildcard. Firefox and Safari regenerate the extension UUID (per install / per browser launch), so update the entry when the origin changes. |
-| `apiKeys?` | `OcxApiKey[]` | `[]` | Generated `ocx_…` data-plane credentials accepted on non-loopback binds. Dashboard-managed; management routes require the separate admin token. |
+| `apiKeys?` | `OcxApiKey[]` | `[]` | Generated `ocx_…` credentials accepted by management and data-plane auth on non-loopback binds. Dashboard-managed. |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` | disabled | Opt-in archived-session cleanup policy. Never enabled implicitly. |
 | `appOwnedMemoryBudgetMb?` | `number` | `256` | Cap in MiB for evictable app-owned logs, caches, blobs, and continuation payloads. Range 64–4096; not an RSS cap. |
 | `codexAutoStart?` | `boolean` | `true` | Let the Codex shim run `ocx ensure` before launching Codex. False makes ensure a no-op. |
 | `codexShimAutoRestore?` | `boolean` | `true` | Restore an installed shim after a completed external Codex update replaces it. Environment opt-out: `OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0`. |
 | `codexDesktopAuthless?` | `boolean` | `false` | Opt-in authless Codex Desktop routing on a loopback bind: inject the dedicated `opencodex` provider with `requires_openai_auth = false` so Desktop opens without a ChatGPT login. Ignored on non-loopback binds. `ocx system settings --desktop-authless on`. See [Codex integration](/guides/codex-integration/#authless-codex-desktop-opt-in). |
-| `resetCreditAutoRedeem?` | `{ enabled?: boolean; leadTimeMinutes?: number }` | off | Opt-in: redeem the main Codex account's soonest-expiring reset credit `leadTimeMinutes` (1–60, default 10) before it expires. Every attempt re-reads the upstream credit list first and skips when the credit is gone (for example, redeemed by hand); the `redeem_request_id` is journaled in `$OPENCODEX_HOME/reset-credit-auto-redeem.json` before the call so a crash replays the same idempotent request instead of spending a second credit. Logs carry a hashed account key only. |
+| `codexClientCompaction?` | `boolean` | `false` | Opt into Codex client-side compaction on an authenticated loopback bind. Uses the dedicated `opencodex` provider identity with `requires_openai_auth = true`, preventing new routed compactions from storing OpenCodeX-owned `ocx1:` state. `codexDesktopAuthless` takes precedence when both are enabled and keeps `requires_openai_auth = false`. V2 sub-agent routing is unchanged. `ocx system settings --client-compaction on`. See [Codex integration](/guides/codex-integration/#client-side-compaction-opt-in). |
+| `resetCreditAutoRedeem?` | `{ enabled?: boolean; leadTimeMinutes?: number }` | off | Opt-in: redeem the main Codex account's soonest-expiring reset credit `leadTimeMinutes` (1–60, default 10) before it expires. Every attempt re-reads the upstream credit list first and skips when the credit is gone (for example, redeemed by hand); the `redeem_request_id` is journaled in `$OPENCODEX_HOME/reset-credit-auto-redeem.json` before the call so a crash replays the same idempotent request instead of spending a second credit. Servers sharing this configuration directory coordinate reservations and settlements so one process does not replace another's request record. Logs carry a hashed account key only. |
 | `syncResumeHistory?` | `boolean` | `true` | Reversible Codex App history compatibility. Original metadata is backed up and restored by `ocx stop` / `ocx restore`. |
 | `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` | off | Redirect recognized Codex helper/shadow calls to a chosen model while preserving the request's configured reasoning effort. The default source prefix is `gpt-5.6-luna`; older clients through 0.144.x used `gpt-5.4-mini`, which `sourceModels` can restore. |
 | `webSearchSidecar?` | `OcxWebSearchSidecarConfig` | on when usable | Web-search sidecar options. |
 | `visionSidecar?` | `OcxVisionSidecarConfig` | on when usable | Image-description sidecar options. |
 | `images?` | `OcxImagesConfig` | automatic OpenAI selection | Standalone Images relay options for Codex `image_gen`. |
+
+While the canonical ChatGPT upstream WebSocket waits for the first Responses event after
+sending the create frame, it watches for liveness rather than a fixed deadline. When the socket
+supports protocol pings, the proxy pings it every 15 seconds. Any inbound frame — quota,
+response metadata, or a pong — resets a 90-second silence clock, so a socket without ping
+support still stays alive on its own frames, and only 90 seconds with nothing at all settles the request as an
+HTTP 504 with an `upstream_no_response` error. A slow but alive origin therefore waits for the
+client's own deadline or for `connectTimeoutMs` (default 200s), whichever comes first; a
+connect timeout that fires after the create frame was sent settles as the same 504. A socket
+that closes or errors before the first Responses event settles as an HTTP 502 with
+`upstream_closed_before_response`. These statuses are never retried inside the proxy — the
+frame may already be executing upstream, so the client applies its own retry policy exactly as
+it would when connected to the backend directly. Once the response has started, a later drop
+surfaces inside the stream as before. `stallTimeoutSec` is unrelated to this window.
 
 `noProxy` accepts either a comma-separated string or an array. Both forms add entries without
 replacing an inherited `NO_PROXY`:
@@ -103,32 +117,32 @@ path failed, and does not establish a general fix.
 
 ## Remote access
 
-The default `127.0.0.1` bind is loopback-only. A non-loopback address such as `0.0.0.0` requires
-native TLS and a data-plane credential. A remote dashboard also needs the separate admin token
-(`OPENCODEX_ADMIN_AUTH_TOKEN`, or the generated admin-token file); `apiKeys` do not grant management
-access. Configure the listener and export the data-plane token before starting:
+The default `127.0.0.1` bind is loopback-only. A non-loopback address such as `0.0.0.0` or a tailnet
+IP requires token authentication on both `/api/*` and the data plane.
 
-```jsonc
-{
-  "hostname": "0.0.0.0",
-  "tls": {
-    "certFile": "/etc/opencodex/server.crt",
-    "keyFile": "/etc/opencodex/server.key",
-    "publicOrigin": "https://proxy.example.com"
-  }
-}
-```
+You do not have to produce that token. `ocx service install` provisions one on a non-loopback bind,
+in this order: `OPENCODEX_API_AUTH_TOKEN` from the installing shell, then an existing owner-only
+`service-api-token` file, then 32 fresh random bytes. The result is written `0600` and the launch
+wrapper (launchd plist, systemd unit, Windows wrapper) reads the file at start, so the value never
+enters a service definition or argv. A foreground `ocx start` applies the same precedence —
+environment, then `OCX_API_TOKEN_FILE`, then the installed `service-api-token` — so it binds a
+non-loopback hostname without an exported token too.
+
+A **management admin token** is refused in either place it can appear — the environment variable or
+a reused `service-api-token` file — and the message names the remedy for that place: unset the
+variable, or delete the file and run `ocx service repair`. Both checks run before the loopback
+short-circuit, because the launch wrapper reads the file into `OPENCODEX_API_AUTH_TOKEN` whatever
+the hostname, so an admin-token file fences the management API closed even on a loopback bind.
+`ocx status` reports that state as `admin-collision (file)` on a hub.
+
+Setting the variable yourself is still supported for an operator who wants to own the value:
 
 ```bash
 export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
 ocx start
 ```
 
-The proxy refuses a remote bind when either requirement is missing. Certificate and listener changes
-take effect after restart; certificate trust and renewal remain the operator's responsibility. For a
-background service, export the token before `ocx service install` so launchd, systemd, or Task
-Scheduler receives it. SSH port forwarding to the loopback listener is the plaintext-free alternative.
-Data-plane clients should send:
+Clients should send:
 
 ```text
 x-opencodex-api-key: your-secret-token
@@ -178,16 +192,54 @@ credential. The main listener is untouched — remote callers still need the tok
 `ocx sync` then writes `base_url = "http://127.0.0.1:10200/v1"` into the managed Codex provider block
 and omits the auth header, so a directly spawned app-server works without any credential plumbing.
 
-The port is required and must differ from the proxy port. It is never OS-assigned: an ephemeral port
+When you set `port`, it must differ from the proxy port. It is never OS-assigned: an ephemeral port
 would change across restarts while already-running app-servers kept the previous `base_url`.
 
+Omitting `port` selects the **companion** form — the listener binds the proxy port on `127.0.0.1`:
+
+```json
+{
+  "hostname": "100.76.170.81",
+  "port": 10100,
+  "unauthenticatedLoopbackListener": { "enabled": true }
+}
+```
+
+Remote clients dial `100.76.170.81:10100` with a credential; local processes dial
+`127.0.0.1:10100` without one. That is the address every local integration already writes, so
+`ocx claude`, Claude Desktop, Cursor and the system-env injection keep working on a host whose
+public bind they cannot reach. The companion form is accepted only when `hostname` is a specific
+non-loopback, non-wildcard address: on `127.0.0.1`, `localhost` or `0.0.0.0` the public listener
+already holds that loopback address, so OpenCodex refuses the pair at write time and at startup
+rather than failing the second bind. On those binds you do not need the listener at all — a
+loopback bind already admits local callers.
+
+With a `port` set, the local integrations follow the listener: `ocx claude`, the `system-env`
+injection, the Claude Desktop profile, the Cursor gateway value and the routed vision helper all
+write `http://127.0.0.1:<listener port>`, the same port `ocx sync` writes into Codex. In the
+companion form those same integrations keep writing the proxy port, which is where the companion
+socket is.
+
+**Restart the proxy after changing this field, in either form.** The sockets are bound once at
+startup and the exported client values are written from the resolved port, so a running proxy keeps
+its previous answer — on a ported listener that is the difference between a served request and a
+`404` from the listener.
+
+On a `runtimeRole: "hub"`, this field is also the gate on whether the hub rewrites **its own** local
+client configuration. With the listener off, `ocx sync`, `ocx ensure` and `ocx restore back` skip the
+hub's own Codex/Grok/Claude writes and say so, naming
+`unauthenticatedLoopbackListener` rather than the `clientIntegrations` toggle.
+
 The listener serves only `POST /v1/responses`, its WebSocket upgrade, `POST /v1/responses/compact`,
-`POST /v1/alpha/search` (the native Codex web-search relay), `GET /v1/models`, `POST /v1/messages`,
-`POST /v1/messages/count_tokens`, and the realtime voice surface: standalone WebSocket upgrades,
-WebRTC call creation (`POST /v1/live`, `POST /v1/realtime/calls`), and keyed sideband join upgrades
-(`/v1/live/{callId}`, `/v1/realtime/calls/{callId}`, `/v1/realtime?call_id=`). The two Messages routes
-support local Claude Code clients speaking the Anthropic protocol. Everything else, including `/api/*`
-and the dashboard, returns `404`.
+`POST /v1/messages` (the Anthropic wire Claude Code and Claude Desktop speak),
+`POST /v1/chat/completions` (the OpenAI chat wire Cursor and the vision helper speak),
+`POST /v1/alpha/search` (the native Codex web-search relay), `GET /v1/models`, and the realtime
+voice surface: the standalone WebSocket upgrades, WebRTC call creation (`POST /v1/live`,
+`POST /v1/realtime/calls`), and the keyed sideband join upgrades (`/v1/live/{callId}`,
+`/v1/realtime/calls/{callId}`, `/v1/realtime?call_id=`). Everything else, including `/api/*`,
+`/healthz`, `/readyz` and the dashboard, returns `404` — local management reads such as
+`ocx claude`'s discovery call go to the authenticated management surface with a management
+credential, never here.
 
 :::danger[This is an unauthenticated surface]
 Every process on the machine can use this listener. It spends account quota and paid provider
@@ -199,37 +251,23 @@ a page you visit can make your browser connect to `127.0.0.1`. The listener ther
 same `Host` and `Origin` checks as an ordinary loopback bind. Off by default.
 :::
 
-### Troubleshooting: invalid peer certificate UnknownIssuer
-
-If Codex shows `invalid peer certificate: UnknownIssuer`, the Codex client has not trusted the proxy certificate. A self-signed certificate is not trusted until its CA is installed on the Codex machine.
-
-- For a private network, select **Loopback + SSH** in the dashboard, save, restart the proxy, and use SSH forwarding. This avoids certificate trust setup.
-- For a direct remote bind, select **Remote TLS** and use a certificate whose CA is trusted on the Codex machine. Its SAN must include the hostname or IP used in `tls.publicOrigin`.
-
-The server-mode selector updates the saved listener configuration. Listener changes take effect after restarting the proxy.
-
 ### SSH port forwarding
 
-Remote use does not require a remote bind. Keep OpenCodex on loopback, then run this temporary
-tunnel on the computer where you want to open the dashboard:
+Remote use does not require a remote bind. Keep loopback and forward it:
 
 ```bash
-ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 user@10.0.0.51
+ssh -L 20100:localhost:10100 you@remote
 ```
 
-Keep that terminal open, then visit `http://127.0.0.1:20100/#dashboard`. Use HTTP at the forwarded
-address: SSH encrypts the connection between the two computers. Replace the SSH user and host, and
-choose another local port if `20100` is occupied.
-
-Requests whose Host resolves to `localhost`, `127.0.0.1`, or `::1` remain loopback regardless of
-port, so `http://127.0.0.1:20100/v1` also works as a client base URL. `ocx` writes only the default
-local `127.0.0.1` address into managed client config.
+Any local port works. Requests whose Host resolves to `localhost`, `127.0.0.1`, or `::1` remain
+loopback regardless of port, so `http://localhost:20100/v1` works. Set that base URL in the client;
+`ocx` writes only the default local `127.0.0.1` address into managed client config.
 
 Provider OAuth callbacks listen on a fixed remote port. Log in on the remote machine or forward that
 port too:
 
 ```bash
-ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 -L 127.0.0.1:1455:127.0.0.1:1455 user@10.0.0.51
+ssh -L 20100:localhost:10100 -L 1455:localhost:1455 you@remote
 ```
 
 If a registered callback port is already in use and the login surface offers manual input, OpenCodex
@@ -239,83 +277,36 @@ code into OpenCodex. The pending flow preserves state and PKCE validation. Calle
 input still fail closed.
 
 :::caution[Forwarded loopback is unauthenticated]
-Always bind the forwarded port explicitly to `127.0.0.1`. Do not use `ssh -g`, broad container
-publishing, or forwarding modes that expose the client side on `0.0.0.0`; doing so can make the
-unauthenticated loopback dashboard and provider access reachable by other machines.
+Plain `ssh -L` listens on your local loopback and is safe for the default unauthenticated bind. Do not
+use `ssh -g -L`, broad container publishing, or forwarding modes that expose the client side on
+`0.0.0.0`. Bind explicitly with `ssh -L 127.0.0.1:20100:localhost:10100` when unsure.
 :::
 
-### Persistent macOS SSH tunnel
+## Account email masking (`privacy`)
 
-A per-user LaunchAgent can keep the same tunnel running after login. The dashboard cannot install
-this for you; create it on the Mac where you open the dashboard.
+Stored account emails are masked everywhere they leave the proxy — the dashboard account lists,
+`GET /api/codex-auth/accounts`, `GET /api/oauth/status`, and the `ocx status` logins section all
+show `p***n@example.com` rather than the address on file.
 
-First create a dedicated SSH key, verify the server's host-key fingerprint, and authorize the public
-key on the OpenCodex host. The first two SSH connections may request the remote account password:
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `privacy.maskEmails?` | `boolean` | `true` | Set to `false` to show stored account emails in full. Absent, `true`, and any malformed value all keep masking, so only a deliberate `false` reveals an address. |
 
-```bash
-ssh-keygen -t ed25519 -N "" -f "$HOME/.ssh/opencodex-dashboard" -C "opencodex dashboard tunnel"
-ssh user@10.0.0.51 true
-cat "$HOME/.ssh/opencodex-dashboard.pub" | ssh user@10.0.0.51 'umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys'
-ssh -i "$HOME/.ssh/opencodex-dashboard" -o BatchMode=yes user@10.0.0.51 true
+Turn it off when you run many accounts on a machine you control and cannot tell them apart from
+masked forms. Read the flag as a disclosure decision rather than a display preference: management
+is not always loopback, so on a hub configured with `remoteGui` an unmasked address reaches every
+management principal that can reach the hub, not only someone sitting at the machine. The flag
+moves only the email field — tokens, refresh tokens, and account identifiers stay redacted either
+way.
+
+```json
+{ "privacy": { "maskEmails": false } }
 ```
 
-Only continue when the final command exits successfully without a password prompt. Create the log
-directory, then save the following as
-`~/Library/LaunchAgents/me.opencodex.dashboard-tunnel.plist`. Replace `example`, the SSH user, and host
-value; LaunchAgent paths must be absolute, so do not put `$HOME` or `~` in the plist.
-
-```bash
-mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/OpenCodex"
-```
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>me.opencodex.dashboard-tunnel</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/bin/ssh</string>
-    <string>-N</string>
-    <string>-T</string>
-    <string>-o</string><string>BatchMode=yes</string>
-    <string>-o</string><string>ExitOnForwardFailure=yes</string>
-    <string>-o</string><string>ServerAliveInterval=30</string>
-    <string>-o</string><string>ServerAliveCountMax=3</string>
-    <string>-i</string><string>/Users/example/.ssh/opencodex-dashboard</string>
-    <string>-L</string><string>127.0.0.1:20100:127.0.0.1:10100</string>
-    <string>user@10.0.0.51</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>ThrottleInterval</key><integer>10</integer>
-  <key>StandardOutPath</key><string>/Users/example/Library/Logs/OpenCodex/dashboard-tunnel.log</string>
-  <key>StandardErrorPath</key><string>/Users/example/Library/Logs/OpenCodex/dashboard-tunnel.error.log</string>
-</dict>
-</plist>
-```
-
-Validate and load it, then verify both the agent and tunnel:
-
-```bash
-plutil -lint "$HOME/Library/LaunchAgents/me.opencodex.dashboard-tunnel.plist"
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/me.opencodex.dashboard-tunnel.plist"
-launchctl print "gui/$(id -u)/me.opencodex.dashboard-tunnel"
-curl -fsS http://127.0.0.1:20100/healthz
-open http://127.0.0.1:20100/#dashboard
-```
-
-Inspect failures in `~/Library/Logs/OpenCodex/dashboard-tunnel.error.log`. After editing the plist,
-unload and reload it; `kickstart -k` restarts the already-loaded agent without rereading the plist:
-
-```bash
-tail -f "$HOME/Library/Logs/OpenCodex/dashboard-tunnel.error.log"
-launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/me.opencodex.dashboard-tunnel.plist"
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/me.opencodex.dashboard-tunnel.plist"
-launchctl kickstart -k "gui/$(id -u)/me.opencodex.dashboard-tunnel"
-```
+`ocx config set privacy.maskEmails false` fails with `config parent path not found` until the
+block exists, because `config set` walks into existing objects and never creates them. Write the
+whole object instead — `ocx config set privacy '{"maskEmails":false}'` — or add the block to
+`config.json` by hand.
 
 ## Storage cleanup
 
@@ -422,57 +413,35 @@ These settings govern `/v1/messages`, `/v1/messages/count_tokens`, the `ocx clau
 | --- | --- | --- | --- |
 | `claudeCode.bodyStallSec?` | `number` | `90` | Native-passthrough body inactivity budget in seconds while a read is pending, not total duration. Minimum 1; exactly `0` disables. |
 | `claudeCode.bodyMaxBytes?` | `number` | `67108864` | Cumulative native-passthrough body cap for streamed and buffered responses. Exactly `0` disables. |
+| `claudeCode.compatibility?` | `"shadow" \| "enforce"` | unset | Optional compatibility admission for translated `/v1/messages` requests. `shadow` records unsupported features and continues; `enforce` returns an Anthropic-shaped 400 before inference. Native Anthropic passthrough remains unchanged. |
 | `claudeCode.authMode?` | `"proxy" \| "subscription"` | auto | How launch handles `ANTHROPIC_AUTH_TOKEN`. Auto detects auth each launch; an explicit value is never overridden. |
 | `claudeCode.authModeMigratedAt?` | `string` | unset | Internal one-time upgrade marker. Do not set manually. |
 | `claudeCode.classifierModel?` | `string` | unset | Explicit target for Claude Code Auto Mode classifier turns, as a qualified `provider/model` (for example `RelayA/claude-opus-5`). Auto Mode sends bare safety checks such as `claude-opus-5` with no provider, so without this they fall through to `defaultProvider` — which may not speak Anthropic at all. Nothing is inferred automatically: only a target you declare here is used. |
 | `claudeCode.classifierFallbacks?` | `string[]` | unset | Ordered classifier targets used when `classifierModel` is not set. Same qualified `provider/model` form; the first usable entry wins. An explicit `modelMap` entry for the classifier model still outranks both. |
 | `claudeCode.subagentEffort?` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | inherit | Effort written to generated `~/.claude/agents/ocx-*.md`; separate from Codex guidance and proxy caps. Restart through `ocx claude` to regenerate. |
-| `claudeCode.compatibility?` | `"shadow" \| "enforce"` | `enforce` | Compatibility gate for routed Claude ingress: `enforce` rejects unsupported requests before upstream activity with `400 invalid_request_error`; `shadow` records ordinary incompatibilities without rejecting, but signed-thinking ownership and other safety invariants still fail closed. |
 
 The compatibility policy applies to Claude Code, Desktop and other clients using translated
-Messages, including `?beta=true` and non-streaming requests. Omitted or invalid modes use
-`enforce`; native Anthropic routes bypass the gate. The fork preserves supported Responses
-mappings, including strict/deferred tool definitions on the OpenAI Responses adapter,
-tool search, structured output and service tier. Unsupported protocol semantics reject before
-inference; genuine Anthropic signed thinking also rejects on translated routes in `shadow`.
-See the [compatibility feature matrix](/guides/claude-code/#compatibility-mode) for exact rules.
+Messages, including `?beta=true` and non-streaming requests. Every translated target uses the
+same conservative policy, including Anthropic and native Responses adapters. It rejects
+document content, thinking/redacted-thinking replay, hosted search and execution tools,
+tool-search references, active deferred loading, strict tools, non-default caller modes,
+structured-output formats, explicit service-tier intent, MCP connector features, context
+management, containers, inference placement and unsupported protocol fields or blocks.
 
-Shadow evidence contains only fixed protocol codes and derived reasons, retained in request
-logs and `usage.jsonl` and restored on restart. Its rejection diagnostics exclude features
-supported by the final adapter. Configure the mode in `config.json` and restart the proxy to
-load it; there is no dedicated GUI setter. Count-tokens and direct Responses/Chat APIs are
-outside this policy; successful token counting does not imply Messages admission. This
-setting does not add a global authorization boundary.
+Unset preserves legacy translation. Cache hints, tool input examples and ordinary
+thinking/effort settings are deliberately admitted with possible degradation: this setting
+does not guarantee cache breakpoints or TTL, retained examples, exact thinking budgets or
+lossless translation. Beta headers alone are not validated for feature support. Shadow
+evidence contains only fixed protocol codes and derived reasons, retained in request logs
+and `usage.jsonl` and restored on restart. An invalid non-unset mode returns a fixed 503
+configuration error on translated Messages. Configure the value in `config.json` and
+restart the proxy to load it; there is no dedicated GUI setter. Count-tokens and direct
+Responses/Chat APIs are outside this policy; successful token counting does not imply
+Messages admission. This setting does not add a global authorization boundary.
 
 Auto auth selects subscription when stored Claude auth is found, proxy when none is found, and
 subscription with a warning when detection is inconclusive. See
 [Claude Code auth mode](/guides/claude-code/#auth-mode).
-
-When `unauthenticatedLoopbackListener.enabled` is explicitly `true`, its Claude compatibility
-surface admits exactly `POST /v1/messages` and `POST /v1/messages/count_tokens` (POST only).
-No other Claude path is admitted there; the listener is off by default, its `port` is required,
-and that port must differ from the proxy port. Public-listener authentication is unchanged by
-the secondary listener. See
-[Local clients that cannot receive the token](#local-clients-that-cannot-receive-the-token).
-
-### Claude directive trust and token benchmark
-
-Generated `~/.claude/agents/ocx-*.md` definitions carry signed route and optional effort
-directives. OpenCodex verifies a present signature before provider dispatch; a malformed or
-invalid signature fails closed with `400 invalid_request_error`. A definition with no signature
-may use compatibility fallback only when its directive exactly matches an active OpenCodex-owned
-roster entry; arbitrary unsigned text is ignored. Diagnostics never show key material.
-
-To compare routed token estimates with authoritative Anthropic counts, run
-`bun run benchmark:claude-tokens -- --provider <provider> --model <model> --confirm-live-provider-charges [--json]`
-deliberately. The confirmation flag is explicit consent: confirmed runs send real requests and
-may incur provider charges, so do not automate or run them unattended. The benchmark uses a
-deterministic sanitized fixture set, sends fixtures sequentially without retries or fallback,
-and emits only a non-persistent allowlist of fixture ids/digests, states, metrics, provider kind,
-and model id (never request bodies, credentials, or account identifiers). A fixture passes when
-its absolute error is within `max(32 tokens, 20%)`; the weighted aggregate must remain within
-10%. Routed `/v1/messages/count_tokens` remains a local approximation for routed models; only
-native Anthropic requests with an `sk-ant-` credential pass through to Anthropic.
 
 ## Shadow calls
 
@@ -541,7 +510,7 @@ an inactivity guard, not a total generation deadline.
 | --- | --- | --- | --- |
 | `enabled?` | `boolean` | on when usable | Master image-description switch. |
 | `backend?` | `"openai" \| "anthropic"` | auto | Explicit wins; unset prefers a usable stored Anthropic OAuth credential, else `openai`. |
-| `model?` | `string` | backend-dependent | `gpt-5.4-mini` for OpenAI or `claude-sonnet-5` for Anthropic. |
+| `model?` | `string` | backend-dependent | `gpt-5.6-luna` for OpenAI or `claude-sonnet-5` for Anthropic. |
 | `maxDescriptionsPerTurn?` | `number` | `8` | New description cache misses admitted per main turn. `0` disables calls; invalid values use default. |
 | `timeoutMs?` | `number` | `45000` | Sidecar fetch timeout. Integer 1–2147483647. |
 
@@ -561,6 +530,7 @@ intended account and workload.
 | Key | Type | Default when absent | What it does |
 | --- | --- | --- | --- |
 | `hub.managementPublicOrigin` | string | unset | The canonical browser-reachable management origin a hub advertises, for example the HTTPS origin Tailscale Serve prints. It is what `/readyz` reports as `managementUrl` while `runtimeRole` is `hub`; with it unset the hub falls back to whatever origin each request arrived on, so a client behind a different frontend can be handed an address it cannot reach. |
+| `hub.dataPublicOrigin` | string | unset | The canonical origin a remote client should dial for the **data** plane, for example the HTTPS origin a TLS frontend publishes in front of the tailnet bind. Advisory only: it is never a bind address and changing it moves no socket. `ocx hub invite` prints it as the positional URL of the `ocx connect` line, falling back to `http://<hostname>:<port>` — which is a LAN/tailnet address a remote machine may not be able to reach over TLS, so set this on any hub with a frontend. Unlike most optional keys it is **not** silently dropped when malformed: a typo is rejected at write time, because falling back to the bind address is exactly what the field exists to avoid. |
 | `hub.managementIngress` | `{enabled:false}` or `{enabled:true, port}` | `{enabled:false}` | An extra management-only listener for a local HTTPS frontend. The hostname is not configurable: when enabled the socket always binds `127.0.0.1`, and only GUI, session-bootstrap, and management API routes are admitted. Data-plane routes are rejected before dispatch. |
 | `remoteGui.allowedTailscaleUsers` | string[] | `[]` (empty — nobody) | Exact Tailscale login identities allowed to be issued an automatic remote GUI session. The `Tailscale-User-Login` header is trusted **only** on the separate management ingress; an empty list means no remote identity can mint a session, which is the safe default rather than an oversight. Identities are compared exactly, so a typo silently denies access. |
 | `remoteGui.allowInsecureHttp` | boolean | unset | **Retired — has no effect.** It once permitted a one-time pairing exchange over non-loopback plaintext HTTP. A pairing grant now crosses loopback or authenticated HTTPS only. The key is still parsed so an existing `config.json` keeps loading (the schema is strict, and dropping the key outright would make an older config fail to load entirely); a persisted `true` is reported once and then ignored. Remove it from your config. |
@@ -569,3 +539,19 @@ A hub that is reachable from a browser needs `hub.managementPublicOrigin` and at
 in `remoteGui.allowedTailscaleUsers`. Setting the origin without the user list produces a hub that
 advertises itself correctly and then refuses every session; setting the user list without the
 origin produces sessions pointed at whichever origin the request happened to use.
+
+`dataPublicOrigin` and `managementPublicOrigin` are two independent advertisements, and on a real
+deployment they are two different sockets: management is the loopback-only ingress published on 443,
+data is the tailnet bind published on its own HTTPS port. They are the two halves of what
+`ocx hub invite` prints, and `managementPublicOrigin` is the stricter of the two — a pairing grant
+records it as the grant's own server origin and the exchange compares against it, which is why
+`ocx hub invite --management-url` can only *confirm* the configured value and refuses one that
+differs. `--data-url` really is an override, because nothing is bound to it. With neither
+`dataPublicOrigin` nor `--data-url` set, `invite` falls back to the bind address — and on a
+loopback or wildcard bind, where that would resolve to this machine's own loopback, it refuses
+rather than advertising an address the other machine cannot use.
+
+A hub that serves its own local clients also sets
+[`unauthenticatedLoopbackListener`](#local-clients-that-cannot-receive-the-token). Its port-less
+companion form is what makes a hub a single-port deployment, and it is refused on a loopback or
+wildcard `hostname`, where the public listener already holds `127.0.0.1:<port>`.

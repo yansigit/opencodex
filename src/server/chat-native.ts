@@ -33,6 +33,7 @@ import {
 } from "../lib/translator-budget";
 import {
   hasKeyPoolFailover,
+  selectProactiveApiKeyTransport,
   rateLimitRetryDelayMs,
   rateLimitRetryPolicyFor,
   rotateProviderTransportOn429,
@@ -40,6 +41,7 @@ import {
 } from "../providers/key-failover";
 import { fastPolicyForModel } from "../providers/service-tier";
 import { providerApiKeySelectionIsCurrent, resolveCurrentProviderApiKeyTransport } from "../providers/api-key-selection";
+import { enrichOpenCodeZenFreeTierMessage } from "../providers/opencode-zen-rate-limit";
 import type { OcxProviderTransport } from "../providers/xai-transport";
 import type { RouteResult } from "../router";
 import type { OcxConfig, OcxProviderConfig } from "../types";
@@ -234,6 +236,14 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
     unregisterTurn(upstream);
   };
   const connectMs = config.connectTimeoutMs ?? 200_000;
+  // Native chat is its own entry path -- chat-completions.ts routes here directly and never
+  // through the Responses core -- so the pre-dispatch key preference is applied again here
+  // rather than inherited. Assigned before the adapter binds below, for the same reason it is
+  // assigned before the transport pin in core.ts.
+  // Transport variant: the bare picker answers with the persisted row, which for a built-in
+  // provider carries no adapter id or base URL until routedProviderConfig backfills it.
+  const proactiveKeyProvider = selectProactiveApiKeyTransport(config, route.providerName, route.provider);
+  if (proactiveKeyProvider) route.provider = proactiveKeyProvider;
   let activeProvider: OcxProviderConfig = route.provider;
   let activeAdapter: ProviderAdapter = createOpenAIChatAdapter(activeProvider);
   let activeRequest: AdapterRequest;
@@ -438,12 +448,20 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
       && (isCyberPolicyCode(upstreamCode) || isCyberPolicyMessage(upstreamMessage))
       ? upstreamMessage
       : detail ? `Provider error ${response.status}: ${detail}` : `Provider error ${response.status}`;
+    // Zen's keyless free tier refuses the request outright rather than rate-limiting it, and
+    // the raw `MissingSessionID` tells a user nothing about why or what to do (#4121).
+    const clientMessage = enrichOpenCodeZenFreeTierMessage(message, {
+      providerName: route.providerName,
+      baseUrl: route.provider.baseUrl,
+      adapter: route.provider.adapter,
+      upstreamErrorType: upstreamType,
+    });
     const classified = classifyError(
       response.status,
       upstreamType ?? (response.status === 401 ? "authentication_error"
         : response.status === 429 ? "rate_limit_error"
           : response.status >= 500 ? "server_error" : "invalid_request_error"),
-      message,
+      clientMessage,
     );
     if (isCyberPolicyCode(upstreamCode) || classified.code === CYBER_POLICY_ERROR_CODE) {
       classified.code = CYBER_POLICY_ERROR_CODE;

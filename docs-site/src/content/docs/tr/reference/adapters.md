@@ -325,6 +325,16 @@ başlığından Cursor OAuth/erişim belirteci.
 - Yol sınırlandırması cwd altında realpath ile yapılır; symlink kaçışları düşürülür. Her dosya işlemi 2 saniye zaman aşımı. Sonuçlar cwd başına 30 saniye önbelleğe alınır (en fazla 128 giriş). Herhangi bir hata fail-soft olarak yalnızca o parçayı düşürür.
 - `commandCodeVersion`, `x-command-code-version` sabitler (varsayılan `0.52.1`). `permissionMode` `"standard"`, `mode` `"agent"` kalır.
 
+## `devin`
+
+**Hedef:** Cognition'ın `exa.api_server_pb.ApiServerService/GetChatMessage` uç noktası; `server.codeium.com` üzerinde Connect akışı.
+**Kimlik doğrulama:** `provider.apiKey` veya iletilen authorization başlığındaki Devin/Cognition API anahtarı. Giriş tarayıcıda Auth0 oturumunu açar, ardından belirteci `SeatManagementService.RegisterUser` ile uzun ömürlü bir anahtara dönüştürür.
+
+- Olağan fetch/parse yolu yerine `runTurn` kullanır. İstekler ve sunucu olayları `devin/cloud-direct/wire.ts` içindeki elle yazılmış protobuf çerçevelemesiyle işlenir.
+- Modeller hesaba göre `GetCascadeModelConfigs` ile keşfedilir; pakette olmayanlar istek anında hata vermek yerine listeden düşer.
+- Cognition araç açıklamaları için uzunluk sınırı ve birebir ifade engeli uygular. Bağdaştırıcı bilinen ifadeleri yeniden yazar, uzun açıklamaları kırpar.
+- Anahtarlar yenilenmez. Süresi dolduğunda veya iptal edildiğinde `ocx login devin` komutunu yeniden çalıştırın.
+
 ## `azure-openai` (takma ad: `azure`)
 
 **Hedefler:** **Azure OpenAI**. `openai-responses`'ı sarar (bu nedenle

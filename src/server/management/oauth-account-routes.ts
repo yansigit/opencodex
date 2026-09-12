@@ -12,8 +12,8 @@ import {
   providerHeadersConfigError,
   readConfigDiagnostics,
   reconcileLiveConfigFromDisk,
+  saveConfigPreservingClaudeCode,
 } from "../../config";
-import { isAzureIdentityProvider } from "../../config/provider-validation";
 import {
   clearLoginState,
   getLoginStatus,
@@ -25,6 +25,7 @@ import {
 } from "../../oauth";
 import { OAuthMutationBusyError, removeCredential } from "../../oauth/store";
 import { providerDestinationResolvedError } from "../../lib/destination-policy";
+import { emailMaskingEnabled } from "../../lib/privacy";
 import { reconcileLiveStateStores } from "../../lib/state-store-registrations";
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/key-providers";
 import { deriveProviderPresets } from "../../providers/derive";
@@ -71,11 +72,10 @@ import {
   removeExpiredApiKeyRotations,
   startApiKeyRotation,
 } from "./api-key-rotation";
-import { apiKeyPoolEntryId } from "../../providers/api-keys";
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
-import { mutateManagementConfig, saveManagementConfig, type ManagementContext } from "./context";
+import type { ManagementContext } from "./context";
 import { readManagementJsonBody, readManagementJsonBodyOr, rethrowManagementBodyTooLarge } from "./body";
 import { codexAccountNamespaceProviderCollisionError } from "../../codex/account-namespace-match";
 import { ACCOUNT_IMPORT_DEADLINE_MS, ACCOUNT_IMPORT_MAX_REQUEST_BYTES } from "../../oauth/account-import";
@@ -101,56 +101,6 @@ async function readJsonBody(req: Request): Promise<Record<string, unknown> | nul
     rethrowManagementBodyTooLarge(error);
     return null;
   }
-}
-
-function providerKeyPool(provider: OcxProviderConfig): NonNullable<OcxProviderConfig["apiKeyPool"]> {
-  const pool = provider.apiKeyPool ??= [];
-  if (pool.length === 0 && provider.apiKey) {
-    pool.push({ id: apiKeyPoolEntryId(provider.apiKey), key: provider.apiKey });
-  }
-  return pool;
-}
-
-function providerUsesKeyAuth(provider: OcxProviderConfig): boolean {
-  return !isAzureIdentityProvider(provider) && provider.authMode !== "oauth" && provider.authMode !== "forward";
-}
-
-function mutateProviderKey<T>(
-  deps: ManagementContext["deps"],
-  config: OcxConfig,
-  name: string,
-  mutate: (provider: OcxProviderConfig) => T | null,
-): { ok: true; value: T } | { ok: false; error: string; status: number } {
-  const outcome = mutateManagementConfig(deps, fresh => {
-    const provider = fresh.providers[name];
-    if (!provider || !providerUsesKeyAuth(provider)) return { changed: false, value: null };
-    const before = JSON.stringify(provider);
-    const value = mutate(provider);
-    return {
-      changed: value !== null && JSON.stringify(provider) !== before,
-      value: value === null ? null : { provider: structuredClone(provider), value },
-    };
-  });
-  if (outcome.status === "unavailable") {
-    return {
-      ok: false,
-      error: outcome.reason === "conflict" ? "config changed; retry" : `config is ${outcome.reason}`,
-      status: outcome.reason === "conflict" ? 409 : 500,
-    };
-  }
-  if (outcome.value === null) return { ok: false, error: "key not found", status: 404 };
-  config.providers[name] = outcome.value.provider;
-  return { ok: true, value: outcome.value.value };
-}
-
-type KeychainMutationResult =
-  | { ok: true; moved: number }
-  | { ok: true; restored: number }
-  | { ok: false; error: string; status: number };
-
-interface KeychainMutationValue {
-  result: KeychainMutationResult;
-  provider?: OcxProviderConfig;
 }
 
 /**
@@ -284,7 +234,10 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
   if (url.pathname === "/api/oauth/status" && req.method === "GET") {
     const provider = (url.searchParams.get("provider") ?? "").trim().toLowerCase();
     if (!isPublicOAuthProvider(provider)) return jsonResponse({ error: "unknown oauth provider" }, 400);
-    const status = getLoginStatus(provider);
+    // Resolved here, at the request boundary that already holds the config, and passed down.
+    // getLoginStatus stays free of config I/O. This route does not re-mask afterwards: it
+    // consumes the already-projected status rather than redacting a second time.
+    const status = getLoginStatus(provider, emailMaskingEnabled(config));
     return jsonResponse(status);
   }
 
@@ -302,6 +255,14 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const { clearProviderQuotaCache, clearAccountQuotaCache } = await import("../../providers/quota");
     clearProviderQuotaCache();
     clearAccountQuotaCache(provider);
+    if (provider === "devin") {
+      // The cached user_jwt's payload contains the api_key, and the catalog is
+      // keyed by that key. Without this they outlive the credential in process
+      // memory until the JWT's own ~24 minute expiry.
+      const { clearCachedUserJwt, clearCachedCatalog } = await import("../../adapters/devin/cloud-direct");
+      clearCachedUserJwt();
+      clearCachedCatalog();
+    }
     return jsonResponse({ success: true });
   }
 
@@ -320,7 +281,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     } = await import("../../oauth/health");
     const projectAccounts = () => {
       const set = getAccountSet(provider);
-      const current = getLoginStatus(provider);
+      const current = getLoginStatus(provider, emailMaskingEnabled(config));
       return {
         activeAccountId: current.activeAccountId ?? null,
         accounts: (current.accounts ?? []).map(summary => {
@@ -378,13 +339,15 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     if (!(await setActiveAccount(provider, body.accountId))) return jsonResponse({ error: "account not found" }, 404);
     const { forgetGenericFailoverRoster } = await import("../../oauth/generic-account-failover");
     forgetGenericFailoverRoster(provider);
+    // Seed the rotation cursor on the operator's pick, or a sticky round-robin ring hands the
+    // very next dispatch back to whatever the pool had chosen. forgetGenericFailoverRoster
+    // only drops the presence count; it has never touched the cursor. Same defect the Codex
+    // side carries resetCodexRoutingForManualSelection for.
+    const { genericPoolKey, seedPoolRotationAccount } = await import("../../oauth/pool-kernel");
+    seedPoolRotationAccount(genericPoolKey(provider), body.accountId);
     if (provider === "anthropic") {
       const { resetAnthropicRoutingForManualSelection } = await import("../../oauth/anthropic-routing");
       resetAnthropicRoutingForManualSelection(body.accountId);
-    }
-    if (provider === "google-antigravity") {
-      const { resetAntigravityRoutingForManualSelection } = await import("../../oauth/antigravity-routing");
-      resetAntigravityRoutingForManualSelection(body.accountId);
     }
     const { clearModelCache } = await import("../../codex/model-cache");
     const { clearGatherRoutedModelsInflight } = await import("../../codex/catalog");
@@ -394,6 +357,91 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     clearProviderQuotaCache();
     return jsonResponse({ ok: true, provider, activeAccountId: body.accountId });
   }
+
+  // The unified pool-settings contract (#695 wp5c). The three legacy paths keep working and
+  // keep their own shapes -- goldens pin them -- but this is the one an operator or a dashboard
+  // should read, because it answers with the same keys for every kind and DECLARES which of
+  // them that kind honours.
+  if (url.pathname === "/api/pool/settings" && (req.method === "GET" || req.method === "PUT" || req.method === "PATCH")) {
+    const {
+      poolSettingsCapability, parseGenericPoolStrategy, parseGenericAutoSwitchThreshold, parseGenericStickyLimit,
+      unifiedPoolSettingsDto,
+    } = await import("../../oauth/pool-settings-capability");
+    const rawBody = req.method === "GET" ? {} : await readManagementJsonBodyOr(req, {});
+    if (req.method !== "GET" && !isPlainRecord(rawBody)) {
+      return jsonResponse({ error: "body must be an object" }, 400);
+    }
+    const fields = rawBody as { provider?: unknown; enabled?: unknown; strategy?: unknown; stickyLimit?: unknown; autoSwitchThreshold?: unknown; quotaWindow?: unknown };
+    const provider = req.method === "GET"
+      ? (url.searchParams.get("provider") ?? "").trim().toLowerCase()
+      : (typeof fields.provider === "string" ? fields.provider.trim().toLowerCase() : "");
+    const kind = provider ? poolSettingsCapability(provider, config.providers?.[provider]) : null;
+    if (!provider || !kind) {
+      return jsonResponse({ error: "pool settings are only available for the codex, anthropic and generic OAuth pools" }, 400);
+    }
+    // Validated by the SHARED parsers before any kind-specific write, so a bad strategy or
+    // sticky limit is refused identically whichever pool is addressed.
+    let strategy: string | undefined;
+    if (fields.strategy !== undefined) {
+      const parsed = parseGenericPoolStrategy(fields.strategy);
+      if (parsed === null) return jsonResponse({ error: "strategy must be one of: quota, round-robin, fill-first" }, 400);
+      strategy = parsed;
+    }
+    let stickyLimit: number | undefined;
+    if (fields.stickyLimit !== undefined) {
+      const parsed = parseGenericStickyLimit(fields.stickyLimit);
+      if (parsed === null) return jsonResponse({ error: "stickyLimit must be an integer 1-100" }, 400);
+      stickyLimit = parsed;
+    }
+    let autoSwitchThreshold: number | undefined;
+    if (fields.autoSwitchThreshold !== undefined) {
+      const parsed = parseGenericAutoSwitchThreshold(fields.autoSwitchThreshold);
+      if (parsed === null) return jsonResponse({ error: "autoSwitchThreshold must be an integer 0-100" }, 400);
+      autoSwitchThreshold = parsed;
+    }
+    if (fields.quotaWindow !== undefined && kind !== "anthropic") {
+      return jsonResponse({ error: "quotaWindow is only part of the anthropic pool contract" }, 400);
+    }
+    let quotaWindow: string | undefined;
+    if (fields.quotaWindow !== undefined) {
+      const parsed = parseAccountPoolQuotaWindow(fields.quotaWindow);
+      if (parsed === null) return jsonResponse({ error: "quotaWindow must be one of: five-hour, weekly, max-utilization" }, 400);
+      quotaWindow = parsed;
+    }
+    if (fields.enabled !== undefined) {
+      if (kind === "codex") return jsonResponse({ error: "enabled is not part of the codex pool contract" }, 400);
+      if (typeof fields.enabled !== "boolean") return jsonResponse({ error: "enabled must be a boolean" }, 400);
+    }
+
+    if (req.method !== "GET") {
+      if (kind === "codex") {
+        if (strategy !== undefined) config.accountPoolStrategy = strategy as never;
+        if (stickyLimit !== undefined) config.accountPoolStickyLimit = stickyLimit;
+        if (autoSwitchThreshold !== undefined) config.autoSwitchThreshold = autoSwitchThreshold;
+      } else if (kind === "anthropic") {
+        const pool = { ...(config.anthropicAccountPool ?? {}) };
+        if (fields.enabled !== undefined) pool.enabled = fields.enabled as boolean;
+        if (strategy !== undefined) pool.strategy = strategy as never;
+        if (stickyLimit !== undefined) pool.stickyLimit = stickyLimit;
+        if (autoSwitchThreshold !== undefined) pool.autoSwitchThreshold = autoSwitchThreshold;
+        if (quotaWindow !== undefined) pool.quotaWindow = quotaWindow as never;
+        config.anthropicAccountPool = pool;
+      } else {
+        const prov = config.providers[provider]!;
+        const next = { ...(prov.oauthAccountFailover ?? {}) };
+        if (fields.enabled !== undefined) next.enabled = fields.enabled as boolean;
+        if (strategy !== undefined) next.strategy = strategy as never;
+        if (stickyLimit !== undefined) next.stickyLimit = stickyLimit;
+        if (autoSwitchThreshold !== undefined) next.autoSwitchThreshold = autoSwitchThreshold;
+        if (Object.keys(next).length > 0) prov.oauthAccountFailover = next;
+        else delete prov.oauthAccountFailover;
+      }
+      saveConfigPreservingClaudeCode(config);
+      reconcileLiveStateStores();
+    }
+    return jsonResponse(unifiedPoolSettingsDto(config, provider, kind));
+  }
+
 
   // Opt-in Anthropic OAuth account pool (#294): enable/threshold/strategy + clear cooldown.
   if (url.pathname === "/api/oauth/accounts/pool" && req.method === "GET") {
@@ -408,7 +456,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       if (!provider || !prov || poolSettingsCapability(provider, prov) !== "generic") {
         return jsonResponse({ error: "pool config is only supported for anthropic and generic OAuth providers" }, 400);
       }
-      return jsonResponse(genericPoolSettingsDto(provider, prov));
+      return jsonResponse(genericPoolSettingsDto(provider, prov, config.pool?.kernel === true));
     }
     const pool = config.anthropicAccountPool ?? {};
     return jsonResponse({
@@ -438,13 +486,14 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     if (provider !== "anthropic") {
       const {
         poolSettingsCapability, genericPoolSettingsDto, parseGenericPoolStrategy, parseGenericAutoSwitchThreshold,
+        parseGenericStickyLimit,
       } = await import("../../oauth/pool-settings-capability");
       const prov = config.providers[provider];
       if (!provider || !prov || poolSettingsCapability(provider, prov) !== "generic") {
         return jsonResponse({ error: "pool config is only supported for anthropic and generic OAuth providers" }, 400);
       }
-      if (body.stickyLimit !== undefined || body.quotaWindow !== undefined) {
-        return jsonResponse({ error: "stickyLimit and quotaWindow are not part of the generic pool contract yet" }, 400);
+      if (body.quotaWindow !== undefined) {
+        return jsonResponse({ error: "quotaWindow is not part of the generic pool contract yet" }, 400);
       }
       const next = { ...(prov.oauthAccountFailover ?? {}) };
       if (body.enabled !== undefined) {
@@ -467,24 +516,18 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
           next.autoSwitchThreshold = parsed;
         }
       }
+      if (body.stickyLimit !== undefined) {
+        if (body.stickyLimit === null) delete next.stickyLimit;
+        else {
+          const parsed = parseGenericStickyLimit(body.stickyLimit);
+          if (parsed === null) return jsonResponse({ error: "stickyLimit must be an integer 1-100" }, 400);
+          next.stickyLimit = parsed;
+        }
+      }
       if (Object.keys(next).length > 0) prov.oauthAccountFailover = next;
       else delete prov.oauthAccountFailover;
-      // Use guarded mutation so a stale disk edit does not erase the failover while
-      // still persisting through the claudeCode-preserving path.
-      const genericOutcome = mutateManagementConfig<{ provider: OcxProviderConfig } | { error: string }>(deps, fresh => {
-        const target = fresh.providers[provider];
-        if (!target) return { changed: false, value: { error: "provider not found" } };
-        if (Object.keys(next).length > 0) target.oauthAccountFailover = { ...next };
-        else delete target.oauthAccountFailover;
-        return { changed: true, value: { provider: target } };
-      });
-      if (genericOutcome.status === "unavailable") {
-        return jsonResponse({ error: "config changed while applying this update; retry" }, 409);
-      }
-      // Mirror into live config for the immediate response.
-      if (Object.keys(next).length > 0) prov.oauthAccountFailover = { ...next };
-      else delete prov.oauthAccountFailover;
-      return jsonResponse({ ok: true, ...genericPoolSettingsDto(provider, prov) });
+      saveConfigPreservingClaudeCode(config);
+      return jsonResponse({ ok: true, ...genericPoolSettingsDto(provider, prov, config.pool?.kernel === true) });
     }
     let enabled = config.anthropicAccountPool?.enabled === true;
     if (body.enabled !== undefined) {
@@ -534,7 +577,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       ...(stickyLimit !== undefined ? { stickyLimit } : {}),
       ...(quotaWindow !== undefined ? { quotaWindow } : {}),
     };
-    saveManagementConfig(deps, config);
+    saveConfigPreservingClaudeCode(config);
     reconcileLiveStateStores();
     return jsonResponse({
       ok: true,
@@ -551,23 +594,11 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const body = await readManagementJsonBodyOr(req, {}) as { provider?: unknown; accountId?: unknown };
     const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
     const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
+    if (provider !== "anthropic") return jsonResponse({ error: "clear-cooldown is only supported for anthropic" }, 400);
     if (!accountId) return jsonResponse({ error: "missing accountId" }, 400);
-    if (provider === "anthropic") {
-      const { clearAnthropicAccountCooldown } = await import("../../oauth/anthropic-routing");
-      const cleared = clearAnthropicAccountCooldown(accountId);
-      return jsonResponse({ ok: true, cleared });
-    }
-    if (provider === "google-antigravity") {
-      const { clearAntigravityAccountCooldown } = await import("../../oauth/antigravity-routing");
-      const cleared = clearAntigravityAccountCooldown(accountId);
-      return jsonResponse({ ok: true, cleared });
-    }
-    if (provider === "cursor" || provider === "command-code") {
-      const { clearPoolAccountCooldown } = await import("../../routing/account-pool/cooldown");
-      const cleared = clearPoolAccountCooldown(provider, accountId);
-      return jsonResponse({ ok: true, cleared });
-    }
-    return jsonResponse({ error: "clear-cooldown is only supported for anthropic, google-antigravity, cursor, and command-code" }, 400);
+    const { clearAnthropicAccountCooldown } = await import("../../oauth/anthropic-routing");
+    const cleared = clearAnthropicAccountCooldown(accountId);
+    return jsonResponse({ ok: true, cleared });
   }
 
   if (url.pathname === "/api/oauth/accounts/import" && req.method === "POST") {
@@ -663,7 +694,6 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
   if (url.pathname === "/api/providers/keys" && req.method === "GET") {
     const name = (url.searchParams.get("name") ?? "").trim();
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
-    if (!providerUsesKeyAuth(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
     const { listProviderApiKeys } = await import("../../providers/api-keys");
     const projectKeys = () => {
       const listed = listProviderApiKeys(config, name);
@@ -693,34 +723,20 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const body = await readManagementJsonBodyOr(req, {}) as { name?: string; key?: string; label?: string };
     const name = (body.name ?? "").trim();
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
-    if (!providerUsesKeyAuth(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
     if (typeof body.key !== "string" || !body.key.trim()) return jsonResponse({ error: "key is required" }, 400);
-    const key = body.key.trim();
-    if (/[\r\n]/.test(key)) return jsonResponse({ error: "key must not include line breaks" }, 400);
-    const result = mutateProviderKey(deps, config, name, provider => {
-      const pool = providerKeyPool(provider);
-      const label = body.label?.trim();
-      const existing = pool.find(entry => entry.key === key);
-      if (existing) {
-        if (label) existing.label = label;
-        provider.apiKey = existing.key;
-        return { id: existing.id };
-      }
-      const id = apiKeyPoolEntryId(key);
-      if (pool.some(entry => entry.id === id)) return { error: "API-key pool ID collision" };
-      pool.push({ id, key, ...(label ? { label } : {}), addedAt: Date.now() });
-      provider.apiKey = key;
-      return { id };
-    });
-    if (!result.ok) return jsonResponse({ error: result.error }, result.status);
-    if ("error" in result.value) return jsonResponse({ error: result.value.error }, 409);
+    const { addProviderApiKey } = await import("../../providers/api-keys");
+    const result = addProviderApiKey(config, name, body.key, body.label);
+    if ("error" in result) return jsonResponse({ error: result.error }, 400);
     const { clearModelCache } = await import("../../codex/model-cache");
     clearModelCache(name);
     const { clearProviderQuotaCache } = await import("../../providers/quota");
     clearProviderQuotaCache();
-    const { clearKeyCooldowns } = await import("../../providers/key-failover");
+    const { clearKeyCooldowns, forgetApiKeyRotationCursor } = await import("../../providers/key-failover");
     clearKeyCooldowns(name); // manual key management resets 429 cooldown state
-    return jsonResponse({ ok: true, id: result.value.id }, 201);
+    // ...and the rotation cursor with it. A cursor that predates the operator's choice would
+    // hand the next proactive pick straight back to whichever key the pool had reached.
+    forgetApiKeyRotationCursor(name);
+    return jsonResponse({ ok: true, id: result.id }, 201);
   }
   // Opt-in OS keychain storage (#1221): move the active key and pool into the OS credential
   // store (config keeps references), or restore plaintext. Store verifies the keychain before
@@ -742,31 +758,11 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const name = typeof body.name === "string" ? body.name.trim() : "";
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
     if (body.action !== "store" && body.action !== "restore") return jsonResponse({ error: "action must be store or restore" }, 400);
-    const {
-      deleteProviderKeychainReferences,
-      storeProviderKeyInKeychain,
-      restoreProviderKeyFromKeychain,
-      providerKeyStoreKind,
-    } = await import("../../providers/key-store");
-    const referencesToDelete = body.action === "restore"
-      ? [config.providers[name]!.apiKey, ...(config.providers[name]!.apiKeyPool ?? []).map(entry => entry.key)]
-          .filter((value): value is string => typeof value === "string" && value.startsWith("keychain:"))
-      : [];
-    const outcome = mutateManagementConfig<KeychainMutationValue>(deps, fresh => {
-      const result = body.action === "store"
-        ? storeProviderKeyInKeychain(fresh, name)
-        : restoreProviderKeyFromKeychain(fresh, name, { deleteAfter: false });
-      return result.ok
-        ? { changed: true, value: { result, provider: structuredClone(fresh.providers[name]!) } satisfies KeychainMutationValue }
-        : { changed: false, value: { result } };
-    });
-    if (outcome.status === "unavailable") {
-      return jsonResponse({ error: outcome.reason === "conflict" ? "config changed; retry" : `config is ${outcome.reason}` }, outcome.reason === "conflict" ? 409 : 500);
-    }
-    const result = outcome.value.result;
+    const { storeProviderKeyInKeychain, restoreProviderKeyFromKeychain, providerKeyStoreKind } = await import("../../providers/key-store");
+    const result = body.action === "store"
+      ? storeProviderKeyInKeychain(config, name)
+      : restoreProviderKeyFromKeychain(config, name);
     if (!result.ok) return jsonResponse({ error: result.error }, result.status);
-    if (outcome.value.provider) config.providers[name] = outcome.value.provider;
-    if (body.action === "restore") deleteProviderKeychainReferences(referencesToDelete);
     const { clearProviderQuotaCache } = await import("../../providers/quota");
     clearProviderQuotaCache();
     return jsonResponse({ ...result, name, store: providerKeyStoreKind(config.providers[name]) });
@@ -775,21 +771,18 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const body = await readManagementJsonBodyOr(req, {}) as { name?: string; id?: string };
     const name = (body.name ?? "").trim();
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
-    if (!providerUsesKeyAuth(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
     if (!body.id) return jsonResponse({ error: "missing id" }, 400);
-    const result = mutateProviderKey(deps, config, name, provider => {
-      const entry = providerKeyPool(provider).find(candidate => candidate.id === body.id);
-      if (!entry) return null;
-      provider.apiKey = entry.key;
-      return true;
-    });
-    if (!result.ok) return jsonResponse({ error: result.error }, result.status);
+    const { setActiveProviderApiKey } = await import("../../providers/api-keys");
+    if (!setActiveProviderApiKey(config, name, body.id)) return jsonResponse({ error: "key not found" }, 404);
     const { clearModelCache } = await import("../../codex/model-cache");
     clearModelCache(name);
     const { clearProviderQuotaCache } = await import("../../providers/quota");
     clearProviderQuotaCache();
-    const { clearKeyCooldowns } = await import("../../providers/key-failover");
+    const { clearKeyCooldowns, forgetApiKeyRotationCursor } = await import("../../providers/key-failover");
     clearKeyCooldowns(name); // manual key management resets 429 cooldown state
+    // ...and the rotation cursor with it. A cursor that predates the operator's choice would
+    // hand the next proactive pick straight back to whichever key the pool had reached.
+    forgetApiKeyRotationCursor(name);
     return jsonResponse({ ok: true, name, activeId: body.id });
   }
   if (url.pathname === "/api/providers/keys/alias" && req.method === "PUT") {
@@ -798,47 +791,30 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const id = typeof body.id === "string" ? body.id.trim() : "";
     const alias = typeof body.alias === "string" ? body.alias.trim() : "";
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
-    if (!providerUsesKeyAuth(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
     if (!id) return jsonResponse({ error: "missing id" }, 400);
     if (typeof body.alias !== "string" || alias.length > 80 || /[\x00-\x1f\x7f]/.test(alias)) {
       return jsonResponse({ error: "alias must be at most 80 printable characters" }, 400);
     }
-    const result = mutateProviderKey(deps, config, name, provider => {
-      const entry = providerKeyPool(provider).find(candidate => candidate.id === id);
-      if (!entry) return null;
-      if (alias) entry.label = alias;
-      else delete entry.label;
-      return true;
-    });
-    if (!result.ok) return jsonResponse({ error: result.error }, result.status);
+    const { setProviderApiKeyLabel } = await import("../../providers/api-keys");
+    if (!setProviderApiKeyLabel(config, name, id, alias || undefined)) return jsonResponse({ error: "key not found" }, 404);
     return jsonResponse({ ok: true, name, id, alias: alias || null });
   }
   if (url.pathname === "/api/providers/keys" && req.method === "DELETE") {
     const name = (url.searchParams.get("name") ?? "").trim();
     const id = url.searchParams.get("id") ?? "";
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
-    if (!providerUsesKeyAuth(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
     if (!id) return jsonResponse({ error: "missing id" }, 400);
-    const result = mutateProviderKey(deps, config, name, provider => {
-      const pool = providerKeyPool(provider);
-      const entry = pool.find(candidate => candidate.id === id);
-      if (!entry) return null;
-      provider.apiKeyPool = pool.filter(candidate => candidate.id !== id);
-      if (provider.apiKey === entry.key) {
-        const next = provider.apiKeyPool[0];
-        if (next) provider.apiKey = next.key;
-        else delete provider.apiKey;
-      }
-      if (provider.apiKeyPool.length === 0) delete provider.apiKeyPool;
-      return true;
-    });
-    if (!result.ok) return jsonResponse({ error: result.error }, result.status);
+    const { removeProviderApiKey } = await import("../../providers/api-keys");
+    if (!removeProviderApiKey(config, name, id)) return jsonResponse({ error: "key not found" }, 404);
     const { clearModelCache } = await import("../../codex/model-cache");
     clearModelCache(name);
     const { clearProviderQuotaCache } = await import("../../providers/quota");
     clearProviderQuotaCache();
-    const { clearKeyCooldowns } = await import("../../providers/key-failover");
+    const { clearKeyCooldowns, forgetApiKeyRotationCursor } = await import("../../providers/key-failover");
     clearKeyCooldowns(name); // manual key management resets 429 cooldown state
+    // ...and the rotation cursor with it. A cursor that predates the operator's choice would
+    // hand the next proactive pick straight back to whichever key the pool had reached.
+    forgetApiKeyRotationCursor(name);
     return jsonResponse({ ok: true });
   }
 
@@ -847,7 +823,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
   // ---------------------------------------------------------------------------
   if (url.pathname === "/api/keys" && req.method === "GET") {
     if (removeExpiredApiKeyRotations(config)) {
-      saveManagementConfig(deps, config);
+      saveConfigPreservingClaudeCode(config);
       reconcileLiveStateStores();
     }
     const keys = config.apiKeys ?? [];
@@ -891,7 +867,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     if ("error" in result) {
       return jsonResponse({ error: result.error === "not-found" ? "key not found" : "rotation already pending" }, result.error === "not-found" ? 404 : 409, req, config);
     }
-    saveManagementConfig(deps, config);
+    saveConfigPreservingClaudeCode(config);
     reconcileLiveStateStores();
     return jsonResponse(result, 201, req, config);
   }
@@ -904,10 +880,10 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     }
     const result = commitApiKeyRotation(config, body.id, body.rotationId);
     if ("error" in result) {
-      if (result.error === "expired") saveManagementConfig(deps, config);
+      if (result.error === "expired") saveConfigPreservingClaudeCode(config);
       return jsonResponse({ error: result.error === "not-found" ? "key rotation not found" : `rotation ${result.error}` }, result.error === "not-found" ? 404 : 409, req, config);
     }
-    saveManagementConfig(deps, config);
+    saveConfigPreservingClaudeCode(config);
     reconcileLiveStateStores();
     return jsonResponse({ ok: true }, 200, req, config);
   }
@@ -921,7 +897,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     if (!abortApiKeyRotation(config, body.id, body.rotationId)) {
       return jsonResponse({ error: "key rotation not found or mismatched" }, 409, req, config);
     }
-    saveManagementConfig(deps, config);
+    saveConfigPreservingClaudeCode(config);
     reconcileLiveStateStores();
     return jsonResponse({ ok: true }, 200, req, config);
   }
@@ -940,7 +916,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const key = "ocx_data_" + randomBytes(20).toString("hex");
     const entry = { id: randomUUID(), name, key, createdAt: new Date().toISOString() };
     config.apiKeys = [...(config.apiKeys ?? []), entry];
-    saveManagementConfig(deps, config);
+    saveConfigPreservingClaudeCode(config);
     reconcileLiveStateStores();
     return jsonResponse({ id: entry.id, name: entry.name, key: entry.key, createdAt: entry.createdAt }, 201, req, config);
   }
@@ -954,7 +930,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const entry = (config.apiKeys ?? []).find(k => k.id === body.id);
     if (!entry) return jsonResponse({ error: "key not found" }, 404, req, config);
     entry.name = nameField.value;
-    saveManagementConfig(deps, config);
+    saveConfigPreservingClaudeCode(config);
     reconcileLiveStateStores();
     // Never echo key material from a rename.
     return jsonResponse({ id: entry.id, name: entry.name, createdAt: entry.createdAt }, 200, req, config);
@@ -968,7 +944,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     config.apiKeys = (config.apiKeys ?? []).filter(k => k.id !== body.id);
     // A stale id must not read as a successful revocation.
     if (config.apiKeys.length === before) return jsonResponse({ error: "key not found" }, 404, req, config);
-    saveManagementConfig(deps, config);
+    saveConfigPreservingClaudeCode(config);
     reconcileLiveStateStores();
     return jsonResponse({ success: true }, 200, req, config);
   }

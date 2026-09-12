@@ -12,6 +12,9 @@ License/source notes for the additional candidates are recorded in
 
 Export-client marks (used by the API tab's connect rows, not the provider list):
 
+- `cline-color.svg` — reuses the existing provider mark already tracked in this directory
+  for Cline CLI; no new image was imported for the file integration.
+
 - `pi.svg` — fetched 2026-08-02 from `https://pi.dev/favicon.svg`, the Pi
   project's own favicon, unmodified. Pi is `earendil-works/pi`
   (formerly `badlogic/pi-mono`).
@@ -57,6 +60,19 @@ Export-client marks (used by the API tab's connect rows, not the provider list):
   behind — is removed because the path never leaves the frame and the rect
   would read as a second ink to the mark tooling here.
 
+- `omo.svg` — fetched 2026-09-12 from `https://omo.dev/brand/omo-mark.svg`, the
+  24px header mark on omo's own site. The identical file (4021 bytes, MD5
+  `c33f72d7c4612c290834ba860f644557`) is committed as
+  `.github/assets/omo-icon-light.svg` in `code-yeongyu/oh-my-openagent` and
+  rendered as that README's logo, which is what identifies it as the intended
+  square lockup rather than an incidental asset. Note the branch: that repository's
+  default branch is `dev`, so the `main` raw path 404s. Copied unmodified,
+  `viewBox="0 0 1024 1024"`. Used for the `omo` client (`omo-ai@beta`).
+  `omo.dev/icon.svg` was rejected for being a single `<text>O</text>` glyph, the
+  same rule that sent Hermes to a trace; `omo-logo.png` is a superseded 3D
+  illustration and `omo.png` a landscape screenshot. The npm tarball ships no
+  image at all.
+
 - `minimax.svg` — fetched 2026-08-31 from
   `https://raw.githubusercontent.com/MiniMax-AI/MiniMax-01/main/figures/minimax.svg`,
   MiniMax's own symbol as committed in their own model repository. The API-docs
@@ -88,6 +104,24 @@ at 20px.
   `viewBox="0 0 823 823"` by centering the 823x806 trace. Named
   `hermes-agent` rather than `hermes` because Hermes is also a provider name
   and this directory is one flat namespace.
+- `devin.svg` — fetched 2026-09-12 from `https://docs.devin.ai/logo/light.svg`,
+  Devin's own documentation logo, and CROPPED to its symbol. The source is a
+  160x24 horizontal lockup: the three-leaf mark occupies the left 24 units and
+  the `devin` wordmark starts at x=34.2, so a `viewBox="0 0 24 24"` window keeps
+  the whole symbol and excludes every wordmark path. The thirteen symbol paths
+  and all seven gradients are verbatim — nothing is translated, so the
+  `userSpaceOnUse` gradient coordinates stay valid — and only the two wordmark
+  paths are dropped. Cropping a lockup to its symbol is what `cursor-color.svg`
+  and `gajae-code.svg` already do; the alternative here was a wordmark in a 20px
+  box, which this file refuses.
+
+  `devin.ai/favicon.svg` sits behind a Vercel security checkpoint that answers
+  429 with an HTML page, and `cognition.ai` publishes only a raster favicon, so
+  the docs site is the reachable first-party vector. Windsurf does publish
+  `windsurf.com/favicon.svg` — a plated `W` — but that names the retired brand
+  for a provider labelled Cognition. Multi-colour gradient, so it is drawn as an
+  image and is not a candidate for the masked set.
+
 - `gajae-code.svg` — traced 2026-08-31 from `Yeachan-Heo/gajae-code`
   `assets/character.png` (3190496 bytes, 1550x2048 RGBA), the mascot. No SVG
   exists upstream: `assets/` and `docs/` hold only raster, `public/` is a 404,
@@ -148,6 +182,12 @@ Decisions that are not obvious from looking at the file:
 - `raycast.svg` **is not masked.** One ink, but that ink is #FF6363 — Raycast
   red, the same case as `openai.svg` and `deepseek-harness.svg`. Legible on both
   surfaces as an image.
+- `omo.svg` **is not masked.** Two inks: an `#F4F4F4` rounded plate carrying an
+  `#041617` face. The plate is opaque and covers most of the canvas, so masking
+  — which reads alpha, not color — would paint a filled rounded tile and discard
+  the face entirely. This is the plated case `qoder.svg` already established, and
+  it is why a plated mark is not a candidate for the monochrome set however
+  neutral its inks look.
 
 Both directions are enforced in `gui/tests/integration-marks.test.ts`, including a
 luminance check that fails any single-ink near-neutral mark left as an image. That
@@ -259,3 +299,69 @@ are the same company, and the mainland console publishes only the wordmark.
   the same shape as the three Alibaba ids sharing `alibaba-color.svg`.
   **Not masked:** three linear gradients in Meta brand blue
   (#0064E0 -> #0278F1), and masking flattens a gradient to a single ink.
+
+## Qoder (2026-09-08)
+
+- `qoder.svg` — fetched 2026-09-08 from `https://qoder.com/favIcon.svg`, the icon
+  the site declares in its own `<link rel="icon" type="image/svg+xml">`. The
+  conventional paths are all 404s here (`/favicon.svg`, `/icon.svg`, `/logo.svg`),
+  and the lowercase spelling is one of them — the served path capitalizes the I.
+  Unmodified: no comments, no `<title>`/`<desc>`, no `data-name`, `xmlns` already
+  present, so nothing needed stripping.
+
+  Corroborated four ways rather than assumed. `qoder.cn/favIcon.svg` and
+  `qoder.com.cn/favIcon.svg` serve the same 73379 bytes (MD5 `95f4aecb…`), and so
+  does the `logo` URL Qoder declares in its own schema.org `Organization` block
+  (`img.alicdn.com/imgextra/i4/O1CN018ikLCF1sGya2c3YY4_!!6000000005740-55-tps-206-206.svg`).
+  The 105x26 lockup on the marketing site is the wordmark and is refused for the
+  usual reason.
+
+  Wired to both `qoder` and `qoder-cn`. One brand on two operators — Global is
+  BRIGHT ZENITH PRIVATE LIMITED, CN is 通义云启（杭州）信息技术有限公司 with
+  Alibaba Cloud as co-provider — which is the `meta-model`/`meta-muse` shape, not
+  a plan split. **Not masked:** an `#F3F3F3` rounded plate carrying a `#0F0D0C`
+  glyph, 94.5% opaque at 160px. Both inks are neutral, so masking would collapse
+  plate and glyph into the single filled box the plate problem above records.
+  As an image it reads on both surfaces.
+
+  Neither terms document prohibits this. Qoder's Terms of Service
+  (`qoder.com/product-service`, updated 2026-04-29) reserve rights generally in
+  §4.1 and confine §9 Intellectual Property to a complaints procedure; its only
+  trademark sentence warrants the user's own marks in User Content. The CN
+  agreement (`qoder.cn/product-service`, updated 2026-05-20) §五(a) reserves
+  商标 rights without restricting third-party use. Silence plus reserved rights
+  is the same posture under which `meta.svg` shipped.
+
+  The file is 73 KB, the largest here, all of it high-precision path
+  coordinates. `docs.qoder.com/logo.svg` is the same symbol at 39665 bytes on a
+  dark `#111113` plate and would be an acceptable swap under the same
+  docs-subdomain precedent as `together.svg`; the favicon was preferred for its
+  corroboration.
+
+### CodeBuddy: mark exists, terms forbid it
+
+`codebuddy` and `codebuddy-cn` keep the fallback tile by decision, not for lack
+of an asset. Tencent publishes a usable 40x40 square symbol — a gradient roundel
+at `codebuddy-1328495429.cos.accelerate.myqcloud.com/web/ide/logo.svg`, declared
+as the site icon, byte-identical to the one `codebuddy.cn` serves from
+`download.codebuddy.cn` — and it would render well at 19px.
+
+It is not ours to use. §9.3 "Tencent Logo" of the CodeBuddy service agreement,
+identical on `codebuddy.ai/document/term` and `codebuddy.cn/document/term`:
+"You shall not use Tencent's trademarks service marks, trade names, domain
+names, website names or other distinctive brand features of Tencent under any
+circumstances… Without the prior written consent of the Tencent, you shall not
+display, use, or otherwise dispose of the aforesaid Tencent Logos in any way,
+either alone or in combination." §6.2 adds that unauthorized use "may also
+violate applicable laws including… trademark laws." "Under any circumstances"
+and "other distinctive brand features" reach the CodeBuddy product mark, which
+is a Tencent Cloud brand.
+
+There is no brand-permission page to rely on: `codebuddy.ai/document/brand`
+returns 200 but is byte-identical to a route that does not exist, so it is the
+SPA catch-all shell; `/press` is a real 404.
+
+This one needs to stay written down. The wiring test only fires when an asset
+named after the provider id is already committed, so an absent mark produces no
+signal at all — nothing would stop a later pass from fetching that logo and
+committing it.

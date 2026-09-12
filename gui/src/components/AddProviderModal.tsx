@@ -1,8 +1,7 @@
 import { usageSummary30dResourceKey } from "../usage-summary-resource";
-import { useEffect, useId, useMemo, useReducer, useRef } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { IconX } from "../icons";
 import { useT } from "../i18n/shared";
-import { Notice } from "../ui";
 import { useKeyedClientResource } from "../client-resource";
 import {
   buildProviderPostBody,
@@ -13,6 +12,7 @@ import {
 import { oauthTosRisk } from "../oauth-tos-risk";
 import OAuthTosWarningModal from "./OAuthTosWarningModal";
 import ProviderCatalog from "./provider-catalog/ProviderCatalog";
+import ProviderNoteModal from "./provider-catalog/ProviderNoteModal";
 import type { AccountLoginRow, AccountLoginStatus } from "./provider-catalog/ProviderCatalog";
 import type { CatalogPreset } from "./provider-catalog/provider-presets";
 import type { CatalogLoginHint } from "./provider-catalog/login-hint-visibility";
@@ -62,8 +62,14 @@ export default function AddProviderModal({
   );
   const aliveRef = useRef(true);
   const previousFocusRef = useRef<HTMLElement | null>(null);
-  const dialogRef = useRef<HTMLDialogElement>(null);
-  const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  // The full-note popup is owned here, not in the catalog: it has to render as a sibling
+  // of this overlay, and its open state has to be visible to the Escape handler below.
+  const [notePreset, setNotePreset] = useState<Preset | null>(null);
+  // The unified search text is owned here for the same reason: Escape has to clear a
+  // non-empty query instead of closing the dialog, and the handler that decides is this
+  // component's.
+  const [catalogQuery, setCatalogQuery] = useState("");
 
   const oauthPoll = useKeyedClientResource(
     `add-provider-oauth:${apiBase}`,
@@ -99,7 +105,6 @@ export default function AddProviderModal({
   const oauthSupported = oauthPoll.data ?? [];
   const presets = presetsPoll.data ?? fallbackPresets;
   const presetsLoading = presetsPoll.loading;
-  const presetsError = presetsPoll.error !== undefined;
   const usageRank = Object.fromEntries((usagePoll.data?.providers ?? []).map(row => [row.provider, row.requests]));
   const {
     preset, form, saving, error, oauthBusy, oauthMsg, oauthMsgTone, oauthUrl, oauthUrlProvider,
@@ -108,20 +113,11 @@ export default function AddProviderModal({
   } = state;
 
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !oauthTosPending) onClose();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [oauthTosPending, onClose]);
-
-  useEffect(() => {
     aliveRef.current = true;
     previousFocusRef.current = document.activeElement as HTMLElement | null;
     onOpen?.();
     const dialog = dialogRef.current;
-    if (dialog && !dialog.open) {
-      dialog.showModal();
+    if (dialog) {
       const focusable = dialog.querySelector<HTMLElement>(
         "input:not([disabled]), button:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
       );
@@ -129,12 +125,31 @@ export default function AddProviderModal({
     }
     return () => {
       aliveRef.current = false;
-      if (dialog?.open) dialog.close();
       previousFocusRef.current?.focus();
     };
     // oxlint-disable-next-line react/react-compiler -- existing exhaustive-deps exception is intentional
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only open hook
   }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // This listener is on `window` and does not read `defaultPrevented`, so a native
+      // <dialog> cancel does not stop it. Every stacked overlay has to be named here or
+      // Escape closes the whole add-provider modal out from under it.
+      // Kept as a `!oauthTosPending` expression on purpose: tests/gui/oauth-tos-warning.test.ts
+      // source-scans this file for that exact substring, because the guard is the only thing
+      // stopping Escape from closing the modal out from under a stacked overlay.
+      const noOverlayOpen = !oauthTosPending && !notePreset;
+      if (e.key !== "Escape" || !noOverlayOpen) return;
+      // Escape unwinds one layer at a time: the note popup, then a live search, then the
+      // dialog. Closing the modal on the keystroke that was meant to clear a query throws
+      // away everything the user typed into the form behind it.
+      if (catalogQuery) { setCatalogQuery(""); return; }
+      onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, oauthTosPending, notePreset, catalogQuery]);
 
   const presetDescription = (candidate: Preset): string | undefined => {
     const key = codexPresetDescriptionKey(candidate);
@@ -248,36 +263,24 @@ export default function AddProviderModal({
         selection drag that is released outside the card — would wipe every
         field the user already filled in. Close only via the × button,
         Escape, or a successful add. */}
-    <dialog
-      ref={dialogRef}
-      aria-labelledby={titleId}
-      className="modal-overlay"
-      onCancel={event => {
-        event.preventDefault();
-        if (!oauthTosPending) onClose();
-      }}
-    >
-      <div className="modal-card">
+    <div role="dialog" aria-modal="true" aria-label={t("modal.add")} className="modal-overlay">
+      <div ref={dialogRef} className="modal-card">
         <div className="modal-head">
-          <h3 id={titleId}>{preset ? t("modal.addNamed", { label: preset.label }) : t("modal.add")}</h3>
+          <h3>{preset ? t("modal.addNamed", { label: preset.label }) : t("modal.add")}</h3>
           <button type="button" className="btn btn-ghost btn-icon" aria-label={t("common.close")} onClick={onClose}><IconX /></button>
         </div>
 
         {!preset ? (
-          <>
-          {presetsError && (
-            <Notice tone="err">
-              {t("modal.catalogLoadFailed")} <button type="button" className="btn btn-ghost btn-sm" onClick={() => presetsPoll.refresh()}>{t("common.retry")}</button>
-            </Notice>
-          )}
           <ProviderCatalog
             presets={presets}
             usageRank={usageRank}
             presetsLoading={presetsLoading}
-            presetsError={presetsError}
             initialTier={initialTier}
+            query={catalogQuery}
+            onQueryChange={setCatalogQuery}
             onSelectPreset={p => choosePreset(p)}
             onSelectCustom={() => choosePreset(fallbackPresets[0]!)}
+            onShowNote={p => setNotePreset(p)}
             accountRows={accountRows}
             accountStatus={accountStatus}
             busyProvider={accountBusy}
@@ -295,7 +298,6 @@ export default function AddProviderModal({
               onSubmit: providerId => { void submitManualCode(providerId); },
             }}
           />
-          </>
         ) : form && (
           preset.auth === "oauth" && form.authMode === "oauth" ? (
             <AddProviderOAuthPane
@@ -345,7 +347,7 @@ export default function AddProviderModal({
           )
         )}
       </div>
-    </dialog>
+    </div>
     {oauthTosPending && (
       <OAuthTosWarningModal
         key={oauthTosPending}
@@ -358,6 +360,16 @@ export default function AddProviderModal({
           dispatch({ type: "set-oauth-tos-pending", providerId: null });
           void loginOAuth(id, oauthSetters);
         }}
+      />
+    )}
+    {notePreset?.note && (
+      <ProviderNoteModal
+        key={notePreset.id}
+        providerId={notePreset.id}
+        label={notePreset.label}
+        adapter={notePreset.adapter}
+        note={notePreset.note}
+        onClose={() => setNotePreset(null)}
       />
     )}
     </>

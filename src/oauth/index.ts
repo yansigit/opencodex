@@ -9,7 +9,7 @@ import {
   mutatePersistedConfig,
 } from "../config";
 import { resolveProviderApiKey } from "../providers/key-store";
-import { maskEmail } from "../lib/privacy";
+import { projectEmail } from "../lib/privacy";
 import { KiroTokenRefreshError, environmentKiroRoutingMetadata, loginKiro, refreshKiroToken, settleKiroLoginTransaction } from "./kiro";
 import {
   OAuthMutationBusyError,
@@ -43,6 +43,8 @@ import { loginNous, NousTokenError, refreshNousToken, clearNousRefreshIntent, Re
 import { loginChatGPT, refreshChatGPTToken, type ChatGPTLoginFlow } from "./chatgpt";
 import { AntigravityTokenRequestError, loginAntigravity, refreshAntigravityToken } from "./google-antigravity";
 import { loginCursor, refreshCursorToken } from "./cursor";
+import { loginDevin, refreshDevinToken } from "./devin";
+import { loginDevinCli, refreshDevinCliToken } from "./devin-cli";
 import { loginGithubCopilot, refreshGithubCopilotToken, validateCopilotApiBaseUrl } from "./github-copilot";
 import { loginCommandCode, refreshCommandCodeToken } from "./command-code";
 import { loginMetaMuse, refreshMetaMuseToken } from "./meta-muse";
@@ -313,6 +315,23 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderDef> = {
     providerConfig: oauthConfig("cursor"),
     defaultModel: oauthDefaultModel("cursor"),
   },
+  devin: {
+    login: (ctrl) => loginDevin(ctrl),
+    refresh: refreshDevinToken,
+    providerConfig: oauthConfig("devin"),
+    defaultModel: oauthDefaultModel("devin"),
+    defaultRefreshPolicy: "disabled",
+  },
+  "devin-cli": {
+    // Import-first, the kiro shape: adopt the credential the installed CLI
+    // already holds instead of starting a browser flow it has already completed.
+    login: (ctrl, opts) => loginDevinCli(ctrl, opts),
+    refresh: refreshDevinCliToken,
+    providerConfig: oauthConfig("devin-cli"),
+    defaultModel: oauthDefaultModel("devin-cli"),
+    // The CLI owns the session and Cognition exposes no refresh endpoint.
+    defaultRefreshPolicy: "disabled",
+  },
   "github-copilot": {
     login: (ctrl) => loginGithubCopilot(ctrl),
     refresh: (rt, signal) => refreshGithubCopilotToken(rt, signal),
@@ -325,7 +344,7 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderDef> = {
     login: (ctrl, opts) => loginChatGPT(ctrl, { forceLogin: opts?.forceLogin, flow: opts?.flow }),
     refresh: (rt) => refreshChatGPTToken(rt),
     providerConfig: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward" as const },
-    defaultModel: "gpt-5.4",
+    defaultModel: "gpt-5.6-luna",
   },
 };
 
@@ -1826,19 +1845,54 @@ export function submitManualLoginCode(provider: string, input: string): { ok: tr
   return { ok: true };
 }
 
-export interface OAuthAccountSummary { id: string; alias?: string; email?: string; active: boolean; needsReauth?: boolean; expiresAt?: number }
+export interface OAuthAccountSummary {
+  id: string;
+  alias?: string;
+  email?: string;
+  active: boolean;
+  needsReauth?: boolean;
+  expiresAt?: number;
+  /**
+   * Subscription tier, mirroring the field the OpenAI/Codex provider reports, so a consumer
+   * weighting a multi-account pool by seat size needs no per-provider branching (#3777).
+   *
+   * Always present and explicitly `null` when the tier is unknown. The distinction matters:
+   * an ABSENT key means the proxy is too old to report a tier at all, while `null` means this
+   * version looked and upstream did not say. Omitting it would make those indistinguishable and
+   * invite a consumer to assume a tier.
+   *
+   * Every OAuth provider reports `null` today. Anthropic's `/api/oauth/usage` returns quota
+   * buckets only — `five_hour`, `seven_day`, the model-scoped weekly windows and `limits[]` —
+   * and carries no subscription/tier field, and its token response carries none either. See
+   * `fetchAnthropicUsageQuota` in `src/providers/quota.ts`.
+   */
+  plan: string | null;
+}
 
-export function getLoginStatus(provider: string): { loggedIn: boolean; email?: string; source?: OAuthCredentials["source"]; error?: string; done: boolean; activeAccountId?: string; accounts?: OAuthAccountSummary[] } {
+/**
+ * Token-safe login state for one provider.
+ *
+ * `maskEmails` is an explicit boolean rather than a config read (#3859). This module must not
+ * acquire a dependency on config I/O to answer a redaction question: the caller already holds
+ * the config at its request boundary and resolves the policy there with `emailMaskingEnabled`.
+ * The default masks, so every existing caller keeps today's behaviour.
+ */
+export function getLoginStatus(provider: string, maskEmails = true): { loggedIn: boolean; email?: string; source?: OAuthCredentials["source"]; error?: string; done: boolean; activeAccountId?: string; accounts?: OAuthAccountSummary[] } {
   const cred = getCredential(provider);
   const st = loginState.get(provider);
   const set = getAccountSet(provider);
   const accounts: OAuthAccountSummary[] | undefined = set?.accounts.map(a => ({
     id: a.id,
     ...(a.alias ? { alias: a.alias } : {}),
-    email: maskEmail(a.credential.email) ?? undefined,
+    email: projectEmail(a.credential.email, maskEmails) ?? undefined,
     active: a.id === set.activeAccountId,
     ...(a.needsReauth ? { needsReauth: true } : {}),
     expiresAt: a.credential.expires,
+    // Explicitly null rather than omitted — see OAuthAccountSummary.plan. No OAuth provider
+    // exposes a subscription tier today, so there is nothing truthful to put here; deriving one
+    // from quota percentages is not possible, because they are normalized per account and a
+    // half-consumed small seat is indistinguishable from a half-consumed large one.
+    plan: null,
   }));
 
   // A stored credential counts as "logged in" when it exists and is not marked for
@@ -1850,7 +1904,7 @@ export function getLoginStatus(provider: string): { loggedIn: boolean; email?: s
     .find(a => a.id === set.activeAccountId)?.needsReauth === true;
   return {
     loggedIn: !!cred && !activeNeedsReauth,
-    email: maskEmail(cred?.email) ?? undefined,
+    email: projectEmail(cred?.email, maskEmails) ?? undefined,
     source: cred?.source,
     error: st?.error,
     done: st?.done ?? false,
@@ -1858,10 +1912,13 @@ export function getLoginStatus(provider: string): { loggedIn: boolean; email?: s
   };
 }
 
-/** Token-safe per-provider login state for the CLI `ocx status` logins section (no tokens, masked email). */
-export function oauthLoginSummary(): Array<{ provider: string; loggedIn: boolean; email?: string }> {
+/**
+ * Token-safe per-provider login state for the CLI `ocx status` logins section. Never tokens; the
+ * email follows the operator's `privacy.maskEmails` policy, masked by default (#3859).
+ */
+export function oauthLoginSummary(maskEmails = true): Array<{ provider: string; loggedIn: boolean; email?: string }> {
   return listOAuthProviders().map(provider => {
-    const status = getLoginStatus(provider);
+    const status = getLoginStatus(provider, maskEmails);
     return { provider, loggedIn: status.loggedIn, ...(status.email ? { email: status.email } : {}) };
   });
 }

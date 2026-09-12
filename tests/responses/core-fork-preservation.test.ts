@@ -43,8 +43,8 @@ describe("fork Responses core preservation", () => {
     );
     const quotaWrite = coreSource.indexOf("recordPassiveAccountQuota(", servingAccount);
     const guardExit = coreSource.indexOf(
-      "if (!undeclaredToolGuardActive || inspectionSawUndeclaredTool) return",
-      start,
+      "if (inspectionSawUndeclaredTool) return",
+      quotaWrite,
     );
 
     expect(start).toBeGreaterThanOrEqual(0);
@@ -74,7 +74,7 @@ describe("fork Responses core preservation", () => {
 
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
-    expect(retry).toContain("onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider)");
+    expect(retry).toContain("onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider, route.modelId)");
     expect(retry).toContain("createCodexReserveDispatchGuard(authCtx, options.codexAuthPolicy ?? config");
   });
 

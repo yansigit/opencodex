@@ -20,6 +20,10 @@ response safety still happen at the proxy boundary. Configure the listener and a
 [Configuration](/reference/configuration/); use [Combos](/guides/combos/) when one public model id
 should select among several targets.
 
+## Upstream redirects
+
+Credential-bearing model, image, video, and search requests do not automatically follow HTTP redirects, including same-origin redirects. Configure the final upstream API URL instead of a redirecting alias. A redirect does not cause the server to resend credentials or the request body to its destination. The response owner retains its existing error or relay behavior; native Responses and compact routes can return the original 3xx and `Location` to the client. Client redirect behavior is separate from this server transport policy.
+
 ## Endpoint overview
 
 | Client surface | Endpoint | Successful non-stream result | Successful stream or socket result |
@@ -140,6 +144,18 @@ route as SSE and reconstructs a bounded JSON response for the non-streaming clie
 retains indexed `response.output_item.done` records because the terminal snapshot can omit its
 `output` array. Both client-facing forms preserve the selected model, output items, terminal status,
 and usage.
+
+When a provider filters or truncates a response, an unfinished tool call remains `incomplete`
+in both JSON and SSE. Partial output is preserved, and the bridge does not emit an argument
+completion event for that open call. Calls already completed keep their status. This preserves
+the provider outcome; client retry behavior for incomplete responses is unchanged.
+
+On the pending `dev` implementation for #4112, a final upstream HTTP 413 on this surface
+is classified as `invalid_request_error` / `context_length_exceeded`. Non-streaming callers
+retain HTTP 413 with a JSON `error`; streaming callers retain the terminal SSE failure.
+Both use a fixed message instead of exposing the upstream error body. Routed synthetic
+compaction propagates the classified failure; this does not shrink input or retry compaction.
+Native compact passthrough and local admission-limit errors retain their separate contracts.
 
 For native HTTP/SSE passthrough, a client cancellation without an observed upstream terminal is
 logged as `499` with `closeReason: "client_cancel"` and does not penalize the account pool.
@@ -520,16 +536,20 @@ use the matrix below. “Dedicated” means `X-OpenCodex-API-Key`; the other col
 
 | Surface | Dedicated | Bearer | `x-api-key` |
 | --- | --- | --- | --- |
-| `/v1/responses` HTTP and WebSocket | Required | Rejected for proxy admission | Rejected |
-| `/v1/responses/compact` | Required | Rejected for proxy admission | Rejected |
-| `/v1/chat/completions` | Required | Rejected for proxy admission | Rejected |
+| `/v1/responses` HTTP and WebSocket | Accepted | Accepted | Rejected |
+| `/v1/responses/compact` | Accepted | Accepted | Rejected |
+| `/v1/chat/completions` | Accepted | Accepted | Rejected |
 | `/v1/messages` and `/v1/messages/count_tokens` | Accepted | Accepted | Accepted |
 | `/v1/models` | Accepted | Accepted | Accepted |
 | `/v1/live`, `/v1/realtime/calls`, and sideband joins | Accepted | Accepted | Accepted |
 
-Responses-family and Chat requests reserve `Authorization` for provider or Codex Direct
-passthrough, so a remote proxy key must use the dedicated header. Messages and Realtime surfaces
-need broader client compatibility and therefore accept all three forms.
+Responses-family and Chat requests accept a proxy key in the dedicated header or Bearer field. On native routes, the selected stored Codex credential replaces the admission bearer; on other routes it is removed. It is never an upstream credential. Use the dedicated header when also supplying a separate provider bearer.
+
+A keyless, non-OAuth Cursor route may use that separate caller bearer, but never a proxy secret or automatic ChatGPT-main enrichment. Combo/policy selection and actual shadow/thread-spawn rewrites do not transfer raw caller credentials to new targets. Canonical OpenAI routing can restore the caller’s single non-proxy bearer after an internal route change only when its JWT carries a ChatGPT account claim and any explicit account header matches that claim. Forwarding caller authentication to optional OpenAI sidecars requires a single JWT and a matching explicit `chatgpt-account-id`. Opaque bearers are not restored across route changes, even with an explicit account header. Otherwise, the final target needs its own configured, OAuth, or stored credential; otherwise it fails locally. A thread-spawn marker alone does not strip credentials.
+
+Chat's optional stored-main enrichment for a keyless Cursor request is deferred until an OpenAI helper is actually planned and a canonical Direct candidate is available. An unrelated Cursor request does not acquire a native-main claim through this enrichment, so it does not delay profile switching. Helper credentials still obey startup and switch fences and remain separate from the Cursor bearer. Pool and account-qualified helpers retain their existing account selection.
+
+Claude replay retains main auth only as a turn-claimed in-memory snapshot and reconstructs it only for a final canonical ChatGPT route.
 
 :::caution
 Data-plane keys are not management credentials. The management API uses a separate admin secret;

@@ -70,7 +70,7 @@ type CachedOverview = {
 
 type MaMode = "v1" | "default" | "v2";
 
-type CodexPreference = "codexAutoStart" | "codexDesktopAuthless";
+type CodexPreference = "codexAutoStart" | "codexDesktopAuthless" | "codexClientCompaction";
 type DashboardSettingsState = {
   settings: SettingsData | null;
   beforeSave: SettingsData | null;
@@ -107,7 +107,9 @@ function dashboardSettingsReducer(state: DashboardSettingsState, action: Dashboa
         settings: {
           ...state.settings,
           [action.key]: action.settings[action.key],
-          catalogRefreshPending: action.key === "codexDesktopAuthless" ? true : state.settings.catalogRefreshPending,
+          catalogRefreshPending: action.key === "codexDesktopAuthless" || action.key === "codexClientCompaction"
+            ? true
+            : state.settings.catalogRefreshPending,
           startupHealth: action.settings.startupHealth ?? state.settings.startupHealth,
         },
       };
@@ -682,7 +684,7 @@ export function useDashboardData(apiBase: string) {
       const data = await requireJson<SettingsData>(res, "save failed");
       settingsMutationEpochRef.current += 1;
       dispatchSettings({ type: "save-succeeded", key, settings: data });
-      if (key === "codexDesktopAuthless") await runSync();
+      if (key === "codexDesktopAuthless" || key === "codexClientCompaction") await runSync();
     } catch (err) {
       dispatchSettings({ type: "save-failed" });
       setSyncError(err instanceof Error ? err.message : String(err));
@@ -712,6 +714,7 @@ export function useDashboardData(apiBase: string) {
   };
   const toggleCodexAutoStart = () => toggleCodexSetting("codexAutoStart");
   const toggleCodexDesktopAuthless = () => toggleCodexSetting("codexDesktopAuthless");
+  const toggleCodexClientCompaction = () => toggleCodexSetting("codexClientCompaction");
 
   // Clears the sync result/error in this hook. The dashboard toast owns its own dismissal
   // timer but must publish the dismissal here: syncResult/syncError live above the dashboard
@@ -876,7 +879,7 @@ export function useDashboardData(apiBase: string) {
     effortCapHelpDialogRef, updateDialogRef, maHelpDialogRef, shadowCallHelpDialogRef,
     filteredGroups, sidecarModels, visionModels,
     saveSidecar, saveShadowCall, switchMaMode, toggleCodexAutoStart, toggleCodexDesktopAuthless,
-    saveServerSettings, runSync, clearSyncFeedback,
+    toggleCodexClientCompaction, saveServerSettings, runSync, clearSyncFeedback,
     fetchUpdateCheck, closeUpdateDialog, openUpdateDialog, changeUpdateChannel, runUpdate,
   };
 }

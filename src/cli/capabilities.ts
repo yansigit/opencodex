@@ -133,6 +133,34 @@ export const CAPABILITIES: readonly Capability[] = [
     details: ["Reads /healthz plus local config; drives no management API route."],
   },
   {
+    command: ["hub", "invite"],
+    summary: "Mint a single-use pairing code on a hub and print the exact `ocx connect` line for one more machine.",
+    // Deliberately empty. The command DOES drive `POST /api/gui/pairing-grants` -- the attested
+    // local mint route `ocx gui pair` uses, authorized by a capability HMAC'd with the running
+    // proxy's own attestation secret rather than by the admin token, which is why it needs
+    // nothing exported in the shell. That route is answered in the composition root, ahead of
+    // `handleManagementAPI`, so it is not in MANAGEMENT_ROUTES; declaring it here would fail the
+    // capability/registry reconciliation rather than inform anyone. Widening the registry's scope
+    // to `src/server/index.ts` is its own change.
+    routes: [],
+    flags: [
+      { name: "--json", value: "boolean", summary: "Emit code, expiresAt, dataUrl, managementUrl, and command." },
+      { name: "--data-url", value: "string", summary: "Advertise this data origin instead of hub.dataPublicOrigin or the bind address." },
+      { name: "--management-url", value: "string", summary: "Confirm the management origin; it must equal hub.managementPublicOrigin." },
+      { name: "--clients", value: "string", summary: "Pre-select codex and/or claude in the printed connect command." },
+    ],
+    mutates: true,
+    json: "envelope",
+    details: [
+      "Hub only: refuses when runtimeRole is not hub, and requires a running attested proxy.",
+      "The code is secret, single-use and short-lived; it is bound to hub.managementPublicOrigin and to the connecting machine's loopback browser origin.",
+      "The bound browser origin is always printed; when it is not http://localhost:10100 the warning names the port the connecting machine must use.",
+      "Refuses when the advertised data origin would be loopback (a loopback or wildcard bind with no hub.dataPublicOrigin and no --data-url) rather than printing a line that dials the other machine itself.",
+      "Prints no data-plane token. Remote machines receive their own revocable per-client key from the exchange.",
+      "Mints through the attested local pairing-grant route, the same one ocx gui pair uses; no admin token is read.",
+    ],
+  },
+  {
     command: ["connect", "rotate"],
     summary: "Rotate the connected client's data key against the hub, with commit and abort.",
     // One command drives all three: start returns the new secret once, commit promotes it,
@@ -236,6 +264,39 @@ export const CAPABILITIES: readonly Capability[] = [
     ],
   },
   {
+    command: ["account", "refresh"],
+    summary: "Refresh account quotas without model validation; pending Codex accounts require dashboard consent.",
+    routes: [
+      { method: "POST", path: "/api/codex-auth/accounts/refresh" },
+      { method: "GET", path: "/api/provider-quotas" },
+    ],
+    flags: [{ name: "--json", value: "boolean", summary: "Emit the refresh result as JSON." }],
+    mutates: true,
+    json: "payload",
+    details: ["CLI/admin-token refreshes only observe usage. After quota recovery, a human must click Refresh quotas in the dashboard to authorize model validation. Do not mint a GUI session to work around this consent boundary."],
+  },
+  {
+    command: ["account", "grok-reset-coupons"],
+    summary: "Inspect or redeem Grok billing reset coupons; redemption is journaled and idempotent.",
+    routes: [
+      { method: "GET", path: "/api/grok/reset-coupons" },
+      { method: "POST", path: "/api/grok/reset-coupons/consume" },
+    ],
+    flags: [
+      { name: "--consume", value: "boolean", summary: "Redeem one reset coupon; requires --yes." },
+      { name: "--yes", value: "boolean", summary: "Explicit confirmation required by --consume." },
+      { name: "--token-id", value: "string", summary: "Redeem a specific reset token instead of the default selection." },
+      { name: "--operation-id", value: "string", summary: "UUIDv4 making a redemption idempotent: retries replay the journaled outcome." },
+      { name: "--json", value: "boolean", summary: "Emit the coupon list or redemption result as JSON." },
+    ],
+    mutates: true,
+    json: "payload",
+    details: [
+      "Without --consume this is a read: remaining coupons and their validity windows.",
+      "The operation is journaled before the upstream call, so retrying the same --operation-id replays the recorded outcome instead of spending a second coupon.",
+    ],
+  },
+  {
     command: ["usage"],
     summary: "Token and estimated-cost report over a time range.",
     routes: [{ method: "GET", path: "/api/usage" }],
@@ -292,10 +353,9 @@ export const CAPABILITIES: readonly Capability[] = [
     // Both pools, because both have the setting. The Codex pool reads its applied values
     // from the active payload; the Anthropic pool has its own GET.
     routes: [
-      { method: "GET", path: "/api/codex-auth/active" },
-      { method: "PUT", path: "/api/codex-auth/pool-strategy" },
-      { method: "GET", path: "/api/oauth/accounts/pool" },
-      { method: "PUT", path: "/api/oauth/accounts/pool" },
+      { method: "GET", path: "/api/pool/settings" },
+      { method: "PUT", path: "/api/pool/settings" },
+      { method: "PATCH", path: "/api/pool/settings" },
     ],
     flags: [{ name: "--json", value: "boolean", summary: "Emit the applied strategy and sticky limit as JSON." }],
     mutates: true,
@@ -304,17 +364,16 @@ export const CAPABILITIES: readonly Capability[] = [
       "A bare invocation reads and never writes.",
       "The APPLIED value is echoed, not the requested one, so a server-side normalization stays visible.",
       "Values are not re-validated in the CLI: the server owns the strategy names and the 1-100 sticky bound.",
-      "`anthropic` owns the full pool contract. Other OAuth providers reach the same endpoint with a generic subset (enabled/strategy/autoSwitchThreshold) whose settings persist but do not yet steer selection; `sticky` and `quotaWindow` are refused for them.",
+      "One route answers for every pool kind and declares which fields that kind honours in `supported`, so an unsupported field is a stated null rather than an absence. `anthropic` alone carries `quotaWindow`. Generic-provider settings steer selection only while `pool.kernel` is on. The legacy per-pool paths still work and are unchanged.",
     ],
   },
   {
     command: ["account", "sticky"],
     summary: "Show or set how many consecutive requests stay on one account.",
     routes: [
-      { method: "GET", path: "/api/codex-auth/active" },
-      { method: "PUT", path: "/api/codex-auth/pool-strategy" },
-      { method: "GET", path: "/api/oauth/accounts/pool" },
-      { method: "PUT", path: "/api/oauth/accounts/pool" },
+      { method: "GET", path: "/api/pool/settings" },
+      { method: "PUT", path: "/api/pool/settings" },
+      { method: "PATCH", path: "/api/pool/settings" },
     ],
     flags: [{ name: "--json", value: "boolean", summary: "Emit the applied strategy and sticky limit as JSON." }],
     mutates: true,
@@ -322,13 +381,37 @@ export const CAPABILITIES: readonly Capability[] = [
     details: ["Only meaningful under the sticky-capable strategies; the pool strategy is the other half of this setting."],
   },
   {
+    command: ["account", "auto-switch"],
+    summary: "Show or set the usage percentage at which a pool moves to another account.",
+    // Declared here rather than riding on `account strategy`, which is what it did before the
+    // unified route existed. `auto-switch` genuinely drives these three: the Codex pool reads
+    // its applied threshold from the active payload and writes through its own route, and a
+    // generic OAuth pool reads and writes the per-provider pool settings.
+    routes: [
+      { method: "GET", path: "/api/codex-auth/active" },
+      { method: "PUT", path: "/api/codex-auth/auto-switch" },
+      { method: "GET", path: "/api/oauth/accounts/pool" },
+      { method: "PUT", path: "/api/oauth/accounts/pool" },
+    ],
+    flags: [{ name: "--json", value: "boolean", summary: "Emit the stored threshold and whether it is applied." }],
+    mutates: true,
+    json: "envelope",
+    details: [
+      "A bare invocation reads and never writes.",
+      "`on` stores 80%, `off` stores 0%, and `threshold <n>` accepts 0-100.",
+      "For a generic OAuth pool, `inert: true` means the threshold is stored but not applied, `inert: false` means the pool is applying it, and an absent `inert` is an unknown capability.",
+    ],
+  },
+
+  {
     command: ["logs"],
-    summary: "Recent request log rows, filterable by provider, model, conversation, and status.",
+    summary: "Recent request log rows, filterable by provider, model, conversation, account, and status.",
     routes: [{ method: "GET", path: "/api/logs" }],
     flags: [
       { name: "--provider", value: "string", summary: "Restrict to one provider, matching failover attempts too." },
       { name: "--model", value: "string", summary: "Restrict to one model id, matching failover attempts too." },
       { name: "--conversation", value: "string", summary: "Restrict to one conversation id (`--conversationId` is accepted too)." },
+      { name: "--account", value: "string", summary: "Restrict to one account log label (`main`, `p<hex6>`, `o<hex6>`), matching failover attempts too." },
       { name: "--status", value: "string", summary: "An exact code (429) or a class (5xx)." },
       { name: "--limit", value: "number", summary: "Row cap; defaults to 200." },
       { name: "--follow", value: "boolean", summary: "Poll for new rows; add --jsonl to emit JSONL." },
@@ -340,6 +423,7 @@ export const CAPABILITIES: readonly Capability[] = [
     details: [
       "`--provider` and `--model` both match a failover attempt, so a request is findable by what actually served it, not only by what was asked for.",
       "Rows print `conv=<id>` when the entry carries one, so a conversation filter can be told apart from an empty result.",
+      "Rows print `acct=<label>` when the account is known, so an `--account` filter can be told apart from an empty result.",
       "`--follow` deduplicates by row id and cannot be combined with `--json`.",
     ],
   },

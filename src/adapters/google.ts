@@ -132,7 +132,7 @@ function stripAntigravityRejectedClaudeSdkParagraph(systemText: string): string 
  * Unknown ids return `undefined` deliberately. An earlier revision returned a 16,384 floor for
  * anything unmatched, which silently truncated aliases, gateway ids, and any model added after
  * this table was written — the operator asked for N tokens and got 16,384 with no signal. A cap
- * we cannot justify is worse than no cap: `structure/02_config-and-codex-home.md` is explicit
+ * we cannot justify is worse than no cap: `structure/config.md` is explicit
  * that an explicit request value wins, so an unrecognized model passes through untouched and the
  * upstream remains the authority on its own limit.
  *
@@ -450,6 +450,18 @@ function messagesToGeminiFormat(
         break;
       }
     }
+  }
+
+  // Gemini API and Claude-on-Antigravity reject assistant-tail (model-tail in Gemini terms)
+  // histories. Gemini fails upstream with "Requests ending with a model turn are not supported"
+  // (HTTP 400), while Claude fails with "This model does not support assistant message prefill.
+  // The conversation must end with a user message." Context compaction, previous_response_id
+  // expansion, subagent orchestration, and interrupted-turn replay can all produce a
+  // model-tail history. Append a user "(continue)" nudge, mirroring the anthropic adapter's
+  // tail guard (src/adapters/anthropic.ts).
+  const lastTurn = contents.length > 0 ? (contents[contents.length - 1] as { role?: string }) : undefined;
+  if (!lastTurn || lastTurn.role === "model") {
+    contents.push({ role: "user", parts: [{ text: "(continue)" }] });
   }
 
   return { systemInstruction, contents, replayedCallIds };
@@ -979,17 +991,9 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           // fills a first functionCall that replay could not sign. Outside the cache branch too,
           // because the turn still needs a signature when no session was ever recorded.
           applyAntigravityThoughtSignatureFallback(wireModelId, contents);
-          // Claude-on-Antigravity rejects assistant-tail (model-tail in Gemini terms) histories
-          // as prefill: "This model does not support assistant message prefill. The conversation
-          // must end with a user message." Context compaction, previous_response_id expansion,
-          // and interrupted-turn replay can all produce a model-tail history. Append a user
-          // "(continue)" nudge, mirroring the anthropic adapter's tail guard (src/adapters/anthropic.ts).
-          if (/claude/i.test(wireModelId)) {
-            const last = contents.length > 0 ? contents[contents.length - 1] as { role?: string } : undefined;
-            if (!last || last.role === "model") {
-              contents.push({ role: "user", parts: [{ text: "(continue)" }] });
-            }
-          }
+          // The model-tail "(continue)" guard runs once, in messagesToGeminiFormat, so CCA,
+          // Vertex and AI Studio share one decision. A second check here would append a
+          // duplicate nudge whenever signature sanitization reshapes the tail afterwards.
         }
         const envelope = {
           model: wireModelId,

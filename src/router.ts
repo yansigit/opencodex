@@ -10,7 +10,7 @@ import {
 import type { NormalizedComboConfig } from "./combos/types";
 import { hasOwnProvider } from "./config/provider-name";
 import { providerUsesKeyAuthOverride, resolveProviderApiKey } from "./providers/key-store";
-import { captureProviderApiKeySelection } from "./providers/api-key-selection";
+import { captureProviderApiKeySelection } from "./providers/api-key-selection-capture";
 import { assertProviderDestinationAllowed } from "./lib/destination-policy";
 import { redactSecretString, redactUrlForLog } from "./lib/redact";
 import {
@@ -349,6 +349,7 @@ export function routedProviderConfig(providerName: string, provider: OcxProvider
   const noTemperatureModels = mergeStringArray(registryEntry.noTemperatureModels, provider.noTemperatureModels);
   const noTopPModels = mergeStringArray(registryEntry.noTopPModels, provider.noTopPModels);
   const noPenaltyModels = mergeStringArray(registryEntry.noPenaltyModels, provider.noPenaltyModels);
+  const noJsonSchemaModels = mergeStringArray(registryEntry.noJsonSchemaModels, provider.noJsonSchemaModels);
   const autoToolChoiceOnlyModels = mergeStringArray(registryEntry.autoToolChoiceOnlyModels, provider.autoToolChoiceOnlyModels);
   const preserveReasoningContentModels = mergeStringArray(registryEntry.preserveReasoningContentModels, provider.preserveReasoningContentModels);
   const requiresReasoningPlaceholderModels = mergeStringArray(registryEntry.requiresReasoningPlaceholderModels, provider.requiresReasoningPlaceholderModels);
@@ -375,6 +376,9 @@ export function routedProviderConfig(providerName: string, provider: OcxProvider
     baseUrl,
     ...(provider.responsesPath === undefined && registryEntry.responsesPath !== undefined
       ? { responsesPath: registryEntry.responsesPath }
+      : {}),
+    ...(provider.chatCompletionsPath === undefined && registryEntry.chatCompletionsPath !== undefined
+      ? { chatCompletionsPath: registryEntry.chatCompletionsPath }
       : {}),
     ...(provider.requiresAdjacentResponsesToolResults === undefined
       && registryEntry.requiresAdjacentResponsesToolResults !== undefined
@@ -476,6 +480,7 @@ export function routedProviderConfig(providerName: string, provider: OcxProvider
     ...(noTemperatureModels ? { noTemperatureModels } : {}),
     ...(noTopPModels ? { noTopPModels } : {}),
     ...(noPenaltyModels ? { noPenaltyModels } : {}),
+    ...(noJsonSchemaModels ? { noJsonSchemaModels } : {}),
     ...(autoToolChoiceOnlyModels ? { autoToolChoiceOnlyModels } : {}),
     ...(preserveReasoningContentModels ? { preserveReasoningContentModels } : {}),
     ...(requiresReasoningPlaceholderModels ? { requiresReasoningPlaceholderModels } : {}),
@@ -684,7 +689,7 @@ function routeModelInternal(
     }
   }
 
-  // 0. Explicit "<provider>/<model>" namespace (e.g. "opencode-go/deepseek-v4-pro").
+  // 0. Explicit "<provider>/<model>" namespace (e.g. "opencode-go/deepseek-v4.1-flash").
   //    Only triggers when the prefix matches a CONFIGURED provider, so genuine
   //    slash-containing model ids (e.g. "anthropic/claude-...") fall through when
   //    no such provider exists.
@@ -706,13 +711,16 @@ function routeModelInternal(
         throw new Error("provider alias '" + requestedProvider + "' is ambiguous: " + configuredMatches.map(([n]) => n).sort().join(", "));
       } else {
         // Pass 2: built-in registry aliases, only for providers that do NOT have an explicit alias override
-        // and whose registry alias has not been claimed by another configured provider (#3531 review)
+        // and whose registry alias has not been claimed by another configured provider name or alias
         const registryMatches = Object.entries(config.providers).filter(([name, provider]) => {
           if (provider.alias !== undefined) return false;
           const regAlias = PROVIDER_REGISTRY.find(e => e.id === name)?.alias;
           if (!regAlias || regAlias.toLowerCase() !== requestedLower) return false;
           const claimedByOther = Object.entries(config.providers).some(([otherName, p]) =>
-            otherName !== name && typeof p.alias === "string" && p.alias.trim().toLowerCase() === requestedLower
+            otherName !== name && (
+              otherName.toLowerCase() === requestedLower
+              || (typeof p.alias === "string" && p.alias.trim().toLowerCase() === requestedLower)
+            )
           );
           return !claimedByOther;
         });
