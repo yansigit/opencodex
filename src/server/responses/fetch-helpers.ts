@@ -104,12 +104,13 @@ export function providerFetch(
   // else keeps the provider's HTTP fetch. See ws-upstream.ts for the details.
   const unpaced = async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
     const upstreamWebsocket = provider.upstreamWebsocket === true;
-    if (typeof input === "string" && init && shouldUseCodexWsUpstream(input, init, runtime, upstreamWebsocket)) {
-      // The fallback has to be the same HTTP fetch the non-WS branch would have
-      // used, protocol pin included: a WS turn that falls back is serving the
-      // request over HTTP, and dropping the provider's `upstreamHttpVersion`
-      // there would silently negotiate a transport the operator ruled out.
-      return codexWsUpstreamFetch(input, init, httpFetch, runtime, options.onCodexWsQuota, options.beforeDispatch);
+    const wsOpts = {
+      wsUpstream: provider.wsUpstream,
+      maxWsFrameBytes: provider.maxWsFrameBytes,
+      upstreamWebsocket,
+    };
+    if (typeof input === "string" && init && shouldUseCodexWsUpstream(input, init, runtime, wsOpts)) {
+      return codexWsUpstreamFetch(input, init, httpFetch, runtime, wsOpts, options.onCodexWsQuota, options.beforeDispatch);
     }
     return httpFetch(input, init);
   };

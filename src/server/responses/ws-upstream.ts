@@ -19,7 +19,7 @@ import { CODEX_RESPONSES_HTTP_URL, CODEX_RESPONSES_WS_URL, prepareCodexHttpInit,
 import { codexWsExchange } from "./codex-ws-exchange";
 import { CodexWsSession } from "./codex-ws-session";
 import { codexWsPool, codexWsReuseIdentity } from "./codex-ws-pool";
-import { codexWsCreateFrameExceedsLimit } from "./codex-ws-wire";
+import { CODEX_WS_CREATE_FRAME_LIMIT_BYTES, codexWsCreateFrameExceedsLimit } from "./codex-ws-wire";
 export { CODEX_WS_LIVENESS_PING_INTERVAL_MS, CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS, MAX_CODEX_WS_FRAME_BYTES, MAX_CODEX_WS_QUEUE_BYTES,
   MAX_CODEX_WS_CREATE_FRAME_BYTES, CODEX_WS_CREATE_FRAME_LIMIT_BYTES, codexWsCreateFrameExceedsLimit,
   isCodexWsQuotaObservedResponse, isCodexWsUpstreamResponse } from "./codex-ws-wire";
@@ -61,6 +61,31 @@ export type BunRuntimeIdentity = {
 
 export type BunRuntimeGateInput = string | BunRuntimeIdentity;
 
+export interface CodexWsUpstreamOptions {
+  wsUpstream?: boolean;
+  maxWsFrameBytes?: number;
+  upstreamWebsocket?: boolean;
+}
+
+/** Fork default-off Codex WS fast lane unless explicitly opted in via config or env. */
+export function isCodexWsUpstreamDisabled(options?: CodexWsUpstreamOptions): boolean {
+  if (options?.wsUpstream !== undefined) return options.wsUpstream !== true;
+  const env = process.env.OCX_CODEX_WS_UPSTREAM;
+  return env !== "true" && env !== "1";
+}
+
+export function resolveCodexWsMaxFrameBytes(options?: CodexWsUpstreamOptions): number {
+  if (typeof options?.maxWsFrameBytes === "number" && Number.isFinite(options.maxWsFrameBytes) && options.maxWsFrameBytes > 0) {
+    return Math.min(options.maxWsFrameBytes, CODEX_WS_CREATE_FRAME_LIMIT_BYTES);
+  }
+  const envVal = process.env.OCX_CODEX_WS_MAX_FRAME_BYTES;
+  if (envVal) {
+    const parsed = Number.parseInt(envVal, 10);
+    if (Number.isFinite(parsed) && parsed > 0) return Math.min(parsed, CODEX_WS_CREATE_FRAME_LIMIT_BYTES);
+  }
+  return CODEX_WS_CREATE_FRAME_LIMIT_BYTES;
+}
+
 export function currentBunRuntimeIdentity(): BunRuntimeIdentity {
   return {
     version: Bun.version,
@@ -101,18 +126,27 @@ export function shouldUseCodexWsUpstream(
   url: string,
   init?: RequestInit,
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
-  upstreamWebsocketConfigured = false,
+  options?: CodexWsUpstreamOptions | boolean,
 ): boolean {
+  let opts: CodexWsUpstreamOptions | undefined;
+  let upstreamWebsocketConfigured = false;
+  if (typeof options === "boolean") {
+    upstreamWebsocketConfigured = options;
+  } else {
+    opts = options;
+    upstreamWebsocketConfigured = opts?.upstreamWebsocket === true;
+  }
   if (!bunSupportsBoundedCodexWsRelay(runtime)) return false;
-  if (url !== CODEX_RESPONSES_HTTP_URL && !upstreamWebsocketConfigured) return false;
-  if (upstreamWebsocketConfigured && !isResponsesWebsocketEligibleUrl(url)) return false;
+  if (url === CODEX_RESPONSES_HTTP_URL) {
+    if (typeof options !== "boolean" && isCodexWsUpstreamDisabled(opts)) return false;
+  } else if (upstreamWebsocketConfigured) {
+    if (!isResponsesWebsocketEligibleUrl(url)) return false;
+  } else {
+    return false;
+  }
   if ((init?.method ?? "GET").toUpperCase() !== "POST") return false;
   const body = init?.body;
   if (typeof body !== "string") return false;
-  // Only root-level stream:true selects WS: JSON-mode calls keep the HTTP path
-  // because the WS path only speaks the event protocol, and a nested
-  // {"metadata":{"stream":true}} must not flip the transport. Parsing (not
-  // substring matching) also keeps whitespace-formatted bodies routable.
   try {
     const parsed = JSON.parse(body) as unknown;
     return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
@@ -127,15 +161,18 @@ export function codexWsUpstreamFetch(
   init: RequestInit,
   sseFallback: typeof globalThis.fetch,
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
+  options?: CodexWsUpstreamOptions | boolean,
   onQuota?: CodexWsQuotaObserver,
   beforeDispatch?: (headers: Headers) => void,
 ): Promise<Response> {
+  const opts = typeof options === "boolean" ? undefined : options;
+  const customUpstream = options === true || opts?.upstreamWebsocket === true;
+  if ((!customUpstream && isCodexWsUpstreamDisabled(opts)) || !bunSupportsBoundedCodexWsRelay(runtime)) {
+    return sseFallback(url, prepareCodexHttpInit(url, init));
+  }
   const prepared = prepareCodexWsRequest(url, init);
   if (!prepared) return sseFallback(url, prepareCodexHttpInit(url, init));
   init = prepared.httpInit;
-  if (!bunSupportsBoundedCodexWsRelay(runtime)) {
-    return sseFallback(url, init);
-  }
   const signal = init.signal ?? undefined;
   if (signal?.aborted) {
     return Promise.reject(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
@@ -143,11 +180,8 @@ export function codexWsUpstreamFetch(
 
   const { frameText, headers } = prepared;
 
-  // Decide before dialing. Once the socket is open the caller already holds a
-  // streaming Response, so the oversized close can only be surfaced as a stream
-  // error — and a resend at that point could double-generate. Measuring the
-  // frame we are about to send keeps the whole failure mode unreachable.
-  if (codexWsCreateFrameExceedsLimit(frameText)) {
+  const maxFrameBytes = resolveCodexWsMaxFrameBytes(opts);
+  if (codexWsCreateFrameExceedsLimit(frameText, maxFrameBytes)) {
     return sseFallback(url, init);
   }
 
@@ -155,13 +189,7 @@ export function codexWsUpstreamFetch(
   const proxyRoute = resolveProxyRoute(new URL(wsUrl));
   if (proxyRoute.kind === "fallback") return sseFallback(url, init);
   const proxy = proxyRoute.kind === "proxy" ? proxyRoute.proxy : undefined;
-  // A genuine caller `originator` is already in these headers via the forward
-  // set. Never fabricate one here: pool/forward traffic must not impersonate
-  // Codex CLI, per the metadata-integrity contract. (The backend's fast lane
-  // keys on WS + originator, so callers without the tag simply keep their own
-  // provenance and scheduling.)
 
-  // A local refusal is not a failed upgrade and must never enter the SSE fallback path.
   try {
     beforeDispatch?.(new Headers(headers));
   } catch (error) {
