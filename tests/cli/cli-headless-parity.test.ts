@@ -13,11 +13,29 @@ import { handleProviderRuntimeCommand } from "../../src/cli/provider-runtime";
 import { providerQuotaLine } from "../../src/cli/account-extended";
 import { formatAccountTable } from "../../src/cli/account";
 import { handleConnectCommand } from "../../src/cli/connect";
+import { handleSystemCommand } from "../../src/cli/system-command";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoPath } from "../helpers/repo-root";
 
 type Recorded = { path: string; method: string; body: unknown };
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
+
+describe("ocx system settings client compaction", () => {
+  test("persists the explicit boolean through the shared settings endpoint", async () => {
+    const { requests, deps } = fakeRuntime((_req, body) => ({ ok: true, ...body }));
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(await handleSystemCommand(["settings", "--client-compaction", "on"], deps)).toBe(0);
+      expect(requests).toEqual([{
+        path: "/api/settings",
+        method: "PUT",
+        body: { codexClientCompaction: true },
+      }]);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+});
 
 describe("ocx agent sidecar --list (#2188)", () => {
   test("web --list prints the server's webSearchModels — the GUI's exact list", async () => {
@@ -233,6 +251,11 @@ describe("headless GUI parity CLI", () => {
       // skipping the endpoint.
       ["/api/github/star", "(none — GUI-only)"],
       ["/api/oauth", "ocx account"],
+      // The unified pool-settings route (#695 wp5c). One path answers for every pool
+      // kind, and `ocx account strategy` / `ocx account sticky` / `ocx account auto-switch`
+      // are what drive it headlessly — they declare it in src/cli/capabilities.ts rather
+      // than the retired per-namespace paths.
+      ["/api/pool/settings", "ocx account strategy/sticky/auto-switch"],
       ["/api/accounts/events", "(none — dashboard invalidation; ocx account reads current selection)"],
       ["/api/providers/keys", "ocx account"],
       ["/api/providers", "ocx provider"],

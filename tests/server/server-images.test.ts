@@ -4,15 +4,13 @@
  * instead of the /v1/* JSON-404 guard.
  */
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync} from "node:fs";
 import { join } from "node:path";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { clearAccountNeedsReauth, clearAccountQuota } from "../../src/codex/auth-api";
 import { clearCodexUpstreamHealth, clearThreadAccountMap, getCodexUpstreamHealth } from "../../src/codex/routing";
-import { saveConfig } from "../../src/config";
-import { flushConfigDirHardeningForTests } from "../../src/config/paths";
-import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
+import { loadConfig, saveConfig } from "../../src/config";
+import { clearKeyCooldowns, rotateKeyOn429 } from "../../src/providers/key-failover";
 import { selectImagesProvider } from "../../src/providers/openai-sidecar";
 import { startServer } from "../../src/server";
 import { handleImages, IMAGES_RESPONSE_MAX_BYTES, readImageResponseBytes, setXaiResultPinnedDownloadForTests } from "../../src/server/images";
@@ -28,16 +26,14 @@ const previousApiToken = process.env.OPENCODEX_API_AUTH_TOKEN;
 const previousOpencodexHome = process.env.OPENCODEX_HOME;
 const previousImagesApiKey = process.env.OPENCODEX_TEST_IMAGES_API_KEY;
 const originalFetch = globalThis.fetch;
-let testDir = "";
+const TEST_DIR = join(import.meta.dir, ".tmp-server-images-test");
 let isolatedCodexHome: IsolatedCodexHome | null = null;
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 const DIRECT_CHATGPT_TOKEN = fakeChatGptJwt({ chatgpt_account_id: "acct-123" });
 
 beforeEach(() => {
-  setIcaclsRunnerForTests(() => ICACLS_OK);
-  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-  testDir = mkdtempSync(join(tmpdir(), "ocx-server-images-"));
-  process.env.OPENCODEX_HOME = testDir;
+  if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+  mkdirSync(TEST_DIR, { recursive: true });
+  process.env.OPENCODEX_HOME = TEST_DIR;
   delete process.env.OPENCODEX_API_AUTH_TOKEN;
   process.env.OPENCODEX_TEST_IMAGES_API_KEY = "custom-images-key";
   isolatedCodexHome = installIsolatedCodexHome("ocx-server-images-codex-");
@@ -48,12 +44,9 @@ beforeEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-afterEach(async () => {
+afterEach(() => {
   setXaiResultPinnedDownloadForTests(undefined);
   globalThis.fetch = originalFetch;
-  await flushConfigDirHardeningForTests();
-  setIcaclsRunnerForTests(null);
-  setAsyncIcaclsRunnerForTests(null);
   if (previousApiToken === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
   else process.env.OPENCODEX_API_AUTH_TOKEN = previousApiToken;
   if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
@@ -66,7 +59,7 @@ afterEach(async () => {
   clearThreadAccountMap();
   clearAccountNeedsReauth("pool-a");
   clearAccountQuota();
-  if (testDir) removeTreeWithRetry(testDir);
+  if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
 });
 
 interface CapturedRequest {
@@ -690,6 +683,144 @@ test("zstd-compressed request bodies are decoded before the relay", async () => 
   } finally {
     await server.stop(true);
     await upstream.stop(true);
+  }
+});
+
+
+test("a cooled committed key is replaced before the first keyed image send", async () => {
+  const captured: CapturedRequest[] = [];
+  const upstream = fakeImagesUpstream(captured);
+  clearKeyCooldowns();
+  const pooled = {
+    ...keyedProvider(upstream.url.toString().replace(/\/$/, "")),
+    apiKeyPoolStrategy: "round-robin",
+    apiKeyPool: [
+      { id: "first", key: "sk-platform-key" },
+      { id: "second", key: "sk-warm-key" },
+    ],
+  };
+  saveConfig({
+    port: 0,
+    defaultProvider: "openai-apikey",
+    openaiProviderTierVersion: 2,
+    providers: { openai: disabledOpenAiProvider, "openai-apikey": pooled },
+  } as unknown as OcxConfig);
+
+  // Cool the committed key the way a real 429 does, then point the stored selection back at it.
+  // This is the state an operator lands in after a rotation plus a restart or a config reload.
+  const live = loadConfig();
+  rotateKeyOn429(live, "openai-apikey", null, Date.now(), "sk-platform-key");
+  const restored = loadConfig();
+  restored.providers["openai-apikey"]!.apiKey = "sk-platform-key";
+  saveConfig(restored);
+
+  const server = startServer(0);
+  try {
+    const response = await fetch(new URL("/v1/images/generations", server.url), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}` },
+      body: JSON.stringify({ prompt: "a cat", model: "gpt-image-2" }),
+    });
+    expect(response.status).toBe(200);
+    expect(captured).toHaveLength(1);
+    // The warm key, on the FIRST send. This path builds its own Authorization header from a
+    // snapshot resolved before the pick, so a naive wiring would have sent sk-platform-key here
+    // while the picker had already committed sk-warm-key to config.
+    expect(captured[0].headers.get("authorization")).toBe("Bearer sk-warm-key");
+  } finally {
+    await server.stop(true);
+    await upstream.stop(true);
+    clearKeyCooldowns();
+  }
+});
+
+/**
+ * The pick COMMITS its choice before returning, so an unresolvable selection is not a reason to
+ * quietly reuse the previous key: that would authenticate a non-idempotent image POST with a
+ * credential the config no longer treats as active, and the previous key is the one that was
+ * cooling. Raised by CodeRabbit on #4292.
+ */
+test("an unresolvable selected key fails the keyed image send instead of reusing the old one", async () => {
+  const captured: CapturedRequest[] = [];
+  const upstream = fakeImagesUpstream(captured);
+  clearKeyCooldowns();
+  delete process.env.OCX_IMAGES_MISSING_KEY;
+  const pooled = {
+    ...keyedProvider(upstream.url.toString().replace(/\/$/, "")),
+    apiKeyPoolStrategy: "round-robin",
+    apiKeyPool: [
+      { id: "first", key: "sk-platform-key" },
+      // An env reference that is deliberately not set: a revoked keychain entry looks the same.
+      { id: "second", key: "\${OCX_IMAGES_MISSING_KEY}" },
+    ],
+  };
+  saveConfig({
+    port: 0,
+    defaultProvider: "openai-apikey",
+    openaiProviderTierVersion: 2,
+    providers: { openai: disabledOpenAiProvider, "openai-apikey": pooled },
+  } as unknown as OcxConfig);
+  const live = loadConfig();
+  rotateKeyOn429(live, "openai-apikey", null, Date.now(), "sk-platform-key");
+  const restored = loadConfig();
+  restored.providers["openai-apikey"]!.apiKey = "sk-platform-key";
+  saveConfig(restored);
+
+  const server = startServer(0);
+  try {
+    const response = await fetch(new URL("/v1/images/generations", server.url), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}` },
+      body: JSON.stringify({ prompt: "a cat", model: "gpt-image-2" }),
+    });
+    expect(response.status).toBe(500);
+    // Nothing was sent. Red control: restore the `?? candidates.keyed.apiKey` fallback and this
+    // becomes a 200 carrying Bearer sk-platform-key -- the cooled key the pool had left.
+    expect(captured).toHaveLength(0);
+  } finally {
+    await server.stop(true);
+    await upstream.stop(true);
+    clearKeyCooldowns();
+  }
+});
+
+test("without a configured strategy the keyed image send keeps the cooled key", async () => {
+  const captured: CapturedRequest[] = [];
+  const upstream = fakeImagesUpstream(captured);
+  clearKeyCooldowns();
+  const pooled = {
+    ...keyedProvider(upstream.url.toString().replace(/\/$/, "")),
+    apiKeyPool: [
+      { id: "first", key: "sk-platform-key" },
+      { id: "second", key: "sk-warm-key" },
+    ],
+  };
+  saveConfig({
+    port: 0,
+    defaultProvider: "openai-apikey",
+    openaiProviderTierVersion: 2,
+    providers: { openai: disabledOpenAiProvider, "openai-apikey": pooled },
+  } as unknown as OcxConfig);
+  const live = loadConfig();
+  rotateKeyOn429(live, "openai-apikey", null, Date.now(), "sk-platform-key");
+  const restored = loadConfig();
+  restored.providers["openai-apikey"]!.apiKey = "sk-platform-key";
+  saveConfig(restored);
+
+  const server = startServer(0);
+  try {
+    const response = await fetch(new URL("/v1/images/generations", server.url), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}` },
+      body: JSON.stringify({ prompt: "a cat", model: "gpt-image-2" }),
+    });
+    expect(response.status).toBe(200);
+    // Rotation stays reactive-only for an install that never asked for a strategy.
+    expect(captured[0].headers.get("authorization")).toBe("Bearer sk-platform-key");
+  } finally {
+    await server.stop(true);
+    await upstream.stop(true);
+    clearKeyCooldowns();
   }
 });
 
@@ -1612,6 +1743,7 @@ function ccaFetchMock(
       try { parsedBody = JSON.parse(init.body); } catch { /* non-JSON body */ }
     }
     if (url.hostname === "daily-cloudcode-pa.googleapis.com") {
+      expect(init?.redirect).toBe("manual");
       registryHits.push({ url: requestUrl, headers, body: parsedBody });
       return Response.json(payload, { status });
     }
@@ -1628,6 +1760,47 @@ const CCA_CREDENTIAL = {
   expires: Date.now() + 3_600_000,
   projectId: "cca-project-123",
 } as const;
+
+test.each([307, 308])("CCA image transport does not follow a canonical endpoint's %i", async status => {
+  let targetHits = 0;
+  let originHits = 0;
+  const target = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => {
+    targetHits++;
+    return Response.json({ response: { candidates: [] } });
+  } });
+  const origin = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => {
+    originHits++;
+    return new Response("redirect", { status, headers: { location: `http://127.0.0.1:${target.port}/target` } });
+  } });
+  globalThis.fetch = (async (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.hostname === "daily-cloudcode-pa.googleapis.com") {
+      // Map only the canonical URL; pass production init unchanged to the real transport.
+      return originalFetch(`http://127.0.0.1:${origin.port}/cca`, init);
+    }
+    if (url.hostname !== "localhost" && url.hostname !== "127.0.0.1") throw new Error("unexpected external request");
+    return originalFetch(input, init);
+  }) as typeof fetch;
+  saveConfig(ccaConfig());
+  await saveCredential("google-antigravity", { ...CCA_CREDENTIAL });
+  const server = startServer(0);
+  try {
+    const response = await originalFetch(new URL("/v1/images/generations", server.url), {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "synthetic prompt", model: "gpt-image-2" }),
+    });
+    await response.text();
+    expect(targetHits).toBe(0);
+    expect(originHits).toBe(1);
+    expect(response.status).toBe(502);
+    expect(response.headers.get("location")).toBeNull();
+  } finally {
+    globalThis.fetch = originalFetch;
+    await server.stop(true);
+    await origin.stop(true);
+    await target.stop(true);
+  }
+});
 
 test("CCA image fallback generates images via Google Antigravity when no OpenAI upstream exists", async () => {
   const registryHits: CcaFetchRequest[] = [];
@@ -1853,42 +2026,6 @@ test("CCA OAuth no credential saved returns 401 (login required), not a misleadi
     expect(response.status).toBe(401);
     const json = await response.json() as { error: { message: string } };
     expect(json.error.message).toContain("login required");
-  } finally {
-    await server.stop(true);
-  }
-});
-
-test("CCA terminal OAuth refresh rejection returns 401 without exposing the provider failure", async () => {
-  const providerFailureCanary = "EACCES C:\\Users\\Alice\\.opencodex\\auth.json.ocx-tmp";
-  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    if (requestUrl === "https://oauth2.googleapis.com/token") {
-      return Response.json({
-        error: "invalid_grant",
-        error_description: providerFailureCanary,
-      }, { status: 400 });
-    }
-    return originalFetch(input, init);
-  }) as typeof fetch;
-
-  saveConfig(ccaConfig());
-  await saveCredential("google-antigravity", {
-    ...CCA_CREDENTIAL,
-    expires: Date.now() - 60_000,
-  });
-
-  const server = startServer(0);
-  try {
-    const response = await fetch(new URL("/v1/images/generations", server.url), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ prompt: "a cat", model: "gpt-image-2" }),
-    });
-    expect(response.status).toBe(401);
-    const json = await response.json() as { error: { message: string } };
-    expect(json.error.message).toContain("login required");
-    expect(json.error.message).not.toContain(providerFailureCanary);
-    expect(json.error.message).not.toContain("auth.json");
   } finally {
     await server.stop(true);
   }

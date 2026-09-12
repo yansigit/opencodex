@@ -110,8 +110,10 @@ GPT-5.6 Sol/Terra/Luna slug'larını (`gpt-5.6-sol`, `gpt-5.6-terra`,
 Sekiz sağlayıcı önayarı OAuth girişini kullanır — artı deneysel resmi olmayan
 bir cihaz akışı köprüsü aracılığıyla GitHub Copilot. opencodex bunların kimlik
 bilgilerini `~/.opencodex/auth.json` içinde saklar ve otomatik olarak yeniler.
-`chatgpt` ayrıca oturum açma CLI'sı tarafından kabul edilir; bir `forward` modu
-sağlayıcı girdisi oluştururken bir ChatGPT kimlik bilgisi alır.
+Oturum açma CLI'sı `ocx login codex` komutunu da kabul eder; bu yukarıdaki sağlayıcılardan biri
+değildir: komut Codex hesap havuzu girişine yönlendirilir (`ocx account login codex` ile aynı akış).
+Havuzun kendi hesap defteri vardır, bu nedenle bu yol çalışan bir proxy gerektirir. `chatgpt` ve
+`openai` aynı yolun takma adlarıdır.
 
 ```bash
 ocx login xai          # xAI Grok
@@ -122,8 +124,9 @@ ocx login kiro         # kiro-cli kimlik bilgilerini içe aktarın (veya belirte
 ocx login google-antigravity
 ocx login cursor       # bağımsız Cursor PKCE girişi
 ocx login command-code # Command Code tarayıcı OAuth (veya ~/.commandcode/auth.json içe aktarma)
+ocx login devin       # Cognition/Devin için Auth0 tarayıcı girişi
 ocx login github-copilot  # GitHub cihaz akışı → Copilot belirteci (Copilot Pro/Business)
-ocx login chatgpt      # bağımsız ChatGPT OAuth girişi
+ocx login codex        # Codex hesap havuzu (takma adlar: chatgpt, openai; çalışan bir proxy gerekir)
 ocx logout <saglayici>
 ```
 
@@ -136,6 +139,8 @@ ocx logout <saglayici>
 | `kiro` | `kiro` | `https://runtime.us-east-1.kiro.dev` | İlk oturum açma, kurulu ve oturum açılmış `kiro-cli` oturumunu içe aktarır (Unix'te `curl -fsSL https://cli.kiro.dev/install` &#124; `bash` ile kurun; Windows PowerShell'de `irm 'https://cli.kiro.dev/install.ps1'` &#124; `iex` kullanın; ardından `kiro-cli login` çalıştırın). **Hesap ekle**, `kiro-cli` oturumunu kapatır, `kiro-cli` tarafından kullanılan hesabı değiştiren yeni bir tarayıcı girişi başlatır ve hesap kapsamlı profil meta verilerini saklar. Mevcut OpenCodex hesapları korunur ve iptal veya başarısızlık önceki `kiro-cli` oturumunu geri yükler. |
 | `google-antigravity` | `google` | `https://daily-cloudcode-pa.googleapis.com` | Cloud Code Assist hattı üzerinden Google OAuth. Canlı keşif CCA'nın kimlik doğrulamalı `v1internal:fetchAvailableModels` uç noktasını kullanır ve oturum açmış hesap için kullanılabilir olan ajan modellerini yayınlar; sürdürülen katalog geri dönüş olarak kalır. Kota `retrieveUserQuota` ve `retrieveUserQuotaSummary` RPC'leriyle (8 saniyelik zaman aşımı) sorgulanır. CCA sohbet/adaptör istekleri SSE (`v1internal:streamGenerateContent?alt=sse`) kullanır ve tekli çağrılar için bu akışı arabelleğe alır. Yerleşik görüntü oluşturma ayrı tekli `v1internal:generateContent` uç noktasını kullanır. Adaptör, ilk ana bilgisayardaki aktarım/404/unavailable hatasında daily/production peer'ı yeniden dener. |
 | `cursor` | `cursor` | `https://api2.cursor.sh` | Deneysel PKCE girişi, canlı HTTP/2 aktarımı ve hesap filtreli model keşfi. |
+| `devin` | `devin` | `https://server.codeium.com` | Deneysel, resmi olmayan Cognition/Devin köprüsü. Giriş tarayıcıda Auth0 oturumunu açar, ardından belirteci `RegisterUser` ile uzun ömürlü bir API anahtarına dönüştürür. Modeller hesaba göre `GetCascadeModelConfigs` ile keşfedilir; akış yalnızca Connect-RPC üzerindeki `runTurn` yolunu kullanır. Panel ön ayarında varsayılan olarak yer almaz. |
+| `devin-cli` | `devin` | `https://server.codeium.com` | Kurulu Devin CLI'nin zaten tuttuğu kimlik bilgisini içe aktarır (`devin auth login` bunu kendi `credentials.toml` dosyasına yazar), ardından `devin` sağlayıcısı gibi Cognition'ın Connect-RPC api-server'ı üzerinden akış yapar — tarayıcı girişi ve yapıştırılacak anahtar yok. Model listesi ve bağlam pencereleri hesabınızın kendi kataloğundan gelir. CLI'nin kendi yerel ajan döngüsü (ACP stdio) için farklı adlı bir satırda `"adapter": "devin-cli"` kullanın. |
 | `github-copilot` | `openai-chat` | `https://api.githubcopilot.com` | Deneysel. GitHub cihaz akışı + `copilot_internal` değişimi (VS Code OAuth istemcisi). Aktif bir Copilot aboneliği gerektirir; resmi bir üçüncü taraf API değildir. |
 
 Google Antigravity hesap ve sağlayıcı kota sorguları, model listesine geri dönüş dahil sabit Google uç noktalarını kullanır. Bu hedefler için şeffaf Fake-IP DNS desteklenirken TLS doğrulaması, yönlendirme reddi ve özel adres kontrolleri korunur. Özel base URL yalnızca model isteklerini değiştirir; `NO_PROXY` doğrudan bağlantı politikasını korur.
@@ -380,6 +385,23 @@ ekler; bir yukarı akış `Retry-After`'ı yine de önceliklidir. Aynı anahtarl
 bekle ve yeniden dene özelliği [`retryOn429`](/tr/reference/configuration/)
 aracılığıyla isteğe bağlı kalır.
 
+**Anahtarsız `opencode-free` katmanı şu anda üçüncü taraf istemcilere kapalıdır.** Zen,
+`x-opencode-session` başlığı olmadan gelen her isteği reddeder ve `MissingSessionID` hata
+tipiyle "OpenCode's free tier can only be used in OpenCode" mesajını döndürür. Kapıda
+yalnızca başlığın varlığı denetlenir; yani bir proxy uydurma bir değerle geçebilirdi,
+opencodex bunu yapmaz. Bir oturum kimliği ile sürüm taşıyan `opencode/<version>`
+User-Agent üretmek, kendini OpenCode istemcisi ilan etmek demektir ve OpenCode bu
+anahtarsız katman için üçüncü taraf entegrasyon sözleşmesi yayımlamamıştır; böyle elde
+edilen bir HTTP 200, izin değil atlatılmış bir kabul denetimidir. Bu yüzden opencodex
+kısıtlamayı aşmak yerine bildirir: `opencode-free` sağlayıcısına giden bir istek, yukarı
+akıştaki kapıyı açıklayan bir hata döndürür.
+
+Aynı modellere giden desteklenen yol, [opencode.ai/auth](https://opencode.ai/auth)
+üzerinden alınan bir OpenCode Zen API anahtarıyla kullanılan anahtarlı
+**`opencode-zen`** sağlayıcısıdır. OpenCode ileride anahtarsız katman için desteklenen
+bir üçüncü taraf yolu yayımlarsa opencodex bunu izleyebilir; o zamana kadar önayar
+kısıtlamayı belgeler. Yukarı akış koşulları: [opencode.ai/docs/zen](https://opencode.ai/docs/zen/).
+
 Çoğu bir taşıyıcı anahtarla `openai-chat` adaptörünü kullanır; yalnızca
 Anthropic uyumlu bir uç nokta sunan birkaç tanesi (örneğin **Xiaomi MiMo**)
 `anthropic` adaptörünü (`x-api-key`) kullanır. Volcengine Agent Plan,
@@ -390,7 +412,7 @@ bitirir ancak son Responses olayını atlarsa opencodex beş saniyelik model
 kapsamlı bir yetkisiz kullanım onarımı uygular; hatalı biçimlendirilmiş veya
 kısmi akışlar başarılı olarak bildirilmek yerine tamamlanmamış olarak kapanır.
 
-> **Üç Volcengine faturalandırma rotası:** `volcengine` kullandıkça öde Ark API'sidir, `volcengine-coding-plan` Coding Plan kotasını tüketir ve `volcengine-agent-plan` Agent Plan kotasını tüketir. Aynı ürün için verilen anahtarı ve uç noktayı kullanın; sıradan `/api/v3` uç noktası bir Plan aboneliği mevcut olduğunda bile kullandıkça öde ücretlerine neden olabilir. Önayarlar özenle seçilmiş statik model katalogları kullanır çünkü Ark'ın `/models` yanıtı yerleştirme, görsel, video ve 3D kaynaklarını da içerir, Coding ağ geçidi aynı geniş kataloğu döndürür ve Agent Plan ağ geçidinin `/models` kaynağı yoktur. Kullandıkça öde varsayılan olarak `doubao-seed-2-1-pro-260628`'dir; seçilmiş kataloğu güncel DeepSeek ve GLM metin modellerini de içerir. Coding Plan varsayılan olarak `ark-code-latest`, Agent Plan ise varsayılan olarak `deepseek-v4-pro`'dur.
+> **Üç Volcengine faturalandırma rotası:** `volcengine` kullandıkça öde Ark API'sidir, `volcengine-coding-plan` Coding Plan kotasını tüketir ve `volcengine-agent-plan` Agent Plan kotasını tüketir. Aynı ürün için verilen anahtarı ve uç noktayı kullanın; sıradan `/api/v3` uç noktası bir Plan aboneliği mevcut olduğunda bile kullandıkça öde ücretlerine neden olabilir. Önayarlar özenle seçilmiş statik model katalogları kullanır çünkü Ark'ın `/models` yanıtı yerleştirme, görsel, video ve 3D kaynaklarını da içerir, Coding ağ geçidi aynı geniş kataloğu döndürür ve Agent Plan ağ geçidinin `/models` kaynağı yoktur. Kullandıkça öde varsayılan olarak `doubao-seed-2-1-pro-260628`'dir; seçilmiş kataloğu güncel DeepSeek ve GLM metin modellerini de içerir. Coding Plan varsayılan olarak `ark-code-latest`, Agent Plan ise varsayılan olarak `deepseek-v4-flash`'dur.
 
 > **Volcengine Plan kullanım kısıtlaması:** Volcengine, Coding Plan ve Agent Plan kotasını yalnızca desteklenen yapay zeka kodlama araçları içinde geçerli olarak belgeler ve genel API çağrıları için bir plan anahtarı kullanmanın aboneliği askıya alabileceği veya hesabı yasaklayabileceği konusunda uyarır. Codex veya Claude Code'u opencodex üzerinden yönlendirmek belgelenmiş kullanımdır; diğer otomasyonları bir plan anahtarına yönlendirmek değildir. Kullandıkça öde `volcengine` rotası böyle bir kısıtlama taşımaz.
 
@@ -635,7 +657,7 @@ listesini sağlayıcıdan keşfeder; böylece yeni Ollama Cloud modelleri yapıl
 değişikliği olmadan görünür. opencodex, bulut serisini vizyon
 yeteneğine göre sınıflandırır, böylece [vizyon sidecar'ı](/tr/guides/sidecars/)
 yalnızca salt metin modeller için devreye girer. Salt metin modeller (örneğin
-`glm-5.2`, `deepseek-v4-pro`, `gpt-oss`, `qwen3-coder`, `minimax-m2.x`,
+`glm-5.2`, `deepseek-v4-flash`, `gpt-oss`, `qwen3-coder`, `minimax-m2.x`,
 `nemotron-3-*`) `noVisionModels` içinde listelenir; vizyon yerel modeller
 (örneğin `kimi-k2.6`, `minimax-m3`, `gemma4`, `qwen3.5`,
 `gemini-3-flash-preview`) listelenmez. Eşleştirme Ollama'nın `:size`

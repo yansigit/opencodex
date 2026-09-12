@@ -28,8 +28,9 @@ import { readBoundedResponseBytes, type BoundedBytesResult } from "../lib/bounde
 import { sidecarEnter } from "../lib/sidecar-tracker";
 import type { OcxConfig } from "../types";
 import { resolveFirstUsableOpenAiSidecar, selectImagesProvider } from "../providers/openai-sidecar";
+import { selectProactiveApiKeyTransport } from "../providers/key-failover";
 import { getProviderRegistryEntry } from "../providers/registry";
-import { readJsonRequestBody } from "./request-decompress";
+import { readJsonRequestBody, resolveInboundBodyLimitBytes } from "./request-decompress";
 import { ForwardAdmissionCredentialError, validateForwardAdmissionCredential } from "./auth-cors";
 import type { RequestLogContext } from "./request-log";
 import { codexLogAccountId, decodeRequestErrorResponse } from "./responses";
@@ -288,6 +289,7 @@ async function tryCcaImageGeneration(
     try {
       upstream = await fetch(`${baseUrl}/v1internal:generateContent`, {
         method: "POST",
+        redirect: "manual",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${token}`,
@@ -601,7 +603,7 @@ export async function handleImages(
 ): Promise<Response> {
   let body: unknown;
   try {
-    body = await readJsonRequestBody(req);
+    body = await readJsonRequestBody(req, undefined, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));
   } catch (err) {
     return decodeRequestErrorResponse(err, "images");
   }
@@ -697,7 +699,33 @@ export async function handleImages(
     // Do not hide a broken/expired pool behind separately billed API-key image generation.
     return forwardAuthError;
   } else if (candidates.keyed) {
-    const { provider, apiKey, providerName } = candidates.keyed;
+    const { providerName } = candidates.keyed;
+    // The keyed image path builds its own URL and Authorization header and never enters
+    // handleResponses, so the pre-dispatch key pick happens here.
+    //
+    // Two things about the placement. It stays INSIDE this branch because higher up it would
+    // also run for requests ChatGPT forward goes on to serve, spending a rotation on a path
+    // that never used the key. And the header is rebuilt from the returned route rather than
+    // from candidates.keyed.apiKey, which is a snapshot resolved earlier: reusing it would
+    // send the OLD key while the picker had already persisted the new one.
+    //
+    // Transport variant: this branch reads `provider.baseUrl` and `provider.headers` to build
+    // the URL and the request, and it comes back with the credential already resolved.
+    const warmKeyProvider = selectProactiveApiKeyTransport(config, providerName, candidates.keyed.provider);
+    const provider = warmKeyProvider ?? candidates.keyed.provider;
+    // No fall back to the earlier snapshot once a pick has happened. The picker COMMITS its
+    // choice before returning, so if the chosen reference will not resolve -- revoked keychain
+    // entry, unset env var -- sending the previous key would authenticate a non-idempotent
+    // POST with a credential the config no longer considers active, and the previous key is
+    // the one that was cooling. Fail loudly instead.
+    if (warmKeyProvider && !warmKeyProvider.apiKey?.trim()) {
+      return formatErrorResponse(
+        500,
+        "configuration_error",
+        `image generation selected an API key for "${providerName}" that cannot be resolved`,
+      );
+    }
+    const apiKey = warmKeyProvider?.apiKey ?? candidates.keyed.apiKey;
     if (provider.headers) Object.assign(headers, provider.headers);
     headers["authorization"] = `Bearer ${apiKey}`;
     logCtx.provider = providerName;

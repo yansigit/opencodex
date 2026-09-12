@@ -63,7 +63,9 @@ opencodex 允許你為目錄中的所有模型選擇多代理協作介面。儀�
 內建指引只在偏好模型、合格名冊或 fallback 鏈解析成功時觸發。設定了 `injectionModel` 就足以渲染
 自訂提示詞；若裸值無法唯一解析，`{{model}}` 會展開為空字串。
 
-在 v1 上，opencodex 只在 `max` / `ultra` effort 注入上游風格的主動委派指引。v1 不會附加偏好模型、
+在 v1 上，opencodex 只在 `max` 或 `ultra` 推理強度下注入與 v2 建議預設相同的主動委派指引。
+僅改變委派的觸發條件：不再需要另外提出委派請求；使用者指示以及權限、任務範圍與協作工具規則仍然適用。
+v1 不會附加偏好模型、
 名冊、fallback 清單或自訂提示詞。
 
 預設關閉的 `syncCodexSubagentDefaults` 選項與指引無關。當 opencodex 擁有作用中的 Codex 路由時，
@@ -215,7 +217,7 @@ opencodex 會將磁碟上的模型目錄與目前使用者擁有的每個 Codex 
 
 | 模型 | 線路上的 `max` | 選擇 `ultra` 後的線路值 |
 | --- | --- | --- |
-| gpt-5.5、gpt-5.4、gpt-5.4-mini | xhigh | xhigh（先轉為 max，再經 `nativeEffortClamp`） |
+| gpt-5.5 | xhigh | xhigh（先轉為 max，再經 `nativeEffortClamp`） |
 | gpt-5.6-sol、gpt-5.6-terra | max | max |
 | gpt-5.6-luna | max | 其精確上游階梯不提供該選項 |
 | 路由模型 | 由適配器對映或限制 | 先轉為 max，再由適配器對映或限制 |

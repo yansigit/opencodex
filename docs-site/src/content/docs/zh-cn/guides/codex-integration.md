@@ -312,18 +312,37 @@ fallback 行为，参见 [Sub-agent Surface](/guides/sub-agent-surface/)。
 
 ## Codex 账号预热
 
-当把一个 ChatGPT 账号加入 Codex 账号池时，opencodex 会在持久化前向 Codex Responses backend
-发送一个小型 streaming 请求来验证它。该请求使用真正的 Responses item 数组
-（`input: [{ type: "message", ... }]`），等待 `response.completed`，并默认使用 `gpt-5.4-mini`。
-如果该模型返回 HTTP 400，则会改用 `gpt-5.5` 重试；结构化的上游错误详情会被展示给用户，但不会暴露
-原始响应正文。后台重新验证是独立功能，默认关闭；只有在启用 Token Guardian、将 `chatgpt` 刷新策略设为
-`proactive`，并且 `tokenGuardian.codexWarmupEnabled` 为 true 时才会运行。
+添加或重新认证账号时，通常会在保存前发送一个小型模型请求并等待 `response.completed`。默认使用 `gpt-5.6-luna`，HTTP 400 或 HTTP 404 时改用 `gpt-5.5` 重试。公开错误仅包含固定分类，不包含原始响应正文。
+
+如果新 OAuth 凭据的已认证用量查询确认5小时、每周或每月额度耗尽，则不调用模型而直接保存账号，显示**等待验证**。重启或刷新令牌也不会使其可用。额度恢复后刷新额度：只有完整的最新用量显示有余额，才会发送一个小型验证请求；请求完成后账号才可用于路由。查询或验证失败将保留等待状态。普通状态轮询不会发送该请求。初次注册时用量未知仍需常规预热验证。
+
+`ocx account refresh openai` 和 `ocx account list openai --quota --refresh` 仅查询用量。模型验证会消耗配额，因此需要用户的仪表板会话：配额恢复后，打开 `ocx gui` 并点击 **Refresh quotas**。无界面主机也需要通过浏览器访问其仪表板；仅凭管理员令牌无法授权验证。暂停的账号可以完成验证，但不会因此恢复或被选中。模型授权错误会一直显示，直到验证或重新登录成功。
+
+后台重新验证是独立功能，默认关闭。它要求 Token Guardian、`openai` 的 `proactive` 刷新策略及 `tokenGuardian.codexWarmupEnabled`，并跳过等待注册验证的账号。
+
+### 账号停止处理请求的原因
+
+账号退出账号池选择时，原因随判定一起传递，而不是为显示重新计算，因此界面不会在路由已排除该账号时仍显示正常。`GET /api/codex-auth/accounts` 在每个账号的 `needsReauth` 旁返回 `reauthReason`：从未保存凭据为 `missing_credential`，刷新持续失败为 `refresh_failed`，用量查询本身被拒绝为 `quota_unauthorized`。
+
+主账号刷新未完成时仍返回带 `Retry-After` 的 `503`，因为重试仍可能成功。消息中现在补充说明：若持续失败，则主账号需要重新认证，而不只是再试一次。
+
+### 让降级的账号退出轮换
+
+`codexPool.excludedPlans` 列出自动账号池选择要跳过的套餐键，与每个账号上保存的套餐不区分大小写比对。默认不存在，因此现有安装的轮换完全不变。
+
+```bash
+ocx config set codexPool '{"excludedPlans":["free"]}'
+```
+
+这是选择策略，不是封禁。被排除的账号保留凭据、用量历史和线程亲和性，仍显示在账号列表中，也仍可通过 `work/gpt-5.5` 这类显式选择使用。改变的只是自动轮换不再选它，包括它已经是活跃账号或已绑定线程的情况——订阅到期后留下的正是这种状态。
+
+有两处刻意的限制。主 Codex 账号不会因套餐被排除：仅选择模式的路由不读取受保护的原生凭据而隐去其套餐，覆盖主账号的规则会自相矛盾。另外，当没有未被排除的账号时，被排除的账号仍会应答而不是失败；要彻底停止服务，仍然是暂停全部账号。没有对应的 `minimumPlan`，因为给 ChatGPT 套餐排序需要一个这里并不存在的全序。
 
 ## 恢复原生 Codex
 
-opencodex 绝不会把你困住。**`ocx stop` 是完全恢复原生 Codex 的单一命令** —— 它会停止 proxy、
-停止后台服务（如已安装），并剥除所有注入的行和路由的目录条目，使普通的 `codex` 完全像 opencodex
-从未存在过一样工作：
+`ocx stop` 会停止 proxy 和已安装的后台服务，然后尝试恢复原生 Codex。OpenCodex 只移除能够确认归属的路由配置；如果无法安全恢复配置文件，会报告恢复未完成。
+
+如果当前 config 或 profile 与保存的原始内容不同，且日志缺少该文件注入状态的哈希值，自动快照恢复会保留两个文件和日志，不作修改。已经与原始内容相同的文件不会重写。对已路由配置的再次注入也会拒绝使用这种未确认的基线；原生配置可以建立新的快照。详见[恢复规则](/guides/codex-integration/#recovery-without-injection-hashes)。
 
 ```bash
 ocx stop       # stop the proxy + service, restore native Codex
@@ -334,3 +353,9 @@ ocx restore back # point plain Codex at the running proxy again
 当 opencodex 作为受管的 [background service](/reference/cli/#ocx-service) 运行时，它会设置
 `OCX_SERVICE=1`，这样由服务驱动的重启**不会**反复改写 Codex config——只有显式的
 `ocx stop` / `ocx service stop` 才会恢复原生 Codex。
+
+## 分页历史记录安全拒绝
+
+如果受影响的历史存储支持分页，提供商切换可能返回 `history_paginated_requires_native_writer`。OpenCodex 会保留当前配置、配置档、模型目录、历史文件及恢复依据，而不是在 Codex 之外分配序号；可迁移存储中的 legacy 记录也受保护。仅保留外部提供商而不执行切换的路径仍然可用。
+
+不要删除会话仍在引用的提供商定义、反复运行 `ocx sync` 或旧版恢复，也不要改写正在使用的历史文件来绕过拒绝。保留文件，在恢复前关闭相关会话，并只报告准确的错误和版本，不要公开私人历史。需要与原生写入器协调的已验证修复。备份或脚本成功并不能证明显示已恢复；重新打开 Codex 后检查会话。

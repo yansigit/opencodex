@@ -55,12 +55,12 @@ import {
   CODEX_QUOTA_PROBE_INTERVAL_MS,
   clearCodexUpstreamHealth,
   clearThreadAccountMap,
+  getCodexQuotaHealthSnapshot,
   recordCodexUpstreamOutcome,
   resetCodexRoutingForManualSelection,
 } from "../../src/codex/routing";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
-import { flushConfigDirHardeningForTests } from "../../src/config/paths";
-import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
+import { setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import {
   blockNativeMainStartupForUnownedServiceHome,
   completeNativeMainRecovery,
@@ -73,20 +73,21 @@ import {
   tryAdmitTurn,
 } from "../../src/server/lifecycle";
 import type { CodexModelEntitlementSnapshot } from "../../src/codex/model-entitlements";
+import { recordContextSessionOwner, clearContextSessionOwnersForTests } from "../../src/codex/context-owner";
+import { handleContextHistory } from "../../src/server/context-history";
+import { resetContextRelayActivationForTests } from "../../src/codex/context-compat";
 import { hasForwardableCodexBearer } from "../../src/server/auth-cors";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 let testDir: string;
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 beforeEach(() => {
   // This suite validates refresh admission and auth-context outcomes. Real icacls
   // processes are covered elsewhere and can retain temp-dir handles long enough
   // to obscure those assertions under Windows isolated-test load.
-  setIcaclsRunnerForTests(() => ICACLS_OK);
-  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+  setIcaclsRunnerForTests(() => ({ success: true, exitCode: 0, timedOut: false, stdout: "" }));
   testDir = mkdtempSync(join(tmpdir(), "ocx-auth-ctx-"));
   previousOpencodexHome = process.env.OPENCODEX_HOME;
   process.env.OPENCODEX_HOME = testDir;
@@ -103,10 +104,9 @@ beforeEach(() => {
   clearAccountNeedsReauth("pool-b");
 });
 
-afterEach(async () => {
-  await flushConfigDirHardeningForTests();
+afterEach(() => {
+  resetContextRelayActivationForTests();
   setIcaclsRunnerForTests(null);
-  setAsyncIcaclsRunnerForTests(null);
   removeTreeWithRetry(testDir);
   clearThreadAccountMap();
   clearCodexUpstreamHealth();
@@ -223,6 +223,22 @@ function expiredJwt(): string {
   return `header.${payload}.signature`;
 }
 describe("Codex auth context", () => {
+  test("pending-only pool fallback cannot materialize request authentication", async () => {
+    const cfg = config();
+    cfg.activeCodexAccountId = "pool-a";
+    const credential = { accessToken: "pending-access", refreshToken: "pending-refresh", expiresAt: Date.now() + 3600_000, chatgptAccountId: "pool_acc" };
+    saveCodexAccountCredential("pool-a", credential, { validationPending: true });
+    await expect(resolveCodexAuthContext(new Headers(), cfg, "pool", {
+      primeCodexPoolQuotas: async () => {},
+    })).rejects.toThrow(CodexPoolAuthenticationError);
+    expect(isAccountNeedsReauth("pool-a")).toBe(false);
+
+    // Also reject a context acquired before reauthentication replaced the record.
+    const ctx = { kind: "pool" as const, accountId: "pool-a", generation: 0, writerGeneration: 0,
+      accessToken: "old-access", chatgptAccountId: "pool_acc" };
+    expect(() => materializeCodexUpstreamAuth(new Headers(), ctx)).toThrow("validation is pending");
+    expect(() => applyCodexAuthContextToProvider(cfg.providers.chatgpt!, ctx, "pool")).toThrow("validation is pending");
+  });
   test("main-profile drain routes a non-main pool account without native reads or quota priming", async () => {
     saveCodexAccountCredential("pool-a", {
       accessToken: "pool_token",
@@ -1267,6 +1283,147 @@ describe("Codex auth context", () => {
     expect(directEntitlementChecks).toBe(1);
   });
 
+  test("a fresh request can reuse caller main after the selected Pool account enters cooldown", async () => {
+    const cfg = { ...config(), autoSwitchThreshold: 0 };
+    const now = 1_800_000_000_000;
+    const originalNow = Date.now;
+    const inbound = new Headers({
+      authorization: "Bearer caller-keyring-token",
+      "chatgpt-account-id": "caller-keyring-account",
+    });
+    saveCodexAccountCredential("pool-a", {
+      accessToken: "pool_token", refreshToken: "pool_refresh",
+      expiresAt: now + 24 * 60 * 60_000, chatgptAccountId: "pool_acc",
+    });
+    try {
+      Date.now = () => now;
+      recordCodexUpstreamOutcome(cfg, "pool-a", 429, {
+        now, modelId: "gpt-5.6-terra", resetAt: now + 600_000, fixedAccount: true,
+      });
+      const cooldown = getCodexQuotaHealthSnapshot("pool-a", "shared");
+      expect(cooldown).not.toBeNull();
+      Date.now = () => now + 1_000;
+      const options = { requestScopedMainCredential: true, modelId: "gpt-5.6-terra" };
+      await expect(resolveCodexAuthContext(inbound, cfg, "pool", {
+        ...options, excludeAccountId: "pool-a",
+      })).resolves.toMatchObject({ kind: "main", accountId: null });
+
+      const context = await resolveCodexAuthContext(inbound, cfg, "pool", options);
+      expect(context).toMatchObject({ kind: "main", accountId: null });
+      const forwarded = headersForCodexAuthContext(inbound, context);
+      expect(forwarded.get("authorization")).toBe("Bearer caller-keyring-token");
+      expect(forwarded.get("chatgpt-account-id")).toBe("caller-keyring-account");
+      expect(cfg.activeCodexAccountId).toBe("pool-a");
+      expect(cfg.activeCodexAccountPinned).toBeUndefined();
+      expect(getCodexQuotaHealthSnapshot("pool-a", "shared")).toEqual(cooldown);
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  test("cooldown caller-main fallback never resurrects the cooled subscription", async () => {
+    const now = 1_800_000_000_000;
+    const originalNow = Date.now;
+    const cfg = { ...config(), autoSwitchThreshold: 0 };
+    // config() registers pool-a with email pool@example.test and workspace account pool_acc.
+    const callerJwt = (email?: string) => `header.${Buffer.from(JSON.stringify({
+      exp: Math.floor(now / 1000) + 86_400,
+      ...(email ? { email } : {}),
+      "https://api.openai.com/auth": { chatgpt_account_id: "pool_acc" },
+    })).toString("base64url")}.signature`;
+    saveCodexAccountCredential("pool-a", {
+      accessToken: "pool_token", refreshToken: "pool_refresh",
+      expiresAt: now + 24 * 60 * 60_000, chatgptAccountId: "pool_acc",
+    });
+    try {
+      Date.now = () => now;
+      recordCodexUpstreamOutcome(cfg, "pool-a", 429, {
+        now, modelId: "gpt-5.6-terra", resetAt: now + 600_000, fixedAccount: true,
+      });
+      const cooldown = getCodexQuotaHealthSnapshot("pool-a", "shared");
+      expect(cooldown).not.toBeNull();
+      Date.now = () => now + 1_000;
+      const options = { requestScopedMainCredential: true, modelId: "gpt-5.6-terra" };
+      const resolve = (headers: Headers) => resolveCodexAuthContext(headers, cfg, "pool", options);
+
+      // The cooled account's exact materialized credential cannot use the fallback.
+      await expect(resolve(new Headers({
+        authorization: "Bearer pool_token", "chatgpt-account-id": "pool_acc",
+      }))).rejects.toBeInstanceOf(CodexAccountCooldownError);
+      // A rotated token of the same account (same workspace id and email) is still that subscription.
+      await expect(resolve(new Headers({
+        authorization: `Bearer ${callerJwt("pool@example.test")}`,
+      }))).rejects.toBeInstanceOf(CodexAccountCooldownError);
+      // A distinct team member on the shared workspace account id may serve the request.
+      await expect(resolve(new Headers({
+        authorization: `Bearer ${callerJwt("teammate@example.test")}`,
+      }))).resolves.toMatchObject({ kind: "main", accountId: null });
+      // An unreadable caller identity fails closed.
+      await expect(resolve(new Headers({
+        authorization: "Bearer opaque-caller-token",
+      }))).rejects.toBeInstanceOf(CodexAccountCooldownError);
+      // The workspace account id without a readable email cannot be distinguished: fail closed.
+      await expect(resolve(new Headers({
+        authorization: `Bearer ${callerJwt()}`,
+      }))).rejects.toBeInstanceOf(CodexAccountCooldownError);
+
+      // Nothing mutated the cooldown or the Pool selection.
+      expect(cfg.activeCodexAccountId).toBe("pool-a");
+      expect(getCodexQuotaHealthSnapshot("pool-a", "shared")).toEqual(cooldown);
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  test("cooldown caller-main fallback follows the stable user id, not the recorded email", async () => {
+    const now = 1_800_000_000_000;
+    const originalNow = Date.now;
+    const cfg = { ...config(), autoSwitchThreshold: 0 };
+    // config() registers pool-a with email pool@example.test on workspace account pool_acc.
+    const jwt = (claims: Record<string, unknown>, email?: string) => `header.${Buffer.from(JSON.stringify({
+      exp: Math.floor(now / 1000) + 86_400,
+      ...(email ? { email } : {}),
+      "https://api.openai.com/auth": { chatgpt_account_id: "pool_acc", ...claims },
+    })).toString("base64url")}.signature`;
+    const storeCooled = (accessToken: string) => saveCodexAccountCredential("pool-a", {
+      accessToken, refreshToken: "pool_refresh",
+      expiresAt: now + 24 * 60 * 60_000, chatgptAccountId: "pool_acc",
+    });
+    storeCooled(jwt({ chatgpt_user_id: "user-cooled" }, "pool@example.test"));
+    try {
+      Date.now = () => now;
+      recordCodexUpstreamOutcome(cfg, "pool-a", 429, {
+        now, modelId: "gpt-5.6-terra", resetAt: now + 600_000, fixedAccount: true,
+      });
+      const cooldown = getCodexQuotaHealthSnapshot("pool-a", "shared");
+      expect(cooldown).not.toBeNull();
+      Date.now = () => now + 1_000;
+      const options = { requestScopedMainCredential: true, modelId: "gpt-5.6-terra" };
+      const resolve = (headers: Headers) => resolveCodexAuthContext(headers, cfg, "pool", options);
+
+      // Distinct members of one workspace account, with no email claim anywhere to separate them.
+      await expect(resolve(new Headers({
+        authorization: `Bearer ${jwt({ chatgpt_user_id: "user-teammate" })}`,
+      }))).resolves.toMatchObject({ kind: "main", accountId: null });
+      // The same user stays inside its own cooldown after an email change and a token rotation.
+      await expect(resolve(new Headers({
+        authorization: `Bearer ${jwt({ chatgpt_user_id: "user-cooled" }, "renamed@example.test")}`,
+      }))).rejects.toBeInstanceOf(CodexAccountCooldownError);
+
+      // A stored credential whose own user-id claims disagree identifies nobody, so even a caller
+      // the email rule would have waved through as a teammate fails closed.
+      storeCooled(jwt({ chatgpt_user_id: "user-cooled", user_id: "user-other" }, "pool@example.test"));
+      await expect(resolve(new Headers({
+        authorization: `Bearer ${jwt({ chatgpt_user_id: "user-teammate" }, "teammate@example.test")}`,
+      }))).rejects.toBeInstanceOf(CodexAccountCooldownError);
+
+      expect(cfg.activeCodexAccountId).toBe("pool-a");
+      expect(getCodexQuotaHealthSnapshot("pool-a", "shared")).toEqual(cooldown);
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
   test("selects pool auth independently of the routed provider", async () => {
     saveCodexAccountCredential("pool-a", {
       accessToken: "pool_token",
@@ -1452,8 +1609,9 @@ describe("Codex auth context", () => {
     // The caller proved admission with one of OUR secrets. That secret must never leave the
     // process, so the only acceptable outcome is the stored main credential in its place.
     const admissionSecret = "ocx_data_localsecret";
+    const storedCredential = liveJwt();
     writeFileSync(join(testDir, "auth.json"), JSON.stringify({
-      tokens: { access_token: liveJwt(), account_id: "stored_main_acc" },
+      tokens: { access_token: storedCredential, account_id: "stored_main_acc" },
     }));
 
     const headers = materializeCodexUpstreamAuth(
@@ -1463,7 +1621,7 @@ describe("Codex auth context", () => {
     );
 
     expect(headers.get("authorization")).not.toContain(admissionSecret);
-    expect(headers.get("authorization")).toBe(`Bearer ${liveJwt()}`);
+    expect(headers.get("authorization")).toBe(`Bearer ${storedCredential}`);
     expect(headers.get("chatgpt-account-id")).toBe("stored_main_acc");
     // Unrelated forwarded headers still ride along.
     expect(headers.get("openai-beta")).toBe("responses=experimental");
@@ -1601,7 +1759,7 @@ describe("Codex auth context", () => {
       });
 
       // Spark owns a separate quota, so Terra can use the same account.
-      await expect(resolveCodexAuthContext(headers, cfg, "pool", { modelId: "gpt-5.4" }))
+      await expect(resolveCodexAuthContext(headers, cfg, "pool", { modelId: "gpt-5.6-terra" }))
         .resolves.toMatchObject({ kind: "pool", accountId: "pool-a" });
       await expect(resolveCodexAuthContext(headers, cfg, "pool", { modelId: "gpt-5.3-codex-spark" }))
         .rejects.toBeInstanceOf(CodexAccountCooldownError);
@@ -1609,12 +1767,12 @@ describe("Codex auth context", () => {
       recordCodexUpstreamOutcome(cfg, "pool-a", 429, {
         now,
         resetAt,
-        modelId: "gpt-5.4",
+        modelId: "gpt-5.6-terra",
       });
 
       // Terra and Luna stay in the shared native quota group, while Spark keeps
       // its independent cooldown instead of being overwritten by Terra's 429.
-      await expect(resolveCodexAuthContext(headers, cfg, "pool", { modelId: "gpt-5.4-mini" }))
+      await expect(resolveCodexAuthContext(headers, cfg, "pool", { modelId: "gpt-5.6-luna" }))
         .rejects.toBeInstanceOf(CodexAccountCooldownError);
       await expect(resolveCodexAuthContext(headers, cfg, "pool", { modelId: "gpt-5.3-codex-spark" }))
         .rejects.toBeInstanceOf(CodexAccountCooldownError);
@@ -1626,7 +1784,7 @@ describe("Codex auth context", () => {
         retryAfter: "60",
         modelId: "gpt-5.3-codex-spark",
       });
-      await expect(resolveCodexAuthContext(headers, cfg, "pool", { modelId: "gpt-5.4" }))
+      await expect(resolveCodexAuthContext(headers, cfg, "pool", { modelId: "gpt-5.6-terra" }))
         .rejects.toBeInstanceOf(CodexAccountCooldownError);
     } finally {
       Date.now = originalNow;
@@ -1659,7 +1817,7 @@ describe("Codex auth context", () => {
       Date.now = () => now;
       // Establish the shared-scope binding first. The Spark fallback below must
       // create a second binding rather than replacing this one.
-      await expect(resolveCodexAuthContext(headers, cfg, "pool", { modelId: "gpt-5.4" }))
+      await expect(resolveCodexAuthContext(headers, cfg, "pool", { modelId: "gpt-5.6-terra" }))
         .resolves.toMatchObject({ kind: "pool", accountId: "pool-a" });
 
       recordCodexUpstreamOutcome(cfg, "pool-a", 429, {
@@ -1671,7 +1829,7 @@ describe("Codex auth context", () => {
       await expect(resolveCodexAuthContext(headers, cfg, "pool", { modelId: "gpt-5.3-codex-spark" }))
         .resolves.toMatchObject({ kind: "pool", accountId: "pool-b" });
       expect(cfg.activeCodexAccountId).toBe("pool-a");
-      await expect(resolveCodexAuthContext(headers, cfg, "pool", { modelId: "gpt-5.4" }))
+      await expect(resolveCodexAuthContext(headers, cfg, "pool", { modelId: "gpt-5.6-terra" }))
         .resolves.toMatchObject({ kind: "pool", accountId: "pool-a" });
       // This second Spark request proves routing retained the peer choice for
       // the Spark affinity instead of relying on an auth-layer substitution.
@@ -1704,7 +1862,7 @@ describe("Codex auth context", () => {
       recordCodexUpstreamOutcome(cfg, "pool-a", 429, {
         now,
         resetAt,
-        modelId: "gpt-5.4",
+        modelId: "gpt-5.6-terra",
       });
 
       const probeAt = now + CODEX_QUOTA_PROBE_INTERVAL_MS;
@@ -1727,7 +1885,7 @@ describe("Codex auth context", () => {
       Date.now = () => probeAt + 1;
       await expect(resolveCodexAuthContext(headers, cfg, "pool", { modelId: "gpt-5.3-codex-spark" }))
         .resolves.toMatchObject({ kind: "pool", accountId: "pool-a" });
-      await expect(resolveCodexAuthContext(headers, cfg, "pool", { modelId: "gpt-5.4-mini" }))
+      await expect(resolveCodexAuthContext(headers, cfg, "pool", { modelId: "gpt-5.6-luna" }))
         .resolves.toMatchObject({ kind: "pool", probeQuotaScope: "shared" });
     } finally {
       Date.now = originalNow;
@@ -2232,4 +2390,53 @@ describe("native-main fence names its gate reason", () => {
       warn.mockRestore();
     }
   });
+});
+
+
+test("context Direct bearer admission uses real stored-main materialization and fails closed without it", async () => {
+  writeFileSync(join(testDir, "config.toml"), "[features]\ncontext_management.experimental_mode = true\n");
+  resetContextRelayActivationForTests();
+  const cfg = config();
+  cfg.providers.openai = {
+    adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex",
+    authMode: "forward", codexAccountMode: "direct",
+  };
+  const token = liveJwt();
+  const admission = { kind: "environment", source: "bearer", contextPrincipalId: "principal-a" } as const;
+  clearContextSessionOwnersForTests();
+  recordContextSessionOwner("principal-a", new Headers({ "session-id": "synthetic-root" }), cfg.providers.openai.baseUrl,
+    { kind: "main", accountId: null }, new Headers({ authorization: `Bearer ${token}`, "chatgpt-account-id": "stored_main_acc" }), true);
+  const request = () => new Request("http://localhost/v1/alpha/notes/v2/read_file", {
+    method: "POST", headers: { authorization: "Bearer ocx_data_test_admission", "openai-beta": "responses=experimental", cookie: "synthetic=private" },
+    body: JSON.stringify({ context: { session_id: "synthetic-root" } }),
+  });
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+    calls++;
+    expect(String(input)).toBe("https://chatgpt.com/backend-api/codex/alpha/notes/v2/read_file");
+    const headers = new Headers(init?.headers);
+    expect(headers.get("authorization")).toBe(`Bearer ${token}`);
+    expect(headers.get("chatgpt-account-id")).toBe("stored_main_acc");
+    expect(headers.get("openai-beta")).toBe("responses=experimental");
+    expect(headers.has("cookie")).toBe(false);
+    return new Response("{}");
+  }, { preconnect: originalFetch.preconnect });
+  try {
+    for (const available of [true, false]) {
+      writeFileSync(join(testDir, "auth.json"), JSON.stringify({ tokens: available ? { access_token: token, account_id: "stored_main_acc" } : {} }));
+      const turn = tryAdmitTurn();
+      expect(turn).not.toBeNull();
+      try {
+        const response = await handleContextHistory(request(), cfg, { model: "context_history", provider: "" }, "alpha/notes/v2/read_file", turn!, admission);
+        expect(response.status).toBe(available ? 200 : 401);
+      } finally {
+        turn?.release();
+      }
+    }
+    expect(calls).toBe(1);
+  } finally {
+    clearContextSessionOwnersForTests();
+    globalThis.fetch = originalFetch;
+  }
 });

@@ -188,8 +188,8 @@ including OpenAI service-tier metadata.
 
 ## Current stable model coverage
 
-The native fallback set includes `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`,
-`gpt-5.3-codex-spark`, and GPT-5.6 Sol/Terra/Luna. For the GPT-5.5/5.4 family, opencodex preserves
+The native fallback set includes `gpt-5.5`, `gpt-5.3-codex-spark`, and GPT-5.6 Sol/Terra/Luna.
+For the GPT-5.5 family, opencodex preserves
 the installed Codex catalog's richer live entries and only synthesizes a missing entry. The bundled
 upstream snapshot is used only for GPT-5.6, where it supplies the real per-model identity and
 metadata instead of an older-template approximation.
@@ -253,6 +253,17 @@ preserved, so Luna has `max` but no `ultra`.
 On the wire, routed adapters map or clamp unsupported tiers. For older native models whose real
 ladder stops at `xhigh`, `nativeEffortClamp` maps a direct `max` or an `ultra` selection to `xhigh`
 (for example, GPT-5.5). Sol, Terra, and Luna have a real `max` rung.
+
+Catalog advertisement of the two top tiers is unconditional: `ocx sync` no longer removes `max` or
+`ultra` when the installed Codex binary is too old to offer them — Codex versions without those
+rungs are out of support, and hiding them from current clients costs more than it buys. Other
+rungs are still intersected with the observed runtime ladder, and a clamp diagnostic recorded by a
+previous binary stops applying once the binary at that path reports a different version (the
+in-place upgrade case), so `ocx status` and `ocx doctor` stop warning about a clamp the upgraded
+runtime no longer needs.
+Catalog visibility is not entitlement: advertising `max`/`ultra` does not guarantee the upstream
+account or provider accepts the tier, and for older native models whose real ladder stops at
+`xhigh` the wire clamp above still maps the selection down at request time.
 
 ## Fast tier rules
 
@@ -320,3 +331,5 @@ ocx sync
 
 opencodex rewrites `models_cache.json` with a deliberately stale cache wrapper whenever catalog
 visibility, priority, or metadata changes, so the next Codex model refresh reads the new catalog.
+
+After a catalog or model-cache write, OpenCodex invalidates its cached app-server observation so the next request checks process freshness again. A configuration sync also invalidates the observation when catalog contents are unchanged. This refresh does not restart Codex processes.

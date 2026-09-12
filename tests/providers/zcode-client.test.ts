@@ -43,7 +43,7 @@ describe("ZCode client config", () => {
     expect(Object.keys(document)).toEqual(["provider"]);
     const provider = document.provider[OPENCODE_PROVIDER_ID]!;
     expect(provider.name).toBe("OpenCodex");
-    expect(provider.kind).toBe("openai-compatible");
+    expect(provider.kind).toBe("openai");
     expect(provider.enabled).toBe(true);
     expect(provider.source).toBe("custom");
     expect(provider.options).toEqual({
@@ -51,6 +51,17 @@ describe("ZCode client config", () => {
       baseURL: "http://127.0.0.1:10100/v1",
       apiKeyRequired: true,
     });
+  });
+
+  test("the exported kind resolves to the proxy's native Responses route", () => {
+    const document = buildClientConfig("zcode", context()) as ZcodeGeneratedConfig;
+    const provider = document.provider[OPENCODE_PROVIDER_ID]!;
+    // ZCode 3.11.2 getDefaultModelProviderEndpointPathForKind sends `openai` to
+    // `/responses` and normalizeModelProviderBaseUrlForKind strips only that suffix,
+    // so the `/v1` root we serialize survives and the turn lands on the route
+    // src/server/index.ts registers as POST /v1/responses.
+    expect(provider.kind).toBe("openai");
+    expect(`${provider.options.baseURL}/responses`).toBe("http://127.0.0.1:10100/v1/responses");
   });
 
   test("models carry authoritative limits, text-floor modalities, and drop audio-only rows", () => {
@@ -90,6 +101,64 @@ describe("ZCode client config", () => {
     expect(zcodeConfigPath({}, "/home/u")).toBe(join("/home/u", ".zcode", "v2", "config.json"));
     expect(zcodeConfigPath({ ZCODE_DATA_DIR: "/elsewhere" }, "/home/u")).toBe(join("/elsewhere", "v2", "config.json"));
     expect(() => zcodeConfigPath({ ZCODE_DATA_DIR: "relative" }, "/home/u")).toThrow(ClientPathError);
+  });
+});
+
+describe("ZCode reasoning export", () => {
+  test("emits on-disk variants for thought-capable models and omits them otherwise", () => {
+    const document = buildClientConfig("zcode", {
+      ...context(),
+      models: [
+        {
+          namespaced: "google-antigravity/gemini-3.8-flash",
+          provider: "google-antigravity",
+          id: "gemini-3.8-flash",
+          contextWindow: 1_048_576,
+          inputModalities: ["text", "image"],
+          reasoningEfforts: ["low", "medium", "high", "max"],
+          defaultReasoningEffort: "medium",
+        },
+        {
+          namespaced: "CommandCode/meituan-LongCat-2.0:free",
+          provider: "CommandCode",
+          id: "meituan-LongCat-2.0:free",
+          contextWindow: 128_000,
+        },
+      ],
+    }) as ZcodeGeneratedConfig;
+    const models = document.provider[OPENCODE_PROVIDER_ID]!.models;
+    expect(models["google-antigravity/gemini-3.8-flash"]).toEqual({
+      name: "gemini-3.8-flash (google-antigravity)",
+      modalities: { input: ["text", "image"], output: ["text"] },
+      limit: { context: 1_048_576 },
+      reasoning: { enabled: true, variants: ["low", "medium", "high", "max"], defaultVariant: "medium" },
+    });
+    expect(models["CommandCode/meituan-LongCat-2.0:free"]).not.toHaveProperty("reasoning");
+  });
+
+  test("drops none, keeps ultra, and omits defaultVariant when it is not in the emitted ladder", () => {
+    const document = buildClientConfig("zcode", {
+      ...context(),
+      models: [
+        {
+          namespaced: "opencode-go/muse-spark-1.3-contributor",
+          provider: "opencode-go",
+          id: "muse-spark-1.3-contributor",
+          reasoningEfforts: ["none", "high", "ultra", "turbo"],
+          defaultReasoningEffort: "none",
+        },
+        { namespaced: "a/none-only", provider: "a", id: "none-only", reasoningEfforts: ["none"] },
+        { namespaced: "a/empty", provider: "a", id: "empty", reasoningEfforts: [] },
+      ],
+    }) as ZcodeGeneratedConfig;
+    const models = document.provider[OPENCODE_PROVIDER_ID]!.models;
+    expect(models["opencode-go/muse-spark-1.3-contributor"]).toEqual({
+      name: "muse-spark-1.3-contributor (opencode-go)",
+      modalities: { input: ["text"], output: ["text"] },
+      reasoning: { enabled: true, variants: ["high", "ultra"] },
+    });
+    expect(models["a/none-only"]).not.toHaveProperty("reasoning");
+    expect(models["a/empty"]).not.toHaveProperty("reasoning");
   });
 });
 
@@ -149,4 +218,3 @@ describe("ocx zcode CLI alias", () => {
     expect(requests.some(r => r.path === "/api/client-integrations/restore" && r.method === "POST" && (r.body as { opId?: string }).opId === "op-1")).toBe(true);
   });
 });
-

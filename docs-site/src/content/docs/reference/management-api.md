@@ -70,7 +70,7 @@ route-specific results rather than repeating this table.
 
 | Method and path | Purpose | Notable errors |
 | --- | --- | --- |
-| `GET, PUT /api/v2` | Read or change native multi-agent v2 mode, thread settings, V2 native parent override, and routed delegation bridge | 400 invalid settings/target; 502 transition or persistence failure |
+| `GET, PUT /api/v2` | Read or change native multi-agent v2 mode and thread settings | 400 invalid settings; 502 transition or persistence failure |
 | `GET, PUT /api/injection-model` | Read or set the injected sub-agent model, effort, prompt, and guidance settings | 400 invalid model, effort, or body |
 | `GET, PUT /api/effort-caps` | Read or set global and sub-agent reasoning-effort ceilings | 400 invalid ladder value |
 | `GET, PUT /api/subagent-models` | Read or order the models advertised to sub-agents | 400 invalid list or more than five models |
@@ -78,85 +78,22 @@ route-specific results rather than repeating this table.
 | `GET /api/grok` | Read Grok managed-config status and candidate models | 400 status read failure |
 | `PUT /api/grok/selection` | Persist the excluded Grok models | 400 invalid or oversized selection |
 | `POST /api/grok/apply` | Apply persisted Grok configuration through the managed sync | 409 `grok_apply_busy`; 400/500 apply failure |
-| `GET, PUT /api/claude-desktop` | Read or persist the Claude Desktop routed/native profile | 400 invalid profile; 409 catalog changed or assignment became unavailable |
+| `GET /api/grok/reset-coupons?accountId=...` | Read remaining Grok billing reset tokens and validity windows for the active or specified xAI account | 400 missing account; 401 unauthenticated; 502 upstream gRPC-Web error |
+| `POST /api/grok/reset-coupons/consume` | Redeem an eligible reset coupon. Body `{ accountId?, tokenId?, operationId? }`. Optional `operationId` (UUIDv4) makes redemption idempotent: repeating the same ID replays the durable result without double-redemption. | 400 invalid JSON/UUID; 401 unauthenticated; 409 `identity_mismatch`; 502 upstream error; 503 ledger capacity |
+| `GET, PUT /api/claude-desktop` | Read or persist the Claude Desktop routed/native profile | 400 invalid or unavailable assignment |
 | `POST /api/claude-desktop/apply` | Write the saved profile to Claude Desktop's managed config | 400/500 write failure |
 | `GET /api/claude-desktop/status` | Inspect saved-versus-applied profile and Desktop health | 400 status read failure |
 | `GET, PUT /api/claude-code` | Read or update Claude Code gateway, auth-mode, model-map, context, agent, and sidecar settings | 400 invalid field or shape |
 
+The dashboard drives both coupon paths from **Providers > xAI Grok > Accounts**: each
+signed-in account row carries a ticket badge with its remaining coupon count, and the
+badge opens a dialog that lists validity windows and redeems the coupon closest to
+expiry. The dialog sends a client-minted `operationId`, and it stops sending after a
+timeout instead of retrying, because a redemption whose journal record is still open
+would execute again. `ocx account grok-reset-coupons` remains the terminal equivalent.
+
 For the concepts behind the model roster and encrypted worker-task behavior, see
 [Sub-agent Surface](/guides/sub-agent-surface/).
-
-### V2 native parent override
-
-`GET /api/v2` includes the derived override state:
-
-```json
-{
-  "v2NativeParentOverride": {
-    "enabled": false,
-    "model": null,
-    "active": false
-  }
-}
-```
-
-`active` is read-only. It is true only when the override is enabled with a target, the effective
-surface is explicitly `multiAgentMode: "v2"`, the upstream V2 flag is enabled, and
-`keepNativeChatGptOnV1` is false. `model` is the persisted target, including while the switch is
-disabled.
-
-`PUT /api/v2` accepts a complete override object; the surrounding endpoint remains partial-update
-for its other fields:
-
-```json
-{
-  "v2NativeParentOverride": {
-    "enabled": true,
-    "model": "anthropic/claude-sonnet-5"
-  }
-}
-```
-
-`enabled` must be a boolean and `model` must be a nonblank string or `null`. A non-null model must
-resolve through normal routing to a configured noncanonical provider. Enabling additionally
-requires an explicit V2 mode, the upstream V2 flag, and Keep ChatGPT on v1 turned off. The whole
-object is validated before any write; invalid requests return 400 and leave configuration
-unchanged. Override-only writes persist this subtree without catalog restamping and return the
-fresh nested DTO.
-
-When `active` is true, an eligible canonical ChatGPT V2 root is rerouted per request to the
-configured provider. Missing, disabled, unroutable, or canonical targets fail closed rather than
-falling back to ChatGPT. The request's selected model can remain visible in Codex while the resolved
-routed model is executed; request logs retain requested and resolved identities separately. If mode,
-the upstream V2 flag, or Keep ChatGPT on v1 changes, subsequent requests skip the override while the
-stored target and enabled selection remain available for reactivation. Native children are not
-rewritten, so a native child can still create a routed grandchild with an unreadable encrypted task.
-This API exposes no automatic selection, nested override, protocol decryption, per-thread pin, or
-CLI operation.
-
-### Routed V2 delegation bridge
-
-`GET /api/v2` returns `v2RoutedDelegationBridge` as a boolean, defaulting to `false`. `PUT /api/v2`
-accepts the scalar boolean as a partial update:
-
-```json
-{ "v2RoutedDelegationBridge": true }
-```
-
-It can be armed outside explicit V2 but activates only for eligible native V2 root and thread-spawn child turns. It moves
-`spawn_agent`, `send_message`, and `followup_task` to plaintext mirrors while leaving `wait_agent`,
-`interrupt_agent`, and `list_agents` native. Consequently those three message operations are plaintext
-even for native-to-native delegation while active. The bridge is distinct from parent override and
-encrypted-task recovery. Eligible canonical native spawned-child turns are bridged after fallback
-selection too, so routed grandchildren can receive plaintext assignments. The native Codex UI can show the
-original model while routed prompts, repository context, and tool results follow the selected
-provider's availability, context, behavior, billing, and privacy terms. `false` disables subsequent
-requests immediately.
-
-There is no management field for continuation encryption. Bridge-derived state is automatically encrypted
-with an OS-credential-store key, or retained only in memory when secure storage is unavailable. The bridge
-prevents new encrypted message operations within its eligibility boundary; encrypted-task recovery remains
-the fallback for ciphertext produced elsewhere. A first upgrade retires legacy continuation-cache files.
 
 ### Client integration rollback journal
 
@@ -401,7 +338,8 @@ outcome fields from an older server do not establish successful recovery.
 | `POST /api/oauth/logout` | Remove the selected provider credential | 400 unknown provider; `oauth_mutation_busy` |
 | `GET, DELETE /api/oauth/accounts` | List masked accounts or remove one account | 400 invalid provider/id; 404 account missing; `oauth_mutation_busy` |
 | `PUT /api/oauth/accounts/active` | Select the active OAuth account | 400 invalid provider/account; `oauth_mutation_busy` |
-| `GET, PUT, PATCH /api/oauth/accounts/pool` | Read or update Anthropic OAuth pool policy | 400 non-Anthropic provider or invalid policy |
+| `GET, PUT, PATCH /api/pool/settings` | Read or update pool policy for any kind (codex, anthropic, generic); answers with the same keys for all three and declares in `supported` which the kind honours | 400 unknown provider, a field the kind does not support, or an invalid value |
+| `GET, PUT, PATCH /api/oauth/accounts/pool` | Legacy per-pool policy for Anthropic and generic OAuth providers; superseded by `/api/pool/settings` and kept for existing clients | 400 codex or api-key provider, or invalid policy |
 | `POST /api/oauth/accounts/clear-cooldown` | Clear one OAuth account's runtime cooldown | 400 invalid provider/account |
 | `PUT /api/oauth/accounts/alias` | Set or clear an OAuth account alias | 400 invalid provider/account/alias |
 | `GET, POST, DELETE /api/providers/keys` | List masked provider keys, add/activate one, or remove one | 400 invalid input; 404 provider/key missing |
@@ -461,7 +399,7 @@ whether to star the repository.
 | --- | --- | --- |
 | `GET /api/system/memory` | Return scalar process, heap, stream, response-state, watchdog, and active-turn metrics. Response-state diagnostics include spill-write status, consecutive failures, fixed privacy-safe failure class, and last failure/success timestamps. `spillLastWriteFailureOrigin` is `retry_returned_timeout`, `timeout_memo_refusal`, or null; cumulative `spillAclRetryReturnedTimeouts` and `spillAclTimeoutMemoRefusals` count terminal failed publications. See [Windows spill diagnostics](/troubleshooting/windows-memory/) for process-local semantics. Raw errors and paths are never returned. | — |
 | `POST /api/system/restart` | Begin a drain-aware process restart without removing client injection | Returns 202; repeated calls report the existing drain |
-| `POST /api/stop` | Stop the service, restore native Codex, remove managed Grok injection, and drain the proxy | 409 service ownership conflict; 409 `respawnable_service` when a Windows Task Scheduler wrapper could respawn the proxy and the caller is not `ocx stop` (nothing is changed); 409 when the installed manager refuses to stop; 409 `service_state_unknown` when the Task Scheduler state cannot be read (nothing is changed; repair the query and retry) |
+| `POST /api/stop` | Stop the service, restore native Codex, remove managed Grok injection, and drain the proxy | 409 service ownership conflict; 409 `respawnable_service` when a Windows Task Scheduler wrapper could respawn the proxy and the caller is not `ocx stop` (nothing is changed); 409 `self_unload_service` when this proxy is running as the installed launchd/systemd service, because stopping the manager from inside it would end the process before native Codex is restored — run `ocx stop` instead (nothing is changed); 409 when the installed manager refuses to stop; 409 `service_state_unknown` when the Task Scheduler state cannot be read (nothing is changed; repair the query and retry) |
 | `GET /api/system/codex-app-server` | Report whether running Codex app-servers predate the current model catalog | — |
 | `POST /api/system/codex-restart` | Refresh the catalog, then ask stale Codex app-servers to exit so the model picker reloads | Returns 200 with `code: partially_stopped` when a target survives |
 
@@ -498,6 +436,31 @@ manager. Its routes are:
 | `POST /api/codex-auth/login/code` | Submit a manual code for a Codex login flow | 400 invalid flow/code |
 | `POST /api/codex-auth/login/cancel` | Cancel a Codex login flow | — |
 | `GET /api/codex-auth/login-status` | Poll a flow or account login state. A completed new-account flow includes `catalogRefreshPending: true` only when recovery is needed. | Unknown flows report `expired`; no active flow reports `idle` |
+
+For reset-credit consumption, a different `operationId` supplied while the same physical
+account has an unfinished operation joins that operation as an alias. Its retry uses the
+original upstream request ID and records the outcome under that same identity, so later
+requests with the original ID or a known alias replay the stored result without another
+consume request. A previously unseen ID supplied after settlement starts a new explicit
+redemption; clients retrying an existing action should keep its ID.
+
+After a confirmed manual `reset`, OpenCodex checks fresh usage for that same account
+and can reconcile its eligible pre-existing shared reset-derived cooldown immediately.
+Paused accounts, accounts requiring reauthentication and cooldowns already owned by an
+in-flight probe remain excluded from this recovery; their cooldowns are retained. Usage
+started before the reset, incomplete or exhausted usage, a changed account, and a newer
+quota failure do not qualify. Older main-account usage responses cannot replace a newer
+published observation. If usage needs credential refresh, recovery requires that refresh's
+confirmed lineage; an externally replaced credential does not qualify merely because it
+belongs to the same account. Explicit `Retry-After`, Spark/Reserve cooldowns, pause
+settings, pins and the selected account are preserved. `already_redeemed` and durable
+replay do not prove a new reset and do not gain this recovery behavior.
+
+A failed or busy usage refresh after a confirmed `reset` or `already_redeemed` does not
+turn the completed consumption into an error: the response remains HTTP 200 with its
+consume `code`, omitting `remaining` when no fresh count was obtained. This response
+confirms the consume outcome, not that the account is now routable. Refresh usage to
+check availability; do not consume another credit to retry a failed usage refresh.
 
 If a new account config row is saved but credential setup cannot finish, OAuth `login-status` reports
 `status: "error"` with

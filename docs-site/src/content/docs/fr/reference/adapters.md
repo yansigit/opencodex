@@ -159,6 +159,16 @@ Si Kiro s’arrête sans appeler l’outil d’achèvement, l’adaptateur effec
 - Le confinement de chemin utilise des vérifications realpath sous cwd ; les échappements par lien symbolique sont omis. Chaque opération fichier a un délai de 2 secondes. Résultats mis en cache par cwd pendant 30 secondes (128 entrées max). Toute défaillance omet cette partie en fail-soft.
 - `commandCodeVersion` épingle `x-command-code-version` (défaut `0.52.1`). `permissionMode` reste `"standard"` et `mode` reste `"agent"`.
 
+## `devin`
+
+**Cible :** `exa.api_server_pb.ApiServerService/GetChatMessage` de Cognition, en streaming Connect sur `server.codeium.com`.
+**Authentification :** clé d'API Devin/Cognition issue de `provider.apiKey` ou de l'en-tête authorization transmis. La connexion ouvre l'authentification Auth0 dans le navigateur, puis échange le jeton via `SeatManagementService.RegisterUser` contre une clé durable.
+
+- Utilise `runTurn` plutôt que le chemin fetch/parse ordinaire. Les requêtes et les événements serveur passent par le cadrage protobuf manuel de `devin/cloud-direct/wire.ts`.
+- Les modèles sont découverts par compte avec `GetCascadeModelConfigs` ; ceux qui ne figurent pas dans l'offre disparaissent de la liste au lieu d'échouer au moment de la requête.
+- Cognition impose une limite de longueur sur les descriptions d'outils et une liste de phrases interdites. L'adaptateur réécrit les formulations connues et tronque les descriptions trop longues.
+- Les clés ne se renouvellent pas. Relancez `ocx login devin` lorsqu'une clé expire ou est révoquée.
+
 ## `azure-openai` (alias : `azure`)
 
 **Cibles :** **Azure OpenAI**. Encapsule `openai-responses` (et utilise donc également `passthrough: true`).
