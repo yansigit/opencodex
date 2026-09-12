@@ -367,9 +367,10 @@ export interface ProviderRegistryEntry {
   jawcodeBundle?: string;
   extraMetadataAliases?: string[];
   metadataModelIdNormalize?: MetadataModelIdNormalize;
-  googleMode?: "ai-studio" | "vertex" | "cloud-code-assist";
+  googleMode?: "ai-studio" | "ai-studio-web" | "vertex" | "cloud-code-assist";
   project?: string;
   location?: string;
+  requestPacing?: OcxProviderConfig["requestPacing"];
 }
 
 export type ProviderConfigSeed = Pick<
@@ -3658,8 +3659,8 @@ export function providerCodexAccountMode(id: string, provider?: OcxProviderConfi
  */
 export function effectiveGoogleMode(
   providerId: string,
-  prov: { adapter?: string; googleMode?: "ai-studio" | "vertex" | "cloud-code-assist" },
-): "ai-studio" | "vertex" | "cloud-code-assist" | null {
+  prov: { adapter?: string; googleMode?: "ai-studio" | "ai-studio-web" | "vertex" | "cloud-code-assist" },
+): "ai-studio" | "ai-studio-web" | "vertex" | "cloud-code-assist" | null {
   if (prov.adapter !== "google") return null;
   return prov.googleMode ?? getProviderRegistryEntry(providerId)?.googleMode ?? "ai-studio";
 }

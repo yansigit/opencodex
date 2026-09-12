@@ -52,6 +52,14 @@ export interface PaceAwareFetch {
 
 export type ProviderFetch = typeof globalThis.fetch & PaceAwareFetch;
 
+export class UpstreamRedirectError extends Error {
+  override readonly name = "UpstreamRedirectError";
+
+  constructor(readonly status: number) {
+    super(`upstream returned ${status} redirect; configure the final upstream URL directly`);
+  }
+}
+
 export interface ProviderFetchOptions {
   providerName?: string;
   modelId?: string;
@@ -198,7 +206,7 @@ export async function fetchWithHeaderTimeout(
     headers.set("accept-encoding", "identity");
   }
   try {
-    return await fetchExecutor(url, {
+    const response = await fetchExecutor(url, {
       ...init,
       headers,
       // Never replay provider credentials or request bodies to a redirect destination.
@@ -207,6 +215,11 @@ export async function fetchWithHeaderTimeout(
       signal: AbortSignal.any([abortSignal, timeout.signal]),
       timeout: 0,
     });
+    if (response.status >= 300 && response.status < 400) {
+      try { await response.body?.cancel(); } catch { /* ignore cancellation failures */ }
+      throw new UpstreamRedirectError(response.status);
+    }
+    return response;
   } finally {
     clearTimeout(timer);
   }

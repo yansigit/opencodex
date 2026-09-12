@@ -47,6 +47,7 @@ import {
 } from "./codex/account-namespace-match";
 import { isCodexAccountPriorityKey } from "./codex/account-priority";
 import { loopbackCompanionAllowed } from "./codex/loopback-target";
+import { slugEquivalenceKey, slugsEquivalent } from "./providers/slug-codec";
 import { UPSTREAM_HOST_CIRCUIT_MAX_THRESHOLD } from "./codex/upstream-host-health";
 import {
   adoptCustomModelCatalogMigration,
@@ -128,7 +129,7 @@ export {
   type AtomicWriteIO,
 } from "./config/atomic-write";
 import { getConfigDir, getConfigPath, hardenConfigDir } from "./config/paths";
-import { InitialConfigPublicationError, publishInitialConfigNoReplace, type InitialConfigPublicationIO } from "./config/initialize";
+import { InitialConfigPublicationError, publishInitialConfigNoReplace, setInitialConfigBeforePublishForTests, type InitialConfigPublicationIO } from "./config/initialize";
 import {
   describeProxyForLog,
   readWindowsSystemProxy,
@@ -1898,6 +1899,21 @@ export function retryOn429PolicyConfigError(policy: unknown): string | null {
   return `retryOn429.${field} is invalid (${first.message})`;
 }
 
+export function transientRetryOn5xxPolicyConfigError(policy: unknown): string | null {
+  if (policy === undefined) return null;
+  const result = transientRetryOn5xxPolicySchema.safeParse(policy);
+  if (result.success) return null;
+  const first = result.error.issues[0];
+  if (!first) return "transientRetryOn5xx is invalid";
+  if (first.code === "unrecognized_keys") {
+    const names = first.keys.map(key => JSON.stringify(redactSecretString(key))).join(", ");
+    return `transientRetryOn5xx has unrecognized field${first.keys.length > 1 ? "s" : ""}: ${names}`;
+  }
+  if (first.path.length === 0) return `transientRetryOn5xx is invalid (${first.message})`;
+  const field = String(first.path[first.path.length - 1]);
+  return `transientRetryOn5xx.${field} is invalid (${first.message})`;
+}
+
 /**
  * Load-time degradation for `providers.<name>.modelCosts`, mirroring
  * {@link sanitizeRetryOn429ForLoad}. A hand-edited malformed display-price row
@@ -3408,6 +3424,67 @@ function persistConfigUnlocked(config: OcxConfig): boolean {
 }
 
 export type PersistedConfigInitializationOutcome = "created" | "exists" | "invalid";
+
+export function resolveSubagentCandidates(
+  config: Pick<OcxConfig, "subagentCandidates"> | OcxConfig,
+  roleOrModel?: string,
+): string[] {
+  const candidates = config?.subagentCandidates;
+  if (!candidates) return [];
+
+  const normalizeList = (raw: unknown): string[] => {
+    if (!Array.isArray(raw)) return [];
+    const result: string[] = [];
+    const seen = new Set<string>();
+    for (const item of raw) {
+      if (typeof item !== "string") continue;
+      const trimmed = item.trim();
+      if (!trimmed) continue;
+      const key = slugEquivalenceKey(trimmed);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(trimmed);
+    }
+    return result;
+  };
+
+  if (Array.isArray(candidates)) return normalizeList(candidates);
+  if (typeof candidates !== "object") return [];
+
+  const record = candidates as Record<string, unknown>;
+  const trimmed = roleOrModel?.trim();
+  let selected: unknown;
+  if (trimmed) {
+    if (Object.hasOwn(record, trimmed)) {
+      selected = record[trimmed];
+    } else {
+      const matchingKey = Object.keys(record).find(key => slugsEquivalent(key, trimmed));
+      if (matchingKey) selected = record[matchingKey];
+    }
+  }
+  if (!selected) selected = record.default ?? record["*"];
+  return normalizeList(selected);
+}
+
+export function replacePersistedConfig(config: OcxConfig): void {
+  assertNotRealHomeUnderTest(getConfigDir());
+  withConfigMutationLockSync(() => {
+    const projected = projectCustomModelCatalogMigration(
+      readRawConfigJson(),
+      projectConfigRebaseProvenance(config),
+    );
+    if (persistConfigUnlocked(projected)) bumpGenerationForCooperatingConfigWrite();
+    adoptCustomModelCatalogMigration(config, projected);
+    if (projected.configRebaseProvenance === undefined) delete config.configRebaseProvenance;
+    else config.configRebaseProvenance = structuredClone(projected.configRebaseProvenance);
+    clearPendingConfigTopLevelDeletions(config);
+  });
+}
+
+/** Test-only one-shot seam: create a competing config after staging, before no-replace publication. */
+export function setPersistedConfigInitializationBeforePublishForTests(hook: (() => void) | null): void {
+  setInitialConfigBeforePublishForTests(hook);
+}
 
 /** Initialize only a missing config; ordinary explicit updates still use saveConfig. */
 export function initializePersistedConfigIfMissing(

@@ -12,7 +12,7 @@ export interface OcxClaudeCodeConfig {
    * Default: false; only literal true enables it. Native passthrough is unchanged.
    */
   stabilizePromptCache?: boolean;
-  /** Opt-in translated Messages admission; unset keeps legacy behavior. Native passthrough is exempt. */
+  /** Claude ingress compatibility gate. Defaults to enforce. Native passthrough is exempt. */
   compatibility?: "shadow" | "enforce";
   /** Kill switch for the /v1/messages inbound (GUI "Claude ON" toggle). Default: enabled. */
   enabled?: boolean;
@@ -255,9 +255,32 @@ export interface OcxClientIntegrationsConfig {
   "claude-desktop"?: boolean;
 }
 
+/** User-authored specialist the Codex parent may spawn by name. */
+export interface OcxSubagentRole {
+  /** `[a-z][a-z0-9-]{0,31}`, unique within the catalog. */
+  id: string;
+  /** 1..240 chars; parent "when to use" this specialist. */
+  description: string;
+  /** Bare native or `provider/model`, at most 128 characters. */
+  model: string;
+  /** Codex reasoning ladder; optional. */
+  effort?: string;
+  /** 1..8000 chars; child's developer prompt. */
+  developerInstructions: string;
+  /** Default true. Disabled roles stay in config but are omitted from guidance. */
+  enabled?: boolean;
+}
+
 export interface OcxConfigRebaseProvenance {
   version: 1;
   deletedTopLevelKeys: string[];
+}
+
+export interface OcxServerTlsConfig {
+  certFile: string;
+  keyFile: string;
+  /** Exact externally reachable HTTPS origin; paths, query strings, fragments, and credentials are rejected. */
+  publicOrigin: string;
 }
 
 export type OcxRuntimeRole = "standalone" | "hub" | "client";
@@ -268,16 +291,6 @@ export interface OcxHubConfig {
   /**
    * Canonical client-reachable DATA origin of this hub — what a remote machine passes as the
    * positional URL to `ocx connect`, and what `ocx hub invite` prints.
-   *
-   * Separate from `managementPublicOrigin` because the two are genuinely different sockets on a
-   * real deployment: management is a loopback-only ingress published by an HTTPS frontend, while
-   * the data listener is bound to the hub's tailnet/LAN address and fronted on its own port
-   * (`https://hub.tailnet.ts.net:8443`). Deriving one from the other produced an origin that
-   * answered `/readyz` and nothing else.
-   *
-   * Advisory only: it is the origin the hub ADVERTISES, never a bind address. When omitted,
-   * `ocx hub invite` falls back to `http://<hostname>:<port>`, which is correct for a plain
-   * tailnet bind with no TLS frontend.
    */
   dataPublicOrigin?: string;
   /**
@@ -311,21 +324,9 @@ export type OcxConnectedClientId = "codex" | "claude";
 
 /**
  * Redaction policy for management and CLI projections (#3859).
- *
- * `privacy` rather than `dashboard`: `ocx status` and `ocx account` are not the dashboard, and
- * they read the same projections.
  */
 export interface OcxPrivacyConfig {
-  /**
-   * Mask stored account emails before they leave the proxy. Omitted or `true` is the historical
-   * behaviour and the default.
-   *
-   * Setting this to `false` is a real disclosure decision, not a display preference. Management
-   * is not always loopback — under `remoteGui` the unmasked address reaches every management
-   * principal that can reach the hub, not only someone sitting at the machine. The default
-   * therefore stays masked, and turning it off is an explicit opt-in by the operator who owns
-   * those accounts.
-   */
+  /** Mask stored account emails before they leave the proxy. Omitted or `true` is the default. */
   maskEmails?: boolean;
 }
 
@@ -468,6 +469,14 @@ export interface OcxConfig {
    * into a selector-qualified group; Codex still advertises only the first 5 visible rows.
    */
   subagentModels?: string[];
+  /** Named specialist roles the parent may spawn by id. */
+  subagentRoles?: OcxSubagentRole[];
+  /**
+   * Project enabled roles into marker-owned `$CODEX_HOME/agents/ocx-<id>.toml`.
+   * Unset means on once any enabled role exists. `false` leaves user files
+   * untouched and prunes our owned `ocx-*.toml` files.
+   */
+  syncCodexAgentRoles?: boolean;
   /** One-time featured-roster upgrade marker; later user ordering is preserved. */
   subagentModelsVersion?: number;
   /**
@@ -502,6 +511,12 @@ export interface OcxConfig {
    */
   subagentModelFallbackByModel?: Record<string, string[]>;
   /**
+   * Ordered candidates for spawned sub-agents, globally or keyed by role/model.
+   * Unlike fallback chains, these candidates replace the requested spawn model
+   * whenever at least one configured candidate is available.
+   */
+  subagentCandidates?: string[] | Record<string, string[]>;
+  /**
    * TTL (ms) for cached sub-agent model availability probes. Default 60_000.
    */
   subagentModelFallbackPollMs?: number;
@@ -512,8 +527,8 @@ export interface OcxConfig {
    */
   syncCodexSubagentDefaults?: boolean;
   /**
-   * Optional reasoning effort reported as advisory metadata in v2 sub-agent guidance.
-   * It does not prescribe spawn overrides. Only meaningful while `injectionModel` is set; validated against
+   * Optional reasoning effort the delegation prompt tells the agent to pass in spawn_agent calls
+   * (`reasoning_effort` argument). Only meaningful while `injectionModel` is set; validated against
    * the Codex ladder (src/reasoning-effort.ts CODEX_REASONING_LEVELS) at the API boundary.
    */
   injectionEffort?: string;
@@ -556,7 +571,7 @@ export interface OcxConfig {
   streamMode?: "auto" | "legacy-tee" | "eager-relay";
   /**
    * Custom override for the injected v2 multi-agent guidance body (the text inside
-   * the <opencodex_subagent_guidance> tags). After guidance is enabled and the v2 surface and
+   * the <multi_agent_mode> tags). After guidance is enabled and the v2 surface and
    * catalog-state gates pass, a configured injectionModel is sufficient to render it;
    * otherwise an eligible roster or fallback is required. Placeholders: `{{model}}` -> the
    * effective preferred model for the request (a bare native model is account-qualified
@@ -607,9 +622,7 @@ export interface OcxConfig {
   /**
   * Shadow call intercept: redirect Codex's hard-coded helper calls (title generation,
   * commit messages, skill orchestration) to a user-chosen model. Default intercepted
-  * source model: gpt-5.6-luna (Codex 0.145.0+). Clients through 0.144.x emitted
-  * gpt-5.4-mini instead; that model is retired upstream, but it stays available as an
-  * opt-in `sourceModels` prefix so an old client's helper calls can still be intercepted.
+  * source models: gpt-5.4-mini (older clients) and gpt-5.6-luna (Codex 0.145.0+).
   * Opt-in; disabled by default. Matching requests preserve their configured reasoning effort.
   * All requests for configured shadow source models are intercepted regardless of request kind,
   * except when the replacement intersects the same provider+model source set.
@@ -619,7 +632,7 @@ export interface OcxConfig {
    enabled?: boolean;
    /** Replacement model id (e.g. "gpt-5.5"). */
    model?: string;
-   /** Optional override of intercepted source-model prefixes (default: gpt-5.6-luna). */
+   /** Optional override of intercepted source-model prefixes (default: gpt-5.4-mini, gpt-5.6-luna). */
    sourceModels?: string[];
  };
   /**
@@ -642,6 +655,10 @@ export interface OcxConfig {
    * Routed parents get v2 tools; Sol/Terra can still spawn Grok/Claude (issue #92).
    */
   keepNativeChatGptOnV1?: boolean;
+  /** Experimental plaintext delegation bridge for eligible native V2 root and thread-spawn child turns. */
+  v2RoutedDelegationBridge?: boolean;
+  /** Optional v2-native parent override for spawn_agent routing. */
+  v2NativeParentOverride?: { enabled?: boolean; model?: string };
   /** Experimental, default-off ChatGPT recovery for encrypted V2 routed tasks. */
   agentTaskRecovery?: {
     enabled?: boolean;
@@ -667,6 +684,8 @@ export interface OcxConfig {
   contextCapValue?: number;
   /** Bind hostname. Default "127.0.0.1" (loopback only). Set "0.0.0.0" to expose on all interfaces. */
   hostname?: string;
+  /** Native Bun TLS for the public listener. Required for non-loopback binds. */
+  tls?: OcxServerTlsConfig;
   /**
    * Optional second listener bound to 127.0.0.1 that admits data-plane requests without a
    * credential (issue #1102).
@@ -684,24 +703,13 @@ export interface OcxConfig {
    * surface: every process on the machine can reach it, spend account quota, and consume paid
    * provider credentials. Off by default; not for multi-tenant hosts.
    *
-   * Two enabled forms:
-   *
-   *  - `{ enabled: true, port: N }` — a distinct port (the #1102 form). N must differ from the
-   *    proxy port.
-   *  - `{ enabled: true }` — the "companion" form: bind `127.0.0.1:<proxy port>`. Legal only
-   *    when `hostname` is a specific non-loopback, non-wildcard address (a tailnet or LAN IP),
-   *    because otherwise the public socket already owns that loopback address. This is the
-   *    one-port hub shape: remote clients dial `hostname:port`, local processes dial
-   *    `127.0.0.1:port`, and every integration that hardcodes `http://127.0.0.1:<proxy port>`
-   *    keeps working on a hub whose public bind they cannot reach (#4236).
-   *
-   * Neither form is OS-assigned. A changing port would break already-running app-servers
-   * holding the previous `base_url` — the exact symptom #1102 reported and we disproved for
-   * token rotation.
+   * The port is required when enabled and must differ from the proxy port. An OS-assigned port
+   * would change across restarts, which would break already-running app-servers holding the
+   * previous `base_url` — the exact symptom #1102 reported and we disproved for token rotation.
    */
   unauthenticatedLoopbackListener?:
     | { enabled: false }
-    | { enabled: true; port?: number };
+    | { enabled: true; port: number };
   /**
    * Outbound HTTP(S) proxy URL for provider requests (e.g. "http://user:pass@proxy:8080", or
    * "${HTTPS_PROXY}"-style env reference). Mirrored into HTTP_PROXY/HTTPS_PROXY at startup when
@@ -778,16 +786,10 @@ export interface OcxConfig {
   search?: OcxSearchConfig;
   /** Codex multi-account pool. */
   codexAccounts?: CodexAccount[];
+  /** Opt-in per-account activation policy for newly reset Codex quota windows by plan tier. */
+  codexPool?: OcxCodexPoolConfig;
   /** Account ids administratively excluded from future pool selection until resumed. */
   pausedCodexAccountIds?: string[];
-  /**
-   * Codex pool selection policy. Absent means no policy, so an existing install rotates exactly
-   * as before.
-   *
-   * Not in `getDefaultConfig()` on purpose — that function carries no optional-feature keys, so
-   * absence is the only default state this policy has.
-   */
-  codexPool?: OcxCodexPoolConfig;
   /** Opt-in per-account activation of newly reset Codex quota windows. */
   codexQuotaAutoRefresh?: Record<string, {
     fiveHour?: boolean;
@@ -823,7 +825,7 @@ export interface OcxConfig {
    */
   codexAccountPickerEnabled?: boolean;
   /**
-   * Show the GPT-5.3-Codex-Spark 5-hour and weekly windows on Codex quota surfaces. Default false.
+   * Show the GPT-5.3-Codex-Spark weekly window on Codex quota surfaces. Default false.
    *
    * Spark is a single-model window that reads 0% for most operators, and on a multi-account
    * pool it doubles the bar count for information almost nobody acts on. Hidden by default and
@@ -839,28 +841,6 @@ export interface OcxConfig {
    * spends a second credit. A malformed value reads as off.
    */
   resetCreditAutoRedeem?: { enabled?: boolean; leadTimeMinutes?: number };
-  /**
-   * Shared account-pool kernel, opt-in and off by default.
-   *
-   * `kernel: true` is what makes a generic OAuth provider's stored `strategy` and
-   * `autoSwitchThreshold` actually select an account instead of merely being persisted.
-   * Off restores the pre-kernel path exactly, which is why the DTO keeps reporting
-   * `inert: true` until this is on. A malformed value reads as off.
-   */
-  pool?: {
-    kernel?: boolean;
-    /**
-     * Opt-in cache-affinity ordering, off by default.
-     *
-     * With it on, a bound Codex thread keeps its account until that account genuinely cannot
-     * serve, instead of moving the moment usage crosses `autoSwitchThreshold`. Moving a live
-     * conversation throws away the prompt cache warmed on that account, and a threshold
-     * crossing is a hint rather than evidence the account is spent. Separate from `kernel`
-     * on purpose: that one governs the generic OAuth strategy consumer, and one switch
-     * carrying two unrelated meanings cannot be turned on alone.
-     */
-    cacheAffinity?: boolean;
-  };
   /** Active pool account id for next session. undefined = main (passthrough as-is). */
   activeCodexAccountId?: string;
   /** Auto-switch threshold (0-100). Default 80. 0 = disabled. */
@@ -888,17 +868,9 @@ export interface OcxConfig {
    */
   maxUpstreamBodyBytes?: number;
   /**
-   * Opt-in ceiling, in bytes, on a decompressed INBOUND data-plane request body (#3573).
-   *
-   * Omitted or 0 = the built-in 256 MiB default. The lever exists because a session on the
-   * 922k-token opt-in window serializes its full history past that default, and the request
-   * that crosses it is Codex's own remote-compaction request — so the session hits 413 on the
-   * one operation that would have shrunk it and cannot recover.
-   *
    * Bounded on purpose. `resolveInboundBodyLimitBytes()` clamps to
    * [1 MiB, 512 MiB]; an unbounded inbound cap is a memory DoS because the reader materializes
-   * the body several times over. The Bun listener's own `maxRequestBodySize` is fixed when the
-   * server starts, so raising this takes effect on restart.
+   * the body several times over.
    */
   maxInboundBodyBytes?: number;
   /**
@@ -906,10 +878,9 @@ export interface OcxConfig {
    * Sticky session affinity; new sessions may pick lowest known 5h usage.
    * Experimental — see docs and GUI warning before enabling.
    *
-   * Reactive 429 failover is NOT gated here. It activates on account presence, like every
-   * other multi-credential provider, and cannot be switched off: rotating away from an account
-   * upstream has just rate-limited only ever runs after a refusal, so stranding it while a
-   * second logged-in account sits idle is a defect rather than a configuration choice.
+   * Reactive 429 failover defaults on when this setting is omitted and two eligible accounts
+   * are present. An explicit `false` disables both the proactive pool and reactive replay under
+   * another identity; an explicit `true` enables the full pool contract.
    */
   anthropicAccountPool?: {
     enabled?: boolean;
@@ -926,16 +897,26 @@ export interface OcxConfig {
    * Generic OAuth multi-account PROACTIVE account preference (#2568, #695).
    *
    * Reactive 429 rotation — moving to another logged-in account of the SAME provider when one
-   * is rate-limited — is presence-driven and NOT configurable here. It activates whenever a
-   * provider has 2 or more eligible stored accounts, the same consent rule an `apiKeyPool` of
-   * two keys already applies, and a single account remains a strict no-op.
+   * is rate-limited — defaults on when both settings are omitted and 2 or more eligible accounts
+   * are present. An explicit global `false` disables it unless a provider-specific `true`
+   * overrides that choice; a provider-specific `false` always disables it for that provider.
    *
    * Proactive avoidance of an exhausted selected account requires `enabled: true`.
    * A healthy selected account retains priority; an unknown quota is not exhaustion.
    * `providers.<name>.oauthAccountFailover` overrides this per provider in either direction.
-   * Reactive 429 rotation remains presence-driven even when proactive routing is disabled.
    */
   oauthAccountFailover?: {
+    enabled?: boolean;
+  };
+  /**
+   * Generic OAuth pool kernel and cache-affinity ordering. Off restores the pre-kernel path.
+   */
+  pool?: {
+    kernel?: boolean;
+    cacheAffinity?: boolean;
+  };
+  /** Opt-in Cursor OAuth account pool (fork; default off). */
+  cursorAccountPool?: {
     enabled?: boolean;
   };
   /** Virtual `combo/<id>` models spanning concrete provider/model targets (issue #133). */
@@ -1130,7 +1111,7 @@ export interface OcxTokenGuardianConfig {
   codexWarmupEnabled?: boolean;
   /** Max age before a Codex pool account is revalidated via `/codex/responses`. Default 691200 (8d). */
   codexWarmupMaxAgeSeconds?: number;
-  /** Model used for optional Codex pool warmup. Default gpt-5.6-luna. */
+  /** Model used for optional Codex pool warmup. Default gpt-5.4-mini. */
   codexWarmupModel?: string;
 }
 
@@ -1240,21 +1221,10 @@ export interface OcxWebSearchSidecarConfig {
 }
 
 /**
- * Codex account-pool selection policy.
- *
- * This is a selection policy, not a block. An excluded account keeps its credential, quota
- * history, and thread affinity, stays visible on the account surface, and remains reachable by
- * explicit account selection. Only automatic rotation skips it.
+ * Codex pool selection policy for plan-tier exclusions during ordinary rotation.
  */
 export interface OcxCodexPoolConfig {
-  /**
-   * Plan keys ordinary rotation skips, matched case-insensitively against the plan stored on each
-   * account. Absent or empty means no policy.
-   *
-   * There is no `minimumPlan` counterpart: ranking ChatGPT plans against each other needs a total
-   * ordering this repository does not have, and inventing one would silently drain a tier the
-   * operator never meant to exclude.
-   */
+  /** Plan keys ordinary rotation skips, matched case-insensitively against each account plan. */
   excludedPlans?: string[];
 }
 

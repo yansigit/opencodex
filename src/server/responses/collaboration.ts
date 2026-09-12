@@ -275,6 +275,7 @@ export interface MultiAgentGuidanceOptions {
   codexAccountNamespace?: string;
   injectionModel?: string;
   injectionEffort?: string;
+  syncCodexSubagentDefaults?: boolean;
   subagentModels?: string[];
   subagentModelFallback?: string[];
   injectionPrompt?: string;
