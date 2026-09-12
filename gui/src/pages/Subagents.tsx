@@ -6,17 +6,20 @@ import SubagentsWorkspace, { FEATURED_MAX } from "../components/subagents-worksp
 import { readSessionListCache, writeSessionListCache } from "../session-list-cache";
 import { useDataSurface } from "../data-surface";
 import { DataSurfaceSkeleton } from "../components/data-surface";
-import { useSubagentDelegation, type UltraModePatch, type UltraModeState } from "./use-subagent-delegation";
+import { useSubagentDelegation, type UltraModePatch, type UltraModeState, type V2NativeParentOverrideState, type AgentTaskRecoveryState, type V2RoutedDelegationBridgeState } from "./use-subagent-delegation";
+import { CodexStaleBanner } from "../components/codex-stale-banner";
+import { useCodexRestart } from "../use-codex-restart";
 
-type CachedSubagents = { available: string[]; chosen: string[]; fallback?: string[]; pollMs?: number; fallbackAvailable?: string[] };
-
-const UNLOADED_ULTRA_MODE: UltraModeState = {
-  enabled: false, hintText: null, recommendation: null,
-  multiAgentV2Enabled: false, multiAgentMode: "default",
-};
+type CatalogState = "fresh" | "stale" | "not_running" | "unknown";
+type CachedSubagents = { available: string[]; chosen: string[]; catalogState?: { state?: CatalogState }; fallback?: string[]; pollMs?: number; fallbackAvailable?: string[] };
 
 function seedSubagents(cacheKey: string): CachedSubagents | null {
   return readSessionListCache<CachedSubagents>(cacheKey);
+}
+
+function readCatalogState(value: CachedSubagents | null): CatalogState {
+  const state = value?.catalogState?.state;
+  return state === "fresh" || state === "stale" || state === "not_running" ? state : "unknown";
 }
 
 export default function Subagents({ apiBase }: { apiBase: string }) {
@@ -44,11 +47,26 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   const [busy, setBusy] = useState(false);
   /** Sync guard: state-only `busy` can miss clicks before the disabled re-render commits. */
   const saveInFlight = useRef(false);
+  const catalogLoadGeneration = useRef(0);
   const delegation = useSubagentDelegation(apiBase);
-  const [ultraState, setUltraState] = useState<{ apiBase: string; mode: UltraModeState } | null>(null);
-  const ultraModeCurrent = ultraState?.apiBase === apiBase;
-  const ultraMode = ultraModeCurrent ? ultraState.mode : UNLOADED_ULTRA_MODE;
+  const [catalogState, setCatalogState] = useState<CatalogState>(() => readCatalogState(cached));
+  const [ultraMode, setUltraMode] = useState<UltraModeState>({
+    enabled: false, hintText: null, recommendation: null, multiAgentV2Enabled: false, multiAgentMode: "default",
+  });
+  const [nativeParentOverride, setNativeParentOverride] = useState<V2NativeParentOverrideState>({ enabled: false, model: null, active: false });
+  const [agentTaskRecovery, setAgentTaskRecovery] = useState<AgentTaskRecoveryState>({ enabled: false, model: null });
+  const [routedDelegationBridge, setRoutedDelegationBridge] = useState<V2RoutedDelegationBridgeState>({ enabled: false });
+  const [multiAgentMode, setMultiAgentMode] = useState<"v1" | "default" | "v2">("default");
+  const [keepNativeChatGptOnV1, setKeepNativeChatGptOnV1] = useState(false);
+  const [childInstructions, setChildInstructions] = useState("");
+  const [childInstructionsSaving, setChildInstructionsSaving] = useState(false);
   const [ultraSaving, setUltraSaving] = useState(false);
+  const [nativeParentOverrideSaving, setNativeParentOverrideSaving] = useState(false);
+  const nativeParentOverrideSavingRef = useRef(false);
+  const [agentTaskRecoverySaving, setAgentTaskRecoverySaving] = useState(false);
+  const agentTaskRecoverySavingRef = useRef(false);
+  const routedDelegationBridgeSavingRef = useRef(false);
+  const [routedDelegationBridgeSaving, setRoutedDelegationBridgeSaving] = useState(false);
   const [ultraLoadFailed, setUltraLoadFailed] = useState(false);
   const ultraLoadGeneration = useRef(0);
   const currentUltraApiBase = useRef(apiBase);
@@ -67,13 +85,20 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
     const data = await readJsonOrThrow<{
       enabled?: boolean;
       multiAgentMode?: "v1" | "default" | "v2";
-      multiAgentModeHintText?: string | null;
       keepNativeChatGptOnV1?: boolean;
+      multiAgentModeHintText?: string | null;
       multiAgentModeHintRecommendation?: { text?: unknown; revision?: unknown };
+      subagentDeveloperInstructions?: string | null;
+      v2NativeParentOverride?: Partial<V2NativeParentOverrideState>;
+      agentTaskRecovery?: Partial<AgentTaskRecoveryState>;
+      v2RoutedDelegationBridge?: unknown;
     }>(res, t("sub.ultraModeLoadFail"));
     if (!data) return false;
     if (signal?.aborted || generation !== ultraLoadGeneration.current || currentUltraApiBase.current !== apiBase) return false;
     setUltraLoadFailed(false);
+    setMultiAgentMode(data.multiAgentMode === "v1" || data.multiAgentMode === "v2" ? data.multiAgentMode : "default");
+    setKeepNativeChatGptOnV1(data.keepNativeChatGptOnV1 === true);
+    setChildInstructions(typeof data.subagentDeveloperInstructions === "string" ? data.subagentDeveloperInstructions : "");
     const rawRecommendation = data.multiAgentModeHintRecommendation;
     const recommendation = rawRecommendation
       && typeof rawRecommendation.text === "string"
@@ -82,7 +107,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       && rawRecommendation.revision.trim().length > 0
       ? { text: rawRecommendation.text, revision: rawRecommendation.revision }
       : null;
-    setUltraState({ apiBase, mode: {
+    setUltraMode({
       enabled: data.enabled ?? false,
       loaded: true,
       keepNativeChatGptOnV1: data.keepNativeChatGptOnV1 === true,
@@ -93,7 +118,19 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       // so only an explicitly forced V2 catalog is an effective surface here.
       multiAgentV2Enabled: data.enabled === true && data.multiAgentMode === "v2",
       multiAgentMode: data.multiAgentMode ?? "default",
-    } });
+    });
+    const override = data.v2NativeParentOverride;
+    setNativeParentOverride({
+      enabled: override?.enabled === true,
+      model: typeof override?.model === "string" ? override.model : null,
+      active: override?.active === true,
+    });
+    const recovery = data.agentTaskRecovery;
+    setAgentTaskRecovery({
+      enabled: recovery?.enabled === true,
+      model: typeof recovery?.model === "string" ? recovery.model : null,
+    });
+    setRoutedDelegationBridge({ enabled: data.v2RoutedDelegationBridge === true });
     return true;
   }, [apiBase, t]);
 
@@ -112,7 +149,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   }, [loadUltraMode, t]);
 
   const saveUltraMode = async (patch: UltraModePatch) => {
-    if (ultraSaving || !ultraModeCurrent || currentUltraApiBase.current !== apiBase) return;
+    if (ultraSaving) return;
     const requestApiBase = apiBase;
     setUltraSaving(true);
     setStatus("");
@@ -132,6 +169,108 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       setStatus(error instanceof Error && error.message ? error.message : t("sub.networkError"));
     } finally {
       setUltraSaving(false);
+    }
+  };
+
+  const saveNativeParentOverride = async (next: V2NativeParentOverrideState) => {
+    if (nativeParentOverrideSavingRef.current) return;
+    nativeParentOverrideSavingRef.current = true;
+    const requestApiBase = apiBase;
+    setNativeParentOverrideSaving(true);
+    setStatus("");
+    try {
+      const res = await fetch(`${apiBase}/api/v2`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ v2NativeParentOverride: { enabled: next.enabled, model: next.model } }),
+      });
+      await readJsonOrThrow(res, t("sub.nativeParentOverrideSaveFail"));
+      if (currentUltraApiBase.current !== requestApiBase || !await loadUltraMode()) return;
+      setOk(true);
+      setStatus(t("sub.nativeParentOverrideSaved"));
+    } catch (error) {
+      if (currentUltraApiBase.current !== requestApiBase) return;
+      setOk(false);
+      setStatus(error instanceof Error && error.message ? error.message : t("sub.networkError"));
+    } finally {
+      nativeParentOverrideSavingRef.current = false;
+      setNativeParentOverrideSaving(false);
+    }
+  };
+
+  const saveAgentTaskRecovery = async (next: AgentTaskRecoveryState) => {
+    if (agentTaskRecoverySavingRef.current) return;
+    agentTaskRecoverySavingRef.current = true;
+    const requestApiBase = apiBase;
+    setAgentTaskRecoverySaving(true);
+    setStatus("");
+    try {
+      const res = await fetch(`${apiBase}/api/v2`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentTaskRecovery: { enabled: next.enabled, model: next.model } }),
+      });
+      await readJsonOrThrow(res, t("sub.agentTaskRecoverySaveFail"));
+      if (currentUltraApiBase.current !== requestApiBase || !await loadUltraMode()) return;
+      setOk(true);
+      setStatus(t("sub.agentTaskRecoverySaved"));
+    } catch (error) {
+      if (currentUltraApiBase.current !== requestApiBase) return;
+      setOk(false);
+      setStatus(error instanceof Error && error.message ? error.message : t("sub.networkError"));
+    } finally {
+      agentTaskRecoverySavingRef.current = false;
+      setAgentTaskRecoverySaving(false);
+    }
+  };
+
+  const saveRoutedDelegationBridge = async (enabled: boolean) => {
+    if (routedDelegationBridgeSavingRef.current) return;
+    routedDelegationBridgeSavingRef.current = true;
+    const requestApiBase = apiBase;
+    setRoutedDelegationBridgeSaving(true);
+    setStatus("");
+    try {
+      const res = await fetch(`${apiBase}/api/v2`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ v2RoutedDelegationBridge: enabled }),
+      });
+      await readJsonOrThrow(res, t("sub.routedDelegationBridgeSaveFail"));
+      if (currentUltraApiBase.current !== requestApiBase || !await loadUltraMode()) return;
+      setOk(true);
+      setStatus(t("sub.routedDelegationBridgeSaved"));
+    } catch (error) {
+      if (currentUltraApiBase.current !== requestApiBase) return;
+      setOk(false);
+      setStatus(error instanceof Error && error.message ? error.message : t("sub.networkError"));
+    } finally {
+      routedDelegationBridgeSavingRef.current = false;
+      setRoutedDelegationBridgeSaving(false);
+    }
+  };
+
+  const saveChildInstructions = async (value: string | null) => {
+    if (childInstructionsSaving) return;
+    const requestApiBase = apiBase;
+    setChildInstructionsSaving(true);
+    setStatus("");
+    try {
+      const res = await fetch(`${apiBase}/api/v2`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subagentDeveloperInstructions: value }),
+      });
+      await readJsonOrThrow(res, t("sub.childInstructionsSaveFailed"));
+      if (currentUltraApiBase.current !== requestApiBase || !await loadUltraMode()) return;
+      setOk(true);
+      setStatus(t("sub.childInstructionsSaved"));
+    } catch (error) {
+      if (currentUltraApiBase.current !== requestApiBase) return;
+      setOk(false);
+      setStatus(error instanceof Error && error.message ? error.message : t("sub.networkError"));
+    } finally {
+      setChildInstructionsSaving(false);
     }
   };
 
@@ -193,8 +332,11 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   const loadSubagents = useCallback(async (signal?: AbortSignal): Promise<CachedSubagents> => {
     // Auxiliary fallback discovery must neither reject nor delay the roster resource.
     const rosterReadRevision = rosterRevision.current;
+    // The resource layer's deadline abort must reach the wire — a signal dropped
+    // here is a store that can only settle by race timeout.
+    const generation = ++catalogLoadGeneration.current;
     const rosterRes = await fetch(`${apiBase}/api/subagent-models`, { signal });
-    const response = await readJsonOrThrow<{ available?: string[]; chosen?: string[] }>(rosterRes, t("sub.loadFail"));
+    const response = await readJsonOrThrow<{ available?: string[]; chosen?: string[]; catalogState?: { state?: CatalogState } }>(rosterRes, t("sub.loadFail"));
     if (!response) throw new Error(t("sub.loadFail"));
     const available = response.available ?? [];
     const availableSet = new Set(available);
@@ -203,10 +345,13 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       ...fallbackSnapshot.current,
       available,
       chosen: rosterCurrent ? (response.chosen ?? []).filter(model => availableSet.has(model)) : committed.current?.chosen ?? [],
+      catalogState: response.catalogState,
     };
     if (signal?.aborted) throw signal.reason;
     committed.current = next;
+    if (generation !== catalogLoadGeneration.current) return next;
     if (rosterCurrent) setChosen(next.chosen);
+    setCatalogState(readCatalogState(next));
     writeSessionListCache(cacheKey, next);
     return next;
   }, [apiBase, cacheKey, t]);
@@ -223,6 +368,12 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   const load = resource.refresh;
   const snapshot = state.data ?? cached;
   const available = snapshot?.available ?? [];
+  const refreshDelegation = delegation.refresh;
+  const restartSettled = useCallback(() => {
+    load();
+    void refreshDelegation();
+  }, [refreshDelegation, load]);
+  const codexRestart = useCodexRestart(apiBase, { onSettled: restartSettled });
 
   const toggle = (m: string) => {
     if (busy) return;
@@ -242,9 +393,15 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
     });
   };
 
+  const setRoleStatus = useCallback((nextOk: boolean, message: string) => {
+    setOk(nextOk);
+    setStatus(message);
+  }, []);
+
   const save = async () => {
     if (busy || saveInFlight.current) return;
     saveInFlight.current = true;
+    const saveCatalogGeneration = catalogLoadGeneration.current;
     rosterRevision.current += 1;
     setBusy(true);
     setStatus("");
@@ -259,9 +416,11 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       const applied = d?.applied ?? chosen;
       if (d?.applied) setChosen(d.applied);
       // A legacy roster-only seed does not prove that an empty fallback was loaded.
-      const next = { ...committed.current, available, chosen: applied };
+      const next = { ...committed.current, available, chosen: applied, catalogState: { state: catalogState } };
       committed.current = next;
-      writeSessionListCache(cacheKey, next);
+      if (saveCatalogGeneration === catalogLoadGeneration.current) {
+        writeSessionListCache(cacheKey, next);
+      }
       setOk(true);
       setStatus(t("sub.saved", { n: applied.length, cmd: "ocx sync" }));
     } catch (error) {
@@ -293,7 +452,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       setFallback(d.models);
       setFallbackPollMs(d.pollMs);
       fallbackSnapshot.current = { ...fallbackSnapshot.current, fallback: d.models, pollMs: d.pollMs };
-      const next = { available, chosen: committed.current?.chosen ?? [], ...fallbackSnapshot.current };
+      const next = { ...committed.current, available, chosen: committed.current?.chosen ?? [], ...fallbackSnapshot.current };
       committed.current = next;
       writeSessionListCache(cacheKey, next);
       setOk(true);
@@ -329,6 +488,8 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       </div>
       {status && <Notice tone={ok ? "ok" : "err"}>{status}</Notice>}
       {state.showError && <Notice tone="err">{t("sub.loadFail")}</Notice>}
+      <p className="page-sub">{t("sub.catalogState.label")}: {t(`sub.catalogState.${catalogState}`)}</p>
+      <CodexStaleBanner state={catalogState} controller={codexRestart} />
       {fallbackError && (
         <Notice tone="err">
           {t("sub.fallbackLabel")}: {t("sub.loadFail")}
@@ -357,13 +518,46 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
           available: delegation.available,
           guidanceEnabled: delegation.guidanceEnabled,
           syncCodexDefaults: delegation.syncCodexDefaults,
+          nativeDefaultState: delegation.nativeDefaultState,
           saving: delegation.saving,
-          onSave: patch => { void delegation.save(patch); },
+          onSave: patch => {
+            void (async () => {
+              const result = await delegation.save(patch);
+              if ("prompt" in patch) {
+                if (result.ok) {
+                  setOk(true);
+                  setStatus(t("sub.injectionPromptSaved"));
+                } else {
+                  setOk(false);
+                  setStatus(result.error || t("sub.injectionPromptSaveFailed"));
+                }
+              }
+            })();
+          },
           ultraMode,
-          ultraSaving: ultraSaving || !ultraModeCurrent,
+          ultraSaving,
           onUltraModeSave: patch => { void saveUltraMode(patch); },
           ultraLoadFailed,
           onUltraModeRetry: () => { void retryUltraMode(); },
+          nativeParentOverride,
+          nativeParentOverrideSaving,
+          onNativeParentOverrideSave: next => { void saveNativeParentOverride(next); },
+          agentTaskRecovery,
+          agentTaskRecoverySaving,
+          onAgentTaskRecoverySave: next => { void saveAgentTaskRecovery(next); },
+          routedDelegationBridge,
+          routedDelegationBridgeSaving,
+          onRoutedDelegationBridgeSave: enabled => { void saveRoutedDelegationBridge(enabled); },
+          prompt: delegation.prompt,
+          childInstructions,
+          childInstructionsSaving,
+          onChildInstructionsSave: value => { void saveChildInstructions(value); },
+        }}
+        roles={{
+          apiBase,
+          multiAgentMode,
+          keepNativeChatGptOnV1,
+          onStatus: setRoleStatus,
         }}
       />
     </>

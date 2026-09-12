@@ -693,7 +693,7 @@ describe("status hub block", () => {
   });
 
   test("the token state is about the file the service reads, never about this shell", () => {
-    withHome(home => writeFileSync(join(home, "service-api-token"), `${TOKEN}\n`, "utf8"), () => {
+    withHome(home => writeFileSync(join(home, "service-api-token"), `${TOKEN}\n`, { mode: 0o600 }), () => {
       const fromFile = collectHubStatus(hub() as Parameters<typeof collectHubStatus>[0], { port: 10100 }, {});
       expect(fromFile?.dataToken).toBe("present (file)");
       expect(fromFile?.dataTokenEnvInShell).toBe(false);
@@ -722,7 +722,7 @@ describe("status hub block", () => {
     // The #4236 incident read `present (file)` while the hub crash-looped, because the file
     // held the MANAGEMENT token and nothing in the report compared the two.
     const admin = `ocx_admin_${"f".repeat(43)}`;
-    withHome(home => writeFileSync(join(home, "service-api-token"), `${admin}\n`, "utf8"), () => {
+    withHome(home => writeFileSync(join(home, "service-api-token"), `${admin}\n`, { mode: 0o600 }), () => {
       const status = collectHubStatus(hub() as Parameters<typeof collectHubStatus>[0], { port: 10100 }, {});
       expect(status?.dataToken).toBe("admin-collision (file)");
       const lines = hubStatusLines(status!).join("\n");
@@ -734,7 +734,7 @@ describe("status hub block", () => {
     // The same comparison doctor and the service chokepoint use: byte-equal to the configured
     // admin token counts too, not only the minted prefix.
     withHome(home => {
-      writeFileSync(join(home, "service-api-token"), "hand-pasted-management-key\n", "utf8");
+      writeFileSync(join(home, "service-api-token"), "hand-pasted-management-key\n", { mode: 0o600 });
     }, () => {
       const status = collectHubStatus(
         hub() as Parameters<typeof collectHubStatus>[0],

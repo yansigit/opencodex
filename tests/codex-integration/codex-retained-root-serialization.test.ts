@@ -511,7 +511,7 @@ test("a persisted runtime selection moved by another process during the await bl
  * Every case above drives `/api/sync`, which is a retained root. This one drives
  * `PATCH /api/providers` — one of the sixteen management mutations that used to
  * reach a catalog write through `refreshCodexCatalogBestEffort`, whose entire
- * error policy was `catch {}`. The interesting window is AFTER the route has
+ * error policy silently discarded every exception. The interesting window is AFTER the route has
  * already persisted its own mutation and approved the refresh: two processes
  * arriving there together must serialize, and neither may report `committed`
  * for bytes the other replaced.
@@ -656,7 +656,7 @@ test("two processes at the post-approval management seam serialize instead of in
       catalogRefresh: { status: string };
     };
     // The route persisted its mutation, so it must answer 2xx no matter what the
-    // catalog attempt decided. A throw here would be the old `catch {}` failure
+    // catalog attempt decided. A throw here would reproduce the old silent-catch failure
     // inverted: a persisted change reported as a 500.
     expect(parsed.status).toBeGreaterThanOrEqual(200);
     expect(parsed.status).toBeLessThan(300);

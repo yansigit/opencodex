@@ -456,17 +456,7 @@ export function computeCodexUsageScore(quota: {
   if (knownLong.length === 0) {
     return isTerminalShortWindow(burst, now) ? CODEX_EXHAUSTED_USAGE_PERCENT : CODEX_UNKNOWN_USAGE_SCORE;
   }
-  // A terminal burst reading is useful only while its own freshness evidence says the
-  // window is still live. This applies even when a weekly/monthly bar is also known:
-  // otherwise a canonical short-primary + weekly-secondary snapshot remains scored at
-  // 100 forever after the short reset, and both Pool and subagent routing strand a
-  // recovered account. Non-terminal short readings retain their historical refinement
-  // behaviour; only a measured refusal needs the stricter freshness gate.
-  const shortPercent = finite(burst.shortPercent)
-    && (burst.shortPercent < CODEX_EXHAUSTED_USAGE_PERCENT || isTerminalShortWindow(burst, now))
-    ? burst.shortPercent
-    : undefined;
-  const values = shortPercent !== undefined ? [...knownLong, shortPercent] : knownLong;
+  const values = finite(burst.shortPercent) ? [...knownLong, burst.shortPercent] : knownLong;
   return Math.max(...values);
 }
 
