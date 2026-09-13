@@ -18,7 +18,7 @@ import type { AdapterEvent, OcxMessage, OcxParsedRequest, OcxProviderContinuatio
 import { namespacedToolName, toolChoiceToolPredicate } from "../types";
 import { cloneProviderOpaqueToolCallMetadata } from "../responses/provider-opaque-metadata";
 import type { AttemptRecoveryKind } from "../usage/log";
-import { bridgeToResponsesSSE } from "../bridge";
+import { bridgeToResponsesSSE, diagnoseAdapterEvent, type BridgeDiagnosticContext } from "../bridge";
 import { clearableDeadline, idleDeadline } from "../lib/abort";
 import { readBoundedResponseBody } from "../lib/bounded-body";
 import { applyUpstreamRecoveryInit, fetchWithResetRetry, prepareSameTarget429Wait } from "../lib/upstream-retry";
@@ -296,6 +296,8 @@ export interface ImageBridgeDeps {
   onAttemptSend?: (recovery?: AttemptRecoveryKind) => void;
   /** Called after each upstream request is built (parity with web-search / normal path). */
   onRequestBuilt?: (request: AdapterRequest) => void;
+  /** Validate the final adapter before every cached replay or request build. */
+  validateAdapter?: (parsed: OcxParsedRequest, adapter: ProviderAdapter) => void;
   abortSignal?: AbortSignal;
   onFirstOutput?: () => void;
   /** Max image-generation rounds before forcing a final answer. Defaults to 3; clamped to [0, 10]. */
@@ -332,6 +334,8 @@ export interface ImageBridgeDeps {
   onCompletedResponse?: (response: Record<string, unknown>, providerState?: OcxProviderContinuationState) => void;
   /** WebSocket Responses path only — leave response id empty for protocol compatibility. */
   forceEmptyResponseId?: boolean;
+  /** Internal, opt-in structural stream diagnostics shared with the final bridge. */
+  diagnostic?: BridgeDiagnosticContext;
 }
 
 /**
@@ -568,6 +572,7 @@ export async function runWithImageBridge(deps: ImageBridgeDeps): Promise<Respons
        * header deadline. The caller owns same-target 429 replays and key rotation around it.
        */
       const fetchOnce = async (requestAdapter: ProviderAdapter, recovery?: AttemptRecoveryKind): Promise<IterationResponse> => {
+        deps.validateAdapter?.(iterParsed, requestAdapter);
         let request: AdapterRequest;
         if (cachedRequest !== undefined && cachedAdapter === requestAdapter) {
           request = cachedRequest;
@@ -718,18 +723,20 @@ export async function runWithImageBridge(deps: ImageBridgeDeps): Promise<Respons
     const events: AdapterEvent[] = prepared.collectedEvents ?? [];
     const iterationBudget = prepared.collectedEvents ? undefined : createIterationEventBudget();
     try {
-      if (iterationBudget) {
-        const parse = prepared.responseAdapter.parseStream.bind(prepared.responseAdapter);
-        for await (const event of parseStreamWithProgress(prepared.response, parse, {
-          signal,
-          inactivityTimeoutMs: stallTimeoutMs,
-          translatorBudget,
-        })) {
-          if (event.type === "heartbeat") yield event;
-          else {
-            iterationBudget.retain(event);
-            events.push(event);
-          }
+      const parse = prepared.responseAdapter.parseStream.bind(prepared.responseAdapter);
+      for await (const event of parseStreamWithProgress(prepared.response, parse, {
+        signal,
+        inactivityTimeoutMs: stallTimeoutMs,
+        translatorBudget,
+      })) {
+        if (deps.diagnostic) {
+          deps.diagnostic.adapterName = prepared.responseAdapter.name;
+          diagnoseAdapterEvent(deps.diagnostic, event);
+        }
+        if (event.type === "heartbeat") yield event;
+        else {
+          iterationBudget?.retain(event);
+          events.push(event);
         }
       }
     } catch (error) {
@@ -1045,6 +1052,7 @@ export async function runWithImageBridge(deps: ImageBridgeDeps): Promise<Respons
         onUsage: (usage: OcxUsage | undefined) => deps.onUsage?.(usage),
       } : {}),
       ...(deps.onCompletedResponse ? { onCompletedResponse: deps.onCompletedResponse } : {}),
+      ...(deps.diagnostic ? { diagnostic: deps.diagnostic } : {}),
     },
   );
   return new Response(sse, { headers: SSE_HEADERS });

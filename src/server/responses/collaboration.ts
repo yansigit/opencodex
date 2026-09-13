@@ -9,6 +9,7 @@ import {
 import { parseRequest } from "../../responses/parser";
 import { externalTaskInputContent } from "../../responses/task-input";
 import { MULTI_AGENT_MODE_HINT_RECOMMENDATION } from "../../codex/multi-agent-mode-policy";
+import type { NativeDefaultState } from "../../codex/subagent-defaults";
 import { buildCompactV1Output, COMPACT_PROMPT, decodeCompactionSummary, extractCompactUserMessages } from "../../responses/compaction";
 import { FORWARD_HEADERS, sanitizeReasoningInputContent } from "../../adapters/openai-responses";
 import { expandPreviousResponseInput, previousResponseProviderState, rememberResponseState } from "../../responses/state";
@@ -278,6 +279,8 @@ export interface MultiAgentGuidanceOptions {
   subagentModels?: string[];
   subagentModelFallback?: string[];
   injectionPrompt?: string;
+  nativeDefaultState?: NativeDefaultState;
+  syncCodexSubagentDefaults?: boolean;
 }
 
 

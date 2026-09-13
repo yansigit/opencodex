@@ -9,6 +9,9 @@ import type { OcxProviderConfig } from "../../types";
 import type { WsData } from "../ws-bridge";
 import { waitForProviderRequestSlot } from "../../providers/request-pacing";
 import { withUpstreamHttpVersion } from "../../lib/upstream-http-version";
+import { providerTlsFetch } from "../../lib/provider-tls-profile";
+import { testProviderFetch } from "../../lib/test-provider-fetch";
+import { runtimeProviderFetch } from "../../lib/provider-runtime-fetch";
 import type { CodexWsQuotaObserver } from "./codex-ws-metadata";
 
 export { withUpstreamHttpVersion };
@@ -52,11 +55,21 @@ export interface PaceAwareFetch {
 
 export type ProviderFetch = typeof globalThis.fetch & PaceAwareFetch;
 
+export class UpstreamRedirectError extends Error {
+  override readonly name = "UpstreamRedirectError";
+
+  constructor(readonly status: number) {
+    super(`upstream returned ${status} redirect; configure the final upstream URL directly`);
+  }
+}
+
 export interface ProviderFetchOptions {
   providerName?: string;
   modelId?: string;
   /** One pacing slot was acquired immediately before this fetch wrapper was created. */
   pacingSlotAcquired?: boolean;
+  /** Explicit test/integration executor; never read from serialized provider config. */
+  fetch?: typeof globalThis.fetch;
   /** Captured selected-account observer, attached before the native WS send. */
   onCodexWsQuota?: CodexWsQuotaObserver;
   /** Synchronous admission at actual credential dispatch, after pacing/backoff. */
@@ -70,15 +83,22 @@ export function providerFetch(
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
   options: ProviderFetchOptions = {},
 ): ProviderFetch {
-  const base = (provider as OcxProviderConfig & { fetch?: typeof globalThis.fetch }).fetch ?? globalThis.fetch;
+  const base = options.fetch
+    ?? testProviderFetch(provider)
+    ?? runtimeProviderFetch(provider, options.providerName)
+    ?? (provider as OcxProviderConfig & { fetch?: typeof globalThis.fetch }).fetch
+    ?? globalThis.fetch;
   const preconnect = (...args: Parameters<typeof globalThis.fetch.preconnect>): void => {
     base.preconnect?.(...args);
   };
+  const rawTransport = options.providerName
+    ? providerTlsFetch(options.providerName, provider, base)
+    : base;
   // Rebuilt dispatches must use the same physical-send boundary as ordinary HTTP sends.
   // Return the original 3xx so the response owner retains its retry/health/relay contract.
   const dispatch = Object.assign(
     (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) =>
-      base(input, { ...init, redirect: "manual" }),
+      rawTransport(input, { ...init, redirect: "manual" }),
     { preconnect },
   ) as typeof globalThis.fetch;
   const httpFetch = Object.assign(
@@ -96,12 +116,19 @@ export function providerFetch(
   // else keeps the provider's HTTP fetch. See ws-upstream.ts for the details.
   const unpaced = async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
     const upstreamWebsocket = provider.upstreamWebsocket === true;
-    if (typeof input === "string" && init && shouldUseCodexWsUpstream(input, init, runtime, upstreamWebsocket)) {
+    const wsOpts = {
+      // Keep the canonical ChatGPT fast lane independent: upstreamWebsocket opts a
+      // configured HTTPS /responses endpoint in, but must not silently enable Codex WS.
+      wsUpstream: provider.wsUpstream,
+      maxWsFrameBytes: provider.maxWsFrameBytes,
+      upstreamWebsocket,
+    };
+    if (typeof input === "string" && init && shouldUseCodexWsUpstream(input, init, runtime, wsOpts)) {
       // The fallback has to be the same HTTP fetch the non-WS branch would have
       // used, protocol pin included: a WS turn that falls back is serving the
       // request over HTTP, and dropping the provider's `upstreamHttpVersion`
       // there would silently negotiate a transport the operator ruled out.
-      return codexWsUpstreamFetch(input, init, httpFetch, runtime, options.onCodexWsQuota, options.beforeDispatch);
+      return codexWsUpstreamFetch(input, init, httpFetch, runtime, wsOpts, options.onCodexWsQuota, options.beforeDispatch);
     }
     return httpFetch(input, init);
   };
@@ -198,7 +225,7 @@ export async function fetchWithHeaderTimeout(
     headers.set("accept-encoding", "identity");
   }
   try {
-    return await fetchExecutor(url, {
+    const response = await fetchExecutor(url, {
       ...init,
       headers,
       // Never replay provider credentials or request bodies to a redirect destination.
@@ -207,6 +234,11 @@ export async function fetchWithHeaderTimeout(
       signal: AbortSignal.any([abortSignal, timeout.signal]),
       timeout: 0,
     });
+    if (response.status >= 300 && response.status < 400) {
+      try { await response.body?.cancel(); } catch { /* ignore cancellation failures */ }
+      throw new UpstreamRedirectError(response.status);
+    }
+    return response;
   } finally {
     clearTimeout(timer);
   }

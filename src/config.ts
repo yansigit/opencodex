@@ -10,6 +10,7 @@ import { DEFAULT_SUBAGENT_MODELS, SUBAGENT_MODELS_VERSION } from "./config/subag
 export { DEFAULT_SUBAGENT_MODELS } from "./config/subagent-models";
 import {
   apiKeyTransportConfigError,
+  azureCredentialConfigError,
   booleanRecordConfigError,
   configReasoningPinsConfigError,
   modelPinnedEffortsConfigError,
@@ -26,7 +27,9 @@ import {
   providerBaseUrlConfigError,
   providerHeadersConfigError,
   reasoningSummaryDeliveryRecordConfigError,
+  maxWsFrameBytesConfigError,
   upstreamHttpVersionConfigError,
+  wsUpstreamConfigError,
 } from "./config/provider-validation";
 import {
   bumpConfigGenerationAtPath,
@@ -70,6 +73,7 @@ import {
 import { recordOwnedConfigPath } from "./lib/config-ownership";
 import { assertNotRealHomeUnderTest } from "./lib/test-home-guard";
 import { providerDestinationConfigError } from "./lib/destination-policy";
+import { antigravityOAuthDestinationConfigError, providerTlsProfileConfigError } from "./lib/provider-tls-profile";
 import { redactSecretString } from "./lib/redact";
 import { openRouterRoutingConfigError } from "./providers/openrouter-routing";
 import { MODEL_ALIAS_PATTERN } from "./providers/default-aliases";
@@ -99,14 +103,15 @@ import {
   registryModelServiceTierCapabilityApplies,
 } from "./providers/registry";
 import { resolveOpenAiVirtualModel } from "./providers/openai-virtual-models";
+import { slugEquivalenceKey, slugsEquivalent } from "./providers/slug-codec";
 import { parseDesktopProfile } from "./claude/desktop-profile";
 import { isCodexReasoningEffort } from "./reasoning-effort";
 import {
   COST4_RATE_KEYS,
+  commitPersistedProviderDeletions,
   isValidCost4Rate,
   refreshPreservedProviderOwner,
   refreshUserCostOverlays,
-  withPreservedDiskOnlyProviders,
 } from "./usage/user-cost-overlays";
 import { MAX_COST4_RATE } from "./usage/expected-prices";
 import {
@@ -116,9 +121,12 @@ import {
 } from "./lib/app-owned-memory";
 import { isHostedToolUnsupportedForModel } from "./responses/hosted-tool-policy";
 import {
+  AtomicWriteResidualTempError,
+  AtomicWriteSecretResidualError,
   atomicWriteFile,
   isMissingPathError,
   nextAtomicTempSequence,
+  resolveWriteTarget,
 } from "./config/atomic-write";
 export {
   AtomicWriteResidualTempError,
@@ -132,8 +140,14 @@ export {
   type AtomicWriteAsyncTestSeam,
   type AtomicWriteIO,
 } from "./config/atomic-write";
+import {
+  InitialConfigPublicationError,
+  publishInitialConfigNoReplace as publishInitialConfigNoReplaceExclusive,
+  setInitialConfigBeforePublishForTests,
+  takeInitialConfigBeforePublishForTests,
+  type InitialConfigPublicationIO,
+} from "./config/initialize";
 import { getConfigDir, getConfigPath, hardenConfigDir } from "./config/paths";
-import { InitialConfigPublicationError, publishInitialConfigNoReplace, type InitialConfigPublicationIO } from "./config/initialize";
 import {
   describeProxyForLog,
   readWindowsSystemProxy,
@@ -164,6 +178,7 @@ export {
   writeRuntimePort,
   type RuntimePortState,
 } from "./config/process-state";
+import { serverTlsConfigError } from "./lib/server-tls";
 import {
   clearPendingConfigTopLevelDeletions,
   configHasRebaseProvenance,
@@ -481,18 +496,21 @@ const requestPacingRuleSchema = z.object({
   // Keep the RPM-derived timer within the same one-hour bound as minIntervalMs.
   requestsPerMinute: z.number().min(1 / 60).max(60_000).optional(),
   minIntervalMs: z.number().int().min(1).max(3_600_000).optional(),
-}).strict().refine(value => value.requestsPerMinute !== undefined || value.minIntervalMs !== undefined, {
-  message: "request pacing rules need requestsPerMinute or minIntervalMs",
+  jitterMs: z.number().int().min(0).max(60_000).optional(),
+}).strict().refine(value => value.requestsPerMinute !== undefined || value.minIntervalMs !== undefined || value.jitterMs !== undefined, {
+  message: "request pacing rules need requestsPerMinute, minIntervalMs, or jitterMs",
 });
 
 const requestPacingSchema = z.object({
   enabled: z.boolean(),
   requestsPerMinute: z.number().min(1 / 60).max(60_000).optional(),
   minIntervalMs: z.number().int().min(1).max(3_600_000).optional(),
+  jitterMs: z.number().int().min(0).max(60_000).optional(),
   models: z.record(z.string().trim().min(1), requestPacingRuleSchema).optional(),
 }).strict().refine(value => value.enabled === false
   || value.requestsPerMinute !== undefined
   || value.minIntervalMs !== undefined
+  || value.jitterMs !== undefined
   || (value.models !== undefined && Object.keys(value.models).length > 0), {
   message: "enabled request pacing needs a provider rule or model override",
 });
@@ -613,6 +631,12 @@ const providerConfigSchema = z.object({
   autoReviewModelOverrides: autoReviewModelOverridesSchema.optional(),
   adapter: z.string().min(1),
   baseUrl: z.string().min(1),
+  azureCredential: z.object({
+    type: z.literal("default-azure-credential"),
+    managedIdentityClientId: z.string().trim().min(1).optional(),
+  }).strict().transform(value => value.managedIdentityClientId === undefined
+    ? value
+    : { ...value, managedIdentityClientId: value.managedIdentityClientId.trim() }).optional(),
   alias: z.string().optional(),
   modelAliases: z.record(z.string(), z.string()).optional(),
   modelDisplayNames: modelDisplayNamesSchema.optional(),
@@ -640,6 +664,8 @@ const providerConfigSchema = z.object({
   decodesNativeCompactionBlobs: z.boolean().optional(),
   allowEncryptedV2AgentTasks: z.boolean().optional(),
   allowPrivateNetwork: z.boolean().optional(),
+  wsUpstream: z.boolean().nullish().transform(value => value ?? undefined),
+  maxWsFrameBytes: z.number().int().positive().nullish().transform(value => value ?? undefined),
   // The management API accepts `null` as "clear this", so a config written before the POST
   // canonicalization below can hold one on disk. Rejecting it here would send the operator
   // through invalid-config recovery for a value the API told them was fine.
@@ -665,12 +691,14 @@ const providerConfigSchema = z.object({
     .optional(),
   retryOn429: retryOn429PolicySchema.optional(),
   transientRetryOn5xx: transientRetryOn5xxPolicySchema.optional(),
+  replayTransientFailures: z.boolean().optional(),
   codexAccountMode: z.enum(["pool", "direct"]).optional(),
   // Validated rather than passed through: this schema ends in `.passthrough()`, so an
   // undeclared key survives verbatim. A misspelled `codexToolMode` therefore used to be
   // accepted, persisted, and then silently resolved to the `code_mode_only` default — the
   // operator asked for shell mode, got code mode, and was told nothing (#2106).
   codexToolMode: z.enum(["code_mode_only", "shell"]).optional(),
+  projectContext: z.enum(["off", "on"]).optional(),
   responsesItemIdRepair: z.object({
     message: z.array(z.string().min(1)).optional(),
     reasoning: z.array(z.string().min(1)).optional(),
@@ -690,6 +718,8 @@ const providerConfigSchema = z.object({
 export { isValidProviderName, hasOwnProvider } from "./config/provider-name";
 export {
   apiKeyTransportConfigError,
+  azureCredentialConfigError,
+  isAzureIdentityProvider,
   booleanRecordConfigError,
   modelAdapterRecordConfigError,
   autoReviewModelOverridesConfigError,
@@ -703,7 +733,9 @@ export {
   providerBaseUrlConfigError,
   providerHeadersConfigError,
   reasoningSummaryDeliveryRecordConfigError,
+  maxWsFrameBytesConfigError,
   upstreamHttpVersionConfigError,
+  wsUpstreamConfigError,
 } from "./config/provider-validation";
 
 /**
@@ -1058,6 +1090,11 @@ const agentTaskRecoverySchema = z.object({
   cacheEntries: z.number().int().min(1).max(512).optional(),
 }).strict();
 
+const v2NativeParentOverrideSchema = z.object({
+  enabled: z.boolean().optional(),
+  model: z.string().trim().min(1).optional(),
+}).strict();
+
 const runtimeRoleSchema = z.enum(["standalone", "hub", "client"]);
 
 function canonicalHttpOrigin(value: string): string | null {
@@ -1257,6 +1294,11 @@ const configSchema = z.object({
   // is safe: startServer() already falls back to 127.0.0.1 for a missing hostname. Write-time
   // rejection lives in validateConfigCandidate() so bad values still surface to the caller.
   hostname: z.string().trim().min(1).optional().catch(undefined),
+  tls: z.object({
+    certFile: z.string().trim().min(1),
+    keyFile: z.string().trim().min(1),
+    publicOrigin: z.string().trim().min(1),
+  }).strict().optional().catch(undefined),
   // Discriminated on `enabled` so a disabled entry cannot be forced to carry a port (#1102).
   // An enabled one MAY omit it: that is the companion form, which binds 127.0.0.1 on the proxy
   // port and is legal only off a loopback/wildcard bind — a relationship between two fields, so
@@ -1305,6 +1347,10 @@ const configSchema = z.object({
   providerContextCapValues: z.record(z.string(), z.number().int().positive()).optional(),
   contextCapValue: z.number().int().positive().optional(),
   multiAgentGuidanceEnabled: z.boolean().optional(),
+  // Invalid hand edits disable only this experimental opt-in.
+  v2RoutedDelegationBridge: z.boolean().optional().catch(undefined),
+  // Invalid hand edits disable only this experimental opt-in subtree.
+  v2NativeParentOverride: v2NativeParentOverrideSchema.optional().catch(undefined),
   // Invalid optional recovery config must not discard unrelated provider/account state.
   plaintextV2AgentMessages: z.boolean().optional().catch(undefined),
   agentTaskRecovery: agentTaskRecoverySchema.optional().catch(undefined),
@@ -1323,6 +1369,12 @@ const configSchema = z.object({
     z.string(),
     z.array(z.string().trim().min(1)).min(1),
   ).optional().catch(undefined),
+  // Candidate overwrite is an optional spawn policy. Invalid hand edits disable
+  // only that policy instead of rejecting the operator's otherwise valid config.
+  subagentCandidates: z.union([
+    z.array(z.string().trim().min(1)).min(1),
+    z.record(z.string().trim().min(1), z.array(z.string().trim().min(1)).min(1)),
+  ]).optional().catch(undefined),
   codexShimAutoRestore: z.boolean().optional(),
   codexDesktopAuthless: z.boolean().optional().catch(undefined),
   codexClientCompaction: z.boolean().optional().catch(undefined),
@@ -1507,6 +1559,30 @@ const configSchema = z.object({
         });
       }
     }
+    const wsUpstreamError = wsUpstreamConfigError((provider as { wsUpstream?: unknown }).wsUpstream);
+    if (wsUpstreamError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "wsUpstream"],
+        message: wsUpstreamError,
+      });
+    }
+    const maxWsFrameBytesError = maxWsFrameBytesConfigError((provider as { maxWsFrameBytes?: unknown }).maxWsFrameBytes);
+    if (maxWsFrameBytesError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "maxWsFrameBytes"],
+        message: maxWsFrameBytesError,
+      });
+    }
+    const tlsProfileError = providerTlsProfileConfigError(name, provider);
+    if (tlsProfileError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "tlsProfile"],
+        message: tlsProfileError,
+      });
+    }
     const headersError = providerHeadersConfigError((provider as { headers?: unknown }).headers);
     if (headersError) {
       ctx.addIssue({
@@ -1541,6 +1617,14 @@ const configSchema = z.object({
         code: "custom",
         path: ["providers", redactSecretString(name), "apiKeyTransport"],
         message: apiKeyTransportError,
+      });
+    }
+    const azureCredentialError = azureCredentialConfigError(provider);
+    if (azureCredentialError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "azureCredential"],
+        message: azureCredentialError,
       });
     }
     const modelAdaptersError = modelAdapterRecordConfigError(
@@ -1860,6 +1944,11 @@ function sanitizeRetryOn429ForLoad(parsed: unknown): void {
     const safeProviderName = JSON.stringify(redactSecretString(name));
     if (!provider || typeof provider !== "object" || Array.isArray(provider)) continue;
     const p = provider as Record<string, unknown>;
+    if (p.replayTransientFailures !== undefined && typeof p.replayTransientFailures !== "boolean") {
+      const receivedType = typeof p.replayTransientFailures;
+      delete p.replayTransientFailures;
+      console.warn(`⚠️  config.json providers.${safeProviderName}.replayTransientFailures (${receivedType}) is invalid — ignoring the field`);
+    }
     const policy = p.retryOn429;
     if (policy === undefined) continue;
     if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
@@ -1931,6 +2020,22 @@ export function retryOn429PolicyConfigError(policy: unknown): string | null {
   if (first.path.length === 0) return `retryOn429 is invalid (${first.message})`;
   const field = String(first.path[first.path.length - 1]);
   return `retryOn429.${field} is invalid (${first.message})`;
+}
+
+/** Strict write-boundary validation for the opt-in transient 5xx retry budget. */
+export function transientRetryOn5xxPolicyConfigError(policy: unknown): string | null {
+  if (policy === undefined) return null;
+  const result = transientRetryOn5xxPolicySchema.safeParse(policy);
+  if (result.success) return null;
+  const first = result.error.issues[0];
+  if (!first) return "transientRetryOn5xx is invalid";
+  if (first.code === "unrecognized_keys") {
+    const names = first.keys.map(key => JSON.stringify(redactSecretString(key))).join(", ");
+    return `transientRetryOn5xx has unrecognized field${first.keys.length > 1 ? "s" : ""}: ${names}`;
+  }
+  if (first.path.length === 0) return `transientRetryOn5xx is invalid (${first.message})`;
+  const field = String(first.path[first.path.length - 1]);
+  return `transientRetryOn5xx.${field} is invalid (${first.message})`;
 }
 
 function sanitizeCapabilityDeclarationsForLoad(parsed: unknown): void {
@@ -2788,6 +2893,52 @@ export function subagentDefaultSyncEffective(
   return config.syncCodexSubagentDefaults === true && Boolean(config.injectionModel?.trim());
 }
 
+/**
+ * Resolve and normalize configured candidates for one spawned sub-agent.
+ * Supports a global ordered list or a record keyed by role/model, with
+ * `default` and `*` fallbacks for unmatched requests.
+ */
+export function resolveSubagentCandidates(
+  config: Pick<OcxConfig, "subagentCandidates"> | OcxConfig,
+  roleOrModel?: string,
+): string[] {
+  const candidates = config?.subagentCandidates;
+  if (!candidates) return [];
+
+  const normalizeList = (raw: unknown): string[] => {
+    if (!Array.isArray(raw)) return [];
+    const result: string[] = [];
+    const seen = new Set<string>();
+    for (const item of raw) {
+      if (typeof item !== "string") continue;
+      const trimmed = item.trim();
+      if (!trimmed) continue;
+      const key = slugEquivalenceKey(trimmed);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(trimmed);
+    }
+    return result;
+  };
+
+  if (Array.isArray(candidates)) return normalizeList(candidates);
+  if (typeof candidates !== "object") return [];
+
+  const record = candidates as Record<string, unknown>;
+  const trimmed = roleOrModel?.trim();
+  let selected: unknown;
+  if (trimmed) {
+    if (Object.hasOwn(record, trimmed)) {
+      selected = record[trimmed];
+    } else {
+      const matchingKey = Object.keys(record).find(key => slugsEquivalent(key, trimmed));
+      if (matchingKey) selected = record[matchingKey];
+    }
+  }
+  if (!selected) selected = record.default ?? record["*"];
+  return normalizeList(selected);
+}
+
 function mergeConfigDefaults(parsed: unknown): unknown {
   if (!parsed || typeof parsed !== "object") return parsed;
   const defaults = getDefaultConfig();
@@ -2804,6 +2955,19 @@ function mergeConfigDefaults(parsed: unknown): unknown {
     merged.providers = { ...defaults.providers, ...(raw.providers as Record<string, unknown>) };
   }
   return merged;
+}
+
+function configNeedsProviderRepair(parsed: Record<string, unknown>): boolean {
+  const providers = parsed.providers;
+  if (parsed.defaultProvider !== undefined
+    || (providers && typeof providers === "object" && !Array.isArray(providers)
+      && Object.keys(providers).length > 0)) return false;
+  const candidate = structuredClone(parsed);
+  sanitizeAliasesForLoad(candidate);
+  sanitizeRetryOn429ForLoad(candidate);
+  sanitizeModelCostsForLoad(candidate);
+  return !configSchema.safeParse(candidate).success
+    && configSchema.safeParse(mergeConfigDefaults(candidate)).success;
 }
 
 function schemaDiagnosticsError(error: z.ZodError): string {
@@ -3161,6 +3325,11 @@ function managementIngressConfigError(value: unknown): string | null {
 export function validateConfigCandidate(value: unknown): { ok: true; config: OcxConfig } | { ok: false; error: string } {
   const boundaryError = configReasoningPinsConfigError(value)
     ?? blankHostnameError(value)
+    ?? (() => {
+      const raw = rawConfigRecord(value);
+      const error = raw ? serverTlsConfigError(raw.tls) : null;
+      return error ? `schema_invalid: ${error}` : null;
+    })()
     ?? claudeSubagentEffortError(value)
     ?? appOwnedMemoryBudgetError(value)
     ?? upstreamHostCircuitThresholdError(value)
@@ -3185,6 +3354,10 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
   const result = configSchema.safeParse(value);
   if (result.success) {
     const config = normalizeApiKeyIds(result.data as OcxConfig);
+    for (const [name, provider] of Object.entries(config.providers)) {
+      const antigravityError = antigravityOAuthDestinationConfigError(name, provider);
+      if (antigravityError) return { ok: false, error: `providers.${name}.baseUrl: ${antigravityError}` };
+    }
     return { ok: true, config };
   }
   return { ok: false, error: schemaDiagnosticsError(result.error) };
@@ -3547,10 +3720,34 @@ export const withExpectedConfigGenerationSync: WithExpectedConfigGenerationSync 
  * cost-overlay registry from the persisted config so runtime estimates follow
  * every save path.
  */
-function persistConfigUnlocked(config: OcxConfig): boolean {
+type PersistConfigAuthority = "ordinary" | "mutation" | "replacement";
+
+function persistConfigUnlocked(config: OcxConfig, authority: PersistConfigAuthority = "ordinary"): boolean {
   const pinError = configReasoningPinsConfigError(config);
   if (pinError) throw new Error(pinError);
   const configPath = getConfigPath();
+  // Check the resolved file target before reading it: a symlink can point from an
+  // isolated test home into the protected real home, where another write guard
+  // must not mask this refusal based on the target's current contents.
+  assertNotRealHomeUnderTest(dirname(resolveWriteTarget(configPath)));
+  const raw = readRawConfigJson();
+  if (authority !== "replacement" && raw && configNeedsProviderRepair(raw)) {
+    throw new Error("refusing to overwrite a config repaired with defaults; fix the persisted config first");
+  }
+  const snapshot = readConfigFileSnapshot();
+  if (authority !== "replacement" && snapshot.diagnostics.source === "fallback") {
+    throw new Error("refusing to overwrite an invalid persisted config; fix the persisted config first");
+  }
+  // Automatic whole-config writes own non-provider settings only. A valid disk
+  // registry is authoritative; explicit locked mutations pass replacement
+  // authority for intentional provider/default changes.
+  const base = snapshot.diagnostics.source === "file" && authority === "ordinary"
+    ? {
+      ...config,
+      providers: snapshot.diagnostics.config.providers,
+      defaultProvider: snapshot.diagnostics.config.defaultProvider,
+    }
+    : config;
   const rawBeforeWrite = readRawConfigJson();
   const clientPersistenceError = failClosedClientPersistenceError(rawBeforeWrite, config);
   if (clientPersistenceError) throw new Error(clientPersistenceError);
@@ -3560,7 +3757,11 @@ function persistConfigUnlocked(config: OcxConfig): boolean {
   // Provider preservation reads symbol-keyed live-owner state, which structuredClone
   // intentionally drops. Resolve that ownership before projecting JSON provenance.
   const provenanceProjection = projectConfigRebaseProvenance(config);
-  const persisted = withPreservedDiskOnlyProviders(config);
+  const persisted = base;
+  const persistedProviderDeletions = authority === "mutation" && snapshot.diagnostics.source === "file"
+    ? Object.keys(snapshot.diagnostics.config.providers ?? {})
+      .filter(name => !Object.hasOwn(persisted.providers ?? {}, name))
+    : [];
   if (provenanceProjection.configRebaseProvenance === undefined) delete persisted.configRebaseProvenance;
   else persisted.configRebaseProvenance = provenanceProjection.configRebaseProvenance;
   const bytes = JSON.stringify(persisted, null, 2) + "\n";
@@ -3575,52 +3776,16 @@ function persistConfigUnlocked(config: OcxConfig): boolean {
   // the same bytes (e.g. before a proxy notification), and Logs/Usage must
   // adopt the overlay without waiting for a changed save or restart.
   if (unchanged) {
+    commitPersistedProviderDeletions(persistedProviderDeletions);
     refreshUserCostOverlays(persisted);
     return false;
   }
   atomicWriteFile(configPath, bytes);
   // For changed saves, refresh only AFTER the write succeeded so a failed
   // write cannot leave estimates reflecting configuration never persisted.
+  commitPersistedProviderDeletions(persistedProviderDeletions);
   refreshUserCostOverlays(persisted);
   return true;
-}
-
-export type PersistedConfigInitializationOutcome = "created" | "exists" | "invalid";
-
-/** Initialize only a missing config; ordinary explicit updates still use saveConfig. */
-export function initializePersistedConfigIfMissing(
-  config: OcxConfig,
-  io?: Partial<InitialConfigPublicationIO>,
-): PersistedConfigInitializationOutcome {
-  assertNotRealHomeUnderTest(getConfigDir());
-  const before = observeInitialConfigState();
-  if (before !== "missing") return before;
-  let published = false;
-  try {
-    const persisted = withConfigMutationLockSync((): OcxConfig | "exists" | "invalid" => {
-      const current = observeInitialConfigState();
-      if (current !== "missing") return current;
-      const projected = projectCustomModelCatalogMigration(undefined, projectConfigRebaseProvenance(config));
-      if (!validateConfigCandidate(projected).ok) throw new Error("Initial configuration is invalid.");
-      if (!publishInitialConfigNoReplace(getConfigPath(), JSON.stringify(projected, null, 2) + "\n", io)) {
-        return observeInitialConfigState() === "exists" ? "exists" : "invalid";
-      }
-      published = true;
-      recordOwnedConfigPath(getConfigDir(), getConfigPath());
-      bumpGenerationForCooperatingConfigWrite();
-      return projected;
-    });
-    if (typeof persisted === "string") return persisted;
-    adoptCustomModelCatalogMigration(config, persisted);
-    if (persisted.configRebaseProvenance === undefined) delete config.configRebaseProvenance;
-    else config.configRebaseProvenance = structuredClone(persisted.configRebaseProvenance);
-    clearPendingConfigTopLevelDeletions(config);
-    refreshUserCostOverlays(persisted);
-    return "created";
-  } catch (cause) {
-    if (published) throw new InitialConfigPublicationError("published", false, false, { cause });
-    throw cause;
-  }
 }
 
 /** Persist `config` to config.json under the config-mutation lock. */
@@ -3642,6 +3807,75 @@ export function saveConfig(config: OcxConfig): void {
   });
 }
 
+/** Replace a validated config under the shared lock for confirmed import/init flows. */
+export function replacePersistedConfig(config: OcxConfig): void {
+  assertNotRealHomeUnderTest(getConfigDir());
+  withConfigMutationLockSync(() => {
+    const projected = projectCustomModelCatalogMigration(
+      readRawConfigJson(),
+      projectConfigRebaseProvenance(config),
+    );
+    if (persistConfigUnlocked(projected, "replacement")) bumpGenerationForCooperatingConfigWrite();
+    adoptCustomModelCatalogMigration(config, projected);
+    if (projected.configRebaseProvenance === undefined) delete config.configRebaseProvenance;
+    else config.configRebaseProvenance = structuredClone(projected.configRebaseProvenance);
+    clearPendingConfigTopLevelDeletions(config);
+  });
+}
+
+export type PersistedConfigInitializationOutcome = "created" | "exists" | "invalid";
+
+/** Test-only one-shot seam: create a competing config after staging, before no-replace publication. */
+export function setPersistedConfigInitializationBeforePublishForTests(hook: (() => void) | null): void {
+  setInitialConfigBeforePublishForTests(hook);
+}
+
+/**
+ * Create the initial config under the shared lock, but never replace existing bytes.
+ * Single production engine: exclusive no-replace publication through
+ * src/config/initialize.ts. Occupied or unsafe config entries are classified
+ * before the coordinator database is created, so a refusal leaves no lock
+ * residue behind.
+ */
+export function initializePersistedConfigIfMissing(
+  config: OcxConfig,
+  io?: Partial<InitialConfigPublicationIO>,
+): PersistedConfigInitializationOutcome {
+  assertNotRealHomeUnderTest(getConfigDir());
+  const before = observeInitialConfigState();
+  if (before !== "missing") return before;
+  let published = false;
+  try {
+    const persisted = withConfigMutationLockSync((): OcxConfig | "exists" | "invalid" => {
+      const current = observeInitialConfigState();
+      if (current !== "missing") return current;
+      const projected = projectCustomModelCatalogMigration(undefined, projectConfigRebaseProvenance(config));
+      // Validate before creating the private staging inode so an invalid
+      // candidate cannot leave any publication residue or alter the target.
+      if (!validateConfigCandidate(projected).ok) {
+        throw new Error("Initial configuration is invalid.");
+      }
+      if (!publishInitialConfigNoReplaceExclusive(getConfigPath(), JSON.stringify(projected, null, 2) + "\n", io)) {
+        return observeInitialConfigState() === "exists" ? "exists" : "invalid";
+      }
+      published = true;
+      recordOwnedConfigPath(getConfigDir(), getConfigPath());
+      bumpGenerationForCooperatingConfigWrite();
+      return projected;
+    });
+    if (typeof persisted === "string") return persisted;
+    adoptCustomModelCatalogMigration(config, persisted);
+    if (persisted.configRebaseProvenance === undefined) delete config.configRebaseProvenance;
+    else config.configRebaseProvenance = structuredClone(persisted.configRebaseProvenance);
+    clearPendingConfigTopLevelDeletions(config);
+    refreshUserCostOverlays(persisted);
+    return "created";
+  } catch (cause) {
+    if (published) throw new InitialConfigPublicationError("published", false, false, { cause });
+    throw cause;
+  }
+}
+
 export type PersistedConfigMutation<T> = {
   changed: boolean;
   value: T;
@@ -3650,6 +3884,13 @@ export type PersistedConfigMutation<T> = {
 export type PersistedConfigMutationOutcome<T> =
   | { status: "committed" | "unchanged"; value: T }
   | { status: "unavailable"; reason: "missing" | "invalid" | "conflict" };
+
+export class ConfigMutationValidationError extends Error {
+  constructor(readonly validationError: string) {
+    super(`Config mutation rejected: ${validationError}`);
+    this.name = "ConfigMutationValidationError";
+  }
+}
 
 const CONFIG_MUTATION_MAX_REBASE_ATTEMPTS = 3;
 let persistedConfigMutationBeforeCommitForTests: (() => void) | null = null;
@@ -3723,7 +3964,9 @@ export function mutatePersistedConfig<T>(
         commitBase.diagnostics.config,
         projectConfigRebaseProvenance(confirmedConfig),
       );
-      if (persistConfigUnlocked(projected)) bumpGenerationForCooperatingConfigWrite();
+      const validation = validateConfigCandidate(projected);
+      if (!validation.ok) throw new ConfigMutationValidationError(validation.error);
+      if (persistConfigUnlocked(projected, "mutation")) bumpGenerationForCooperatingConfigWrite();
       return { status: "committed", value: confirmed.value };
     }
     return { status: "unavailable", reason: "conflict" };
@@ -4078,7 +4321,7 @@ function readPersistedServerBinding(
  *   conflict keeps the live value;
  * - a provider or custom-model row deleted on disk stays deleted even if stale
  *   live state edited that same row;
- * - file missing/unreadable → save what we have, no throw.
+ * - missing file → save what we have; invalid existing file → fail closed.
  *
  * Custom-model rows are merged by their stable `id`, preserving independent
  * edits and deletions across stale whole-config saves.
@@ -4152,10 +4395,10 @@ export function saveConfigPreservingClaudeCode(config: OcxConfig): void {
       const persistedConfig: OcxConfig = { ...projectedConfig, port: persistedBinding.port };
       if (persistedBinding.hostname === undefined) delete persistedConfig.hostname;
       else persistedConfig.hostname = persistedBinding.hostname;
-      if (persistConfigUnlocked(persistedConfig)) bumpGenerationForCooperatingConfigWrite();
+      if (persistConfigUnlocked(persistedConfig, "mutation")) bumpGenerationForCooperatingConfigWrite();
       persistedLiveServerBinding.set(config, persistedBinding);
     } else {
-      if (persistConfigUnlocked(projectedConfig)) bumpGenerationForCooperatingConfigWrite();
+      if (persistConfigUnlocked(projectedConfig, "mutation")) bumpGenerationForCooperatingConfigWrite();
     }
     adoptCustomModelCatalogMigration(config, projectedConfig);
     if (claudeCodeBaseline.has(config)) {
