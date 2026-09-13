@@ -15,7 +15,10 @@ export function effectiveProviderAlias(
   if (config?.providers) {
     const lower = regAlias.toLowerCase();
     const claimedByOther = Object.entries(config.providers).some(([name, p]) =>
-      name !== providerName && typeof p.alias === "string" && p.alias.trim().toLowerCase() === lower
+      name !== providerName && (
+        name.toLowerCase() === lower
+        || (typeof p.alias === "string" && p.alias.trim().toLowerCase() === lower)
+      )
     );
     if (claimedByOther) return undefined;
   }
@@ -48,7 +51,11 @@ export const DEFAULT_MODEL_ALIASES: ReadonlyArray<{ match: RegExp; alias: string
   { match: /^claude-haiku/, alias: "haiku" },
   { match: /^gemini-3(?:\.\d+)?-pro/, alias: "g3p" },
   { match: /^gemini-3(?:\.\d+)?-flash/, alias: "g3f" },
+  // Ordered before the V4 rule on purpose: `builtinRule` takes the first match, and
+  // `/^deepseek-v4/` also matches `deepseek-v4.1-flash`.
+  { match: /^deepseek-v4\.1/, alias: "ds41" },
   { match: /^deepseek-v4/, alias: "ds4" },
+  { match: /^deepseek-flash/, alias: "dsf" },
   { match: /^grok-4/, alias: "grok" },
 ];
 

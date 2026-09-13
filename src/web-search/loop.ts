@@ -3,7 +3,8 @@ import type { AdapterEvent, OcxMessage, OcxParsedRequest, OcxProviderConfig, Ocx
 import { namespacedToolName, toolChoiceToolPredicate } from "../types";
 import { cloneProviderOpaqueToolCallMetadata } from "../responses/provider-opaque-metadata";
 import type { AttemptRecoveryKind } from "../usage/log";
-import { bridgeToResponsesSSE, diagnoseAdapterEvent, type BridgeDiagnosticContext } from "../bridge";
+import { isTruncatedStopReason } from "../responses/truncated-stop-reason";
+import { bridgeToResponsesSSE } from "../bridge";
 import { runWebSearch, type SidecarOutcome, type SidecarOutcomeRecorder, type SidecarSettings } from "./executor";
 import { runAnthropicWebSearch } from "./anthropic-executor";
 import { runXaiWebSearch, type XaiSearchOptions } from "./xai-executor";
@@ -230,6 +231,24 @@ function forcedAnswerNudge(): OcxMessage {
   };
 }
 
+/**
+ * Transient developer-role nudge for the ONE recovery pass after a forced answer came back empty.
+ * The recovery also removes every tool, so the model has nothing to call and can only return text;
+ * this turn says so explicitly rather than relying on the removal alone. Like {@link forcedAnswerNudge}
+ * it is iteration-local and never touches the persisted `messages`.
+ */
+function forcedAnswerRetryNudge(): OcxMessage {
+  return {
+    role: "developer",
+    content:
+      "Your previous response contained no usable answer. Web search has finished for this turn and " +
+      "no tools are available for this response. Answer the user's question now in assistant text, " +
+      "using the web search results already gathered above. If those results are insufficient, say " +
+      "what is missing instead of returning an empty response.",
+    timestamp: Date.now(),
+  };
+}
+
 function jsonError(status: number, message: string): Response {
   return new Response(JSON.stringify({ error: { message, type: "upstream_error", code: null } }), {
     status,
@@ -301,8 +320,6 @@ export interface WebSearchLoopDeps {
   onUsage?: (usage: OcxUsage | undefined) => void;
   /** Observe the exact adapter request selected for each routed-model iteration. */
   onRequestBuilt?: (request: AdapterRequest) => void;
-  /** Validate the final adapter before every cached replay or request build. */
-  validateAdapter?: (parsed: OcxParsedRequest, adapter: ProviderAdapter) => void;
   /** Request-scoped executor retains the core's selection binding across loop retries. */
   fetchForRequest?: (request: AdapterRequest, parsed: OcxParsedRequest) => typeof globalThis.fetch;
   /** Called before each routed-model dispatch in the loop, for attempt telemetry. Same-target 429 replays pass the `rate-limit-429` recovery kind. */
@@ -325,8 +342,6 @@ export interface WebSearchLoopDeps {
   retryOn429Policy?: Required<RateLimitRetryPolicy> | null;
   /** Called only when the final bridged Responses stream reaches completed or incomplete. */
   onCompletedResponse?: (response: Record<string, unknown>) => void;
-  /** Internal, opt-in structural stream diagnostics shared with the final bridge. */
-  diagnostic?: BridgeDiagnosticContext;
 }
 
 /**
@@ -374,7 +389,9 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
   const signal = internalAbort.signal;
 
   // Hard iteration bound (termination safety net); forceAnswer normally ends the loop sooner.
-  const HARD_CAP = maxSearches + 2;
+  // One iteration beyond the forced answer is reserved for its empty-answer recovery below.
+  const HARD_CAP = maxSearches + 3;
+  let emptyAnswerRetries = 0;
   const connectTimeoutMs = deps.connectTimeoutMs ?? 200_000;
   const routedModelStallTimeoutMs = deps.routedModelStallTimeoutMs ?? 200_000;
 
@@ -411,12 +428,19 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
     // ignores what the search found, which reads to the user as "the search did nothing". Nudge it
     // (iteration-locally — never mutate the shared `messages`) to actually use the gathered results.
     // Only when a REAL search ran (executedSearchCount, not empty-query/limit/repeat placeholders).
-    const iterMessages: OcxMessage[] = forceAnswer && executedSearchCount > 0
+    let iterMessages: OcxMessage[] = forceAnswer && executedSearchCount > 0
       ? [...messages, forcedAnswerNudge()]
       : messages;
+    // #1001 follow-up: the recovery pass for an empty forced answer. Removing every tool leaves the
+    // model nothing to call, and the extra developer turn asks it for the text it just failed to
+    // produce. `toolChoice: "none"` is what drops those definitions in the adapter, so the retry
+    // cannot repeat the same empty or tool-shaped response.
+    const recoveringEmptyAnswer = forceAnswer && emptyAnswerRetries > 0;
+    if (recoveringEmptyAnswer) iterMessages = [...iterMessages, forcedAnswerRetryNudge()];
     const iterParsed: OcxParsedRequest = {
       ...parsed, stream: true,
-      context: { ...parsed.context, messages: iterMessages, tools: forceAnswer ? toolsNoWebSearch : allTools },
+      ...(recoveringEmptyAnswer ? { options: { ...parsed.options, toolChoice: "none" as const } } : {}),
+      context: { ...parsed.context, messages: iterMessages, tools: recoveringEmptyAnswer ? [] : forceAnswer ? toolsNoWebSearch : allTools },
     };
     // One cumulative header deadline spans every pool-key 429 rotation in this model iteration.
     // clear() stops only its timer after final headers; the direct turn signal remains attached to
@@ -436,7 +460,6 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
        * header deadline. The caller owns same-target 429 replays and key rotation around it.
        */
       const fetchOnce = async (requestAdapter: ProviderAdapter, recovery?: AttemptRecoveryKind): Promise<IterationResponse> => {
-        deps.validateAdapter?.(iterParsed, requestAdapter);
         let request: AdapterRequest;
         if (cachedRequest !== undefined && cachedAdapter === requestAdapter) {
           request = cachedRequest;
@@ -483,6 +506,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
                 // replay on this leg eligible for the same dead socket the reset came from.
                 return requestFetch(request.url, applyUpstreamRecoveryInit({
                   method: request.method,
+                  redirect: "manual",
                   headers: h,
                   body: request.body,
                   signal: headerDeadline.signal,
@@ -617,10 +641,6 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
         inactivityTimeoutMs: routedModelStallTimeoutMs,
         translatorBudget,
       })) {
-        if (deps.diagnostic) {
-          deps.diagnostic.adapterName = prepared.responseAdapter.name;
-          diagnoseAdapterEvent(deps.diagnostic, event);
-        }
         if (event.type === "heartbeat") yield event;
         // Kiro's explicit-completion protocol marks ordinary assistant text as commentary while
         // it performs a bounded final-answer retry. That text is safe to surface immediately and
@@ -855,9 +875,34 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
               // An unterminated call flushes AFTER the terminal event, so find
               // the terminal rather than assuming it is last (#1001).
               const terminalEvent = split.passthrough.find(event => event.type === "done");
+              if (terminalEvent?.type === "done" && !split.hasMalformedToolCall
+                && isTruncatedStopReason(terminalEvent.stopReason)) {
+                // A provider refusal or truncation is authoritative, even without text.
+                // Preserve it once; neither an empty-answer retry nor a generic 502 applies.
+                yield* replay(split.passthrough.slice(split.streamedPassthroughCount));
+                return;
+              }
               if (terminalEvent?.type === "done"
                 && (split.hasMalformedToolCall
                   || (!split.hasRealToolCall && !hasVisibleAssistantText(split.passthrough)))) {
+                // #1001 fixed the silent success by failing here. A malformed call still fails: it
+                // reports a protocol problem, and replaying it would only re-ask an unwell upstream.
+                // Silence is different — it is recoverable, so retry exactly once with the results
+                // already gathered before failing the turn.
+                console.warn("[web-search-loop] unusable forced answer", JSON.stringify({
+                  model: parsed.modelId,
+                  recoveryAttempt: emptyAnswerRetries,
+                  searchCalls: split.calls.length,
+                  malformed: split.hasMalformedToolCall,
+                  stopReason: terminalEvent.stopReason,
+                  eventTypes: [...new Set(split.passthrough.map(event => event.type))],
+                }));
+                if (!split.hasMalformedToolCall && !split.hasRealToolCall && emptyAnswerRetries === 0) {
+                  emptyAnswerRetries++;
+                  console.warn("[web-search-loop] empty forced answer — retrying once without tools");
+                  yield { type: "heartbeat" };
+                  continue;
+                }
                 throw new LoopError(502, "forced-answer pass produced no usable assistant output");
               }
             }
@@ -916,7 +961,6 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
       ...(deps.onFirstOutput ? { onFirstOutput: deps.onFirstOutput } : {}),
       ...(deps.onUsage ? { onUsage: deps.onUsage } : {}),
       ...(deps.onCompletedResponse ? { onCompletedResponse: deps.onCompletedResponse } : {}),
-      ...(deps.diagnostic ? { diagnostic: deps.diagnostic } : {}),
     },
   );
   return new Response(sse, { headers: SSE_HEADERS });

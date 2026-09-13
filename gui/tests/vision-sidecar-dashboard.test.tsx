@@ -36,7 +36,7 @@ const initialSidecar: SidecarData = {
   },
   visionModels: [
     { value: "gpt-5.6-luna", label: "gpt-5.6-luna", backend: "openai", baseline: true },
-    { value: "gpt-5.4-mini", label: "gpt-5.4-mini", backend: "openai", baseline: true },
+    { value: "gpt-5.6-terra", label: "gpt-5.6-terra", backend: "openai", baseline: true },
   ],
 };
 
@@ -104,7 +104,7 @@ function harness(sidecar: SidecarData = initialSidecar) {
     visionModels: sidecar.visionModels ?? [],
     models: [
       { id: "gpt-5.6-luna", provider: "openai", namespaced: "gpt-5.6-luna", reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] },
-      { id: "gpt-5.4-mini", provider: "openai", namespaced: "gpt-5.4-mini", reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] },
+      { id: "gpt-5.6-terra", provider: "openai", namespaced: "gpt-5.6-terra", reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] },
     ],
     saveSidecar,
     shadowCall: { enabled: false, model: "" },
@@ -304,11 +304,11 @@ test("choosing a model from Off sends enabled:true plus that model and backend",
   const { d, patches } = harness({ ...initialSidecar, vision: { ...initialSidecar.vision, enabled: false } });
   await mount(d);
   await act(async () => { modelTrigger().click(); });
-  const next = pickOption("gpt-5.4-mini");
+  const next = pickOption("gpt-5.6-terra");
   expect(next).toBeTruthy();
   await act(async () => { next!.click(); });
   expect(patches).toEqual([
-    { vision: { model: "gpt-5.4-mini", backend: "openai", reasoning: "medium", enabled: true } },
+    { vision: { model: "gpt-5.6-terra", backend: "openai", reasoning: "medium", enabled: true } },
   ]);
 });
 
@@ -369,12 +369,12 @@ test("model and reasoning saves still omit enabled, limit, and timeout", async (
   ) as HTMLButtonElement;
 
   await act(async () => { modelTrigger.click(); });
-  const nextModel = pickOption("gpt-5.4-mini");
+  const nextModel = pickOption("gpt-5.6-terra");
   expect(nextModel).toBeTruthy();
   await act(async () => { nextModel!.click(); });
   expect(patches).toHaveLength(1);
   expect(patches[0]).toEqual({
-    vision: { model: "gpt-5.4-mini", backend: "openai", reasoning: "medium" },
+    vision: { model: "gpt-5.6-terra", backend: "openai", reasoning: "medium" },
   });
   assertVisionControlFieldsOmitted(patches[0]!);
 
@@ -409,6 +409,75 @@ test("Desktop login switch defaults off, preserves explicit opt-in, and disables
   expect(host.textContent).toContain(en["codexAuth.catalogRefreshPending"]);
 });
 
+test("client compaction switch defaults off, preserves explicit opt-in, and invokes its handler", async () => {
+  const { d } = harness();
+  let clicks = 0;
+  d.toggleCodexClientCompaction = async () => { clicks += 1; };
+  d.settings = { codexAutoStart: true, port: 10100, hostname: "127.0.0.1" };
+  await mount(d);
+  const toggle = () => host.querySelector<HTMLButtonElement>(`button[aria-label="${en["dash.codexClientCompaction"]}"]`)!;
+  expect(toggle().getAttribute("aria-pressed")).toBe("false");
+  d.settings.codexClientCompaction = true;
+  await mount(d);
+  expect(toggle().getAttribute("aria-pressed")).toBe("true");
+  await act(async () => { toggle().click(); });
+  expect(clicks).toBe(1);
+});
+
+test("client compaction preference survives a successful save followed by sync failure", async () => {
+  const originalFetch = globalThis.fetch;
+  const writes: Array<{ path: string; body: unknown }> = [];
+  let latest: Dash | undefined;
+  let saved = false;
+  const apiBase = "/client-compaction-sync-failure";
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (path.endsWith("/api/settings")) {
+      if (init?.method === "PUT") {
+        const body = JSON.parse(String(init.body));
+        writes.push({ path, body });
+        saved = body.codexClientCompaction;
+        return Response.json({ codexClientCompaction: saved, catalogRefreshPending: true });
+      }
+      return Response.json({
+        codexAutoStart: true,
+        codexClientCompaction: saved,
+        port: 10100,
+        hostname: "127.0.0.1",
+      });
+    }
+    if (path.endsWith("/api/sync")) {
+      writes.push({ path, body: init?.body });
+      return Response.json({ error: "sync unavailable" }, { status: 503 });
+    }
+    return Response.json({}, { status: 503 });
+  }) as typeof fetch;
+  function Harness() {
+    const data = useDashboardData(apiBase);
+    useEffect(() => { latest = data; }, [data]);
+    return null;
+  }
+  try {
+    const { createRoot } = await import("react-dom/client");
+    await act(async () => {
+      root = createRoot(host);
+      root.render(<LanguageProvider><Harness /></LanguageProvider>);
+    });
+    await act(async () => { await latest!.toggleCodexClientCompaction(); });
+    expect(writes).toEqual([
+      { path: `${apiBase}/api/settings`, body: { codexClientCompaction: true } },
+      { path: `${apiBase}/api/sync`, body: undefined },
+    ]);
+    expect(latest?.settings?.codexClientCompaction).toBe(true);
+    expect(latest?.settings?.catalogRefreshPending).toBe(true);
+    expect(latest?.syncError).toBe("sync unavailable");
+  } finally {
+    await act(async () => { root?.unmount(); });
+    root = null;
+    globalThis.fetch = originalFetch;
+  }
+});
+
 
 test.each([undefined, false, true])("Desktop login preference %s persists before full sync; sync failure keeps the saved preference", async (initial) => {
   const originalFetch = globalThis.fetch;
@@ -428,7 +497,7 @@ test.each([undefined, false, true])("Desktop login preference %s persists before
       return Response.json({ codexAutoStart: body.codexAutoStart, catalogRefreshPending: false });
     }
     if (path.endsWith("/api/sync")) {
-      writes.push({ path, body: null });
+      writes.push({ path, body: init?.body });
       return Response.json({ error: "sync unavailable" }, { status: 503 });
     }
     if (path.endsWith("/api/settings")) {
@@ -451,7 +520,7 @@ test.each([undefined, false, true])("Desktop login preference %s persists before
     await act(async () => { await latest!.toggleCodexDesktopAuthless(); });
     expect(writes).toEqual([
       { path: `${apiBase}/api/settings`, body: { codexDesktopAuthless: !initial } },
-      { path: `${apiBase}/api/sync`, body: null },
+      { path: `${apiBase}/api/sync`, body: undefined },
     ]);
     expect(latest?.settings?.codexDesktopAuthless).toBe(!initial);
     expect(latest?.syncError).toBe("sync unavailable");

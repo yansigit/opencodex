@@ -80,8 +80,9 @@ guidance-сообщений, которые opencodex пишет сам, на о
 `injectionModel` достаточно, чтобы отобразить пользовательский prompt; если значение без селектора
 нельзя разрешить однозначно, `{{model}}` заменяется пустой строкой.
 
-На v1 opencodex внедряет только upstream-style proactive guidance о делегировании на уровнях
-effort `max` или `ultra`. Предпочитаемую модель, ростер, fallback list и custom prompt на v1 он
+На v1 opencodex внедряет тот же текст о проактивном делегировании, что и рекомендуемый пресет v2, только на уровнях effort `max` или `ultra`.
+Меняется только условие запуска: отдельный запрос на делегирование не требуется; инструкции пользователя, полномочия, рамки задачи и правила инструментов совместной работы остаются в силе.
+Предпочитаемую модель, ростер, fallback list и custom prompt на v1 он
 не добавляет.
 
 Опция `syncCodexSubagentDefaults`, выключенная по умолчанию, отделена от guidance. Когда
@@ -170,7 +171,7 @@ ocx v2 threads 8
 ocx agent status
 ocx agent injection set --model anthropic/claude-sonnet-5 --effort xhigh
 ocx agent subagents set gpt-5.6-sol,anthropic/claude-sonnet-5
-ocx agent fallback set gpt-5.4-mini,xai/grok-4.5 --poll-ms 60000
+ocx agent fallback set gpt-5.6-luna,xai/grok-4.5 --poll-ms 60000
 ocx agent effort set --subagent max
 ```
 

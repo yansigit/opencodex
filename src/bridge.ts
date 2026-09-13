@@ -749,16 +749,13 @@ export function bridgeToResponsesSSE(
       const closeCurrentRawReasoning = () => {
         if (!currentRawReasoning) return;
         rawReasoningForNextToolCall = currentRawReasoning.text;
-        emit("response.reasoning_summary_text.done", {
-          item_id: currentRawReasoning.itemId, output_index: currentRawReasoning.outputIndex, summary_index: 0, text: currentRawReasoning.text,
-        });
-        emit("response.reasoning_summary_part.done", {
-          item_id: currentRawReasoning.itemId, output_index: currentRawReasoning.outputIndex, summary_index: 0,
-          part: { type: "summary_text", text: currentRawReasoning.text },
+        emit("response.reasoning_text.done", {
+          item_id: currentRawReasoning.itemId, output_index: currentRawReasoning.outputIndex, content_index: 0, text: currentRawReasoning.text,
         });
         const item = {
           type: "reasoning", id: currentRawReasoning.itemId,
-          summary: [{ type: "summary_text", text: currentRawReasoning.text }],
+          summary: [] as never[],
+          content: [{ type: "reasoning_text", text: currentRawReasoning.text }],
         };
         emit("response.output_item.done", { output_index: currentRawReasoning.outputIndex, item });
         retainFinishedItem(item as OutputItem, currentRawReasoning.textBytes, "reasoning");
@@ -1208,10 +1205,6 @@ export function bridgeToResponsesSSE(
                 const itemId = `rs_${uuid()}`;
                 const item = { type: "reasoning", id: itemId, summary: [] as { type: string; text: string }[] };
                 emit("response.output_item.added", { output_index: outputIndex, item });
-                emit("response.reasoning_summary_part.added", {
-                  item_id: itemId, output_index: outputIndex, summary_index: 0,
-                  part: { type: "summary_text", text: "" },
-                });
                 currentRawReasoning = { itemId, outputIndex, text: "", textBytes: 0 };
               }
               ({ value: currentRawReasoning.text, bytes: currentRawReasoning.textBytes } = appendString(
@@ -1220,9 +1213,12 @@ export function bridgeToResponsesSSE(
                 event.text,
                 "reasoning",
               ));
-              emit("response.reasoning_summary_text.delta", {
+              // Raw reasoning (openai-chat reasoning_content, kiro tags) rides the CONTENT
+              // channel. Clients control raw-reasoning display; this text is not a
+              // provider-authored summary.
+              emit("response.reasoning_text.delta", {
                 item_id: currentRawReasoning.itemId, output_index: currentRawReasoning.outputIndex,
-                summary_index: 0, delta: event.text,
+                content_index: 0, delta: event.text,
               });
               break;
             }
@@ -1390,8 +1386,13 @@ export function bridgeToResponsesSSE(
               if (currentReasoning) closeCurrentReasoning();
               if (currentRawReasoning) closeCurrentRawReasoning();
               flushHiddenRawReasoning();
-              if (currentToolCall) closeCurrentToolCall();
-              if (currentWebSearch) closeCurrentWebSearch("completed", []);
+              if (currentToolCall) {
+                if (isTruncatedStopReason(event.stopReason)) failCurrentToolCall();
+                else closeCurrentToolCall();
+              }
+              // A search still in flight when upstream truncates never returned results, so it
+              // takes the same "failed" status as the error/incomplete terminals below.
+              if (currentWebSearch) closeCurrentWebSearch(isTruncatedStopReason(event.stopReason) ? "failed" : "completed", []);
               releasePendingWebSources();
               // Redacted-only turns (or hidden thinking without a trailing signature event) still
               // need their envelope-only reasoning item so the blocks replay next turn.
@@ -1877,7 +1878,8 @@ function buildResponseJSONWithBudget(
     }
     pushOutput({
       type: "reasoning", id: `rs_${uuid()}`,
-      summary: [{ type: "summary_text", text: currentRawReasoning }],
+      summary: [],
+      content: [{ type: "reasoning_text", text: currentRawReasoning }],
     }, currentRawReasoningBytes, "reasoning");
     currentRawReasoning = "";
     currentRawReasoningBytes = 0;
@@ -2152,7 +2154,10 @@ function buildResponseJSONWithBudget(
   // must one left open by a stream that stopped without any terminal at all. That case previously
   // fell through to "completed", handing back a function_call whose arguments were half-written
   // JSON, inside a turn also marked completed.
-  if (currentToolCallId) flushToolCall(errorEvent || incompleteEvent || !sawTerminal ? "incomplete" : "completed");
+  if (currentToolCallId) {
+    flushToolCall(errorEvent || incompleteEvent || !sawTerminal || isTruncatedStopReason(rawStopReason)
+      ? "incomplete" : "completed");
+  }
   if (batchKiroRedacted) {
     // pushOutput reserves the item itself and releases the retained raw blob it replaces.
     pushOutput({

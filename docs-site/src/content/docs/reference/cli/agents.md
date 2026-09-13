@@ -33,6 +33,27 @@ ocx agent sidecar web --list
 ocx agent sidecar web --model gpt-5.6-luna
 ```
 
+### `ocx effort [status|set|clear]`
+
+Inspect or change main and subagent reasoning-effort caps through the live proxy, or the local
+configuration when no proxy is available. Cap values are `low`, `medium`, `high`, `xhigh`, `max`,
+and `ultra`; `-` clears the selected cap. `none` and `minimal` are not cap levels and are rejected
+before probing the proxy or submitting an update, including when another option in the same command is valid.
+They remain valid for `--injection`, which sets the separate injection effort rather than a cap.
+
+```bash
+ocx effort status --json
+ocx effort set --main high --subagent low
+ocx effort set --subagent -
+```
+
+Status preserves existing stored/runtime cap values and reports unsupported values in `warnings`
+(an empty array when none are unsupported). The same warnings appear in human output and name the
+field that is ignored with a correction command. Status never repairs or rewrites those values.
+An ignored subagent field does not remove a valid main cap. `ocx effort clear` clears both caps
+while retaining the separate injection-effort setting. See [Sub-agent surfaces](/guides/sub-agent-surface/)
+for the request surfaces where caps apply.
+
 ### `ocx v2 <status|on|off|mode <v1|default|v2>|keep-native-v1 <on|off>|threads <n>|mode-hint <text|--clear>>`
 
 Manage the Codex `multi_agent_v2` feature flag and the three-state multi-agent surface mode.
@@ -141,6 +162,11 @@ separately, and requests with no matching price row are counted as
 ocx usage --range today --provider xai
 ```
 
+When some usage records cannot be included, human output warns, including when there are zero readable rows.
+Any displayed totals reflect readable records only. If a filter has no readable matches, the output shows
+the warning and guidance instead of total lines; skipped records may contain matches.
+`--json` preserves the response-level `usageIncomplete` diagnostic and reason.
+
 ### `ocx debug <provider|usage|injection|claude> <on|off|status|reset|logs [-f]>`
 
 Read or change runtime debug overrides through the running proxy's management API.
@@ -155,37 +181,6 @@ ocx debug usage logs [-f|--follow]
 With no scope, `ocx debug` prints usage and, when the proxy is stopped, the next-start environment
 defaults. Provider debug defaults from `OCX_DEBUG=1` (legacy `OCX_DEBUG_FRAMES=1` also works); usage
 debug defaults from `OPENCODEX_USAGE_DEBUG=1`.
-
-#### Capturing a routed-provider trace
-
-Capture one unchanged reproduction so the request, route, model, and tool catalog stay comparable:
-
-```bash
-ocx debug provider on
-grok -m <same-model> -p '<same reproduction prompt>'
-ocx debug provider logs
-ocx debug provider off
-```
-
-Replace the placeholders with the exact client command, route, model, and tools that showed the
-problem; make this one reproduction unchanged.
-
-Share only the content-free fingerprint lines beginning with `[ocx:<adapter>:stream]` and, when
-present, the aggregate `[ocx:openai-chat:tool-catalog]` line. Do not share the other provider-debug
-output: it can include request metadata or provider messages. Stream records use `stage: "adapter"`
-for events emitted by the provider adapter and `stage: "bridge"` for events observed at the
-Responses bridge. Compare `sequence`, `eventType`, `requestId`, `attempt`, and `recovery` to find
-where an event disappears or repeats. `eventType: "assistant_boundary"` marks the internal boundary
-before a one-shot continuation; a changed `attempt` or `recovery` identifies the recovery path.
-
-For Grok tool catalogs, `declared`, `emitted`, and `omitted` are aggregate counts after tool-choice
-filtering. `omissionCause: "xai_schema_not_lossless"` means the CLI proxy could not preserve a
-schema losslessly; it is evidence about the adapter boundary, not an automatic behavior change.
-
-Fingerprints are process-local, content-free correlation aids: identical values correlate only while
-that proxy process keeps its random key, and they are not durable identifiers. Disable provider
-debug with `ocx debug provider off` after capture. A live fingerprint trace selects the next
-cause-specific branch; this workflow does not promise a fix before that evidence exists.
 
 ## API access
 
@@ -212,64 +207,6 @@ Ensure the proxy is running, then launch Claude Code with `ANTHROPIC_BASE_URL`,
 `config.claudeCode`. Routed models appear in the native `/model` picker through stable slot aliases
 with Claude Code 2.1.129 or newer. On older versions, select with `ANTHROPIC_MODEL` or `/model <id>`.
 User-exported `ANTHROPIC_*` variables always take precedence.
-
-### Claude Code certification
-
-`bun run certify:claude` runs a bounded, hermetic certification against an isolated
-Claude Code configuration and a deterministic loopback provider. It skips clearly when
-the `claude` executable is unavailable and reports a closed text summary by default;
-pass `--json` for the sanitized structured summary. The hermetic run includes streaming and
-tool-continuation checks in both output formats. It never reuses credentials or proxy settings.
-
-Live certification requires both the `--confirm-live-provider-charges` flag and
-`OCX_ALLOW_CLAUDE_LIVE_CERT=1`, plus an exact stored provider/model and an explicit Claude
-budget (greater than zero and at most $5). The default `basic` scenario runs one tools-disabled
-streaming turn through an authenticated private loopback bridge. Optional scenarios exercise a
-real `Read` tool continuation, a Claude Code `Agent` subagent, or a moderate 128 KiB context input.
-Every scenario caps each outbound response at 256 tokens, enforces its own request/time limit and a
-768 KiB input ceiling, confines file tools to the ephemeral working directory, terminates the full
-Claude process tree on timeout, and disables
-Claude Code transport retries plus OpenCodex retry/failover/sidecars, and never persists prompts, responses, credentials, or raw
-errors. Live mode reuses the selected provider's stored authentication. The Claude budget is a
-client-side safety ceiling, not a provider invoice estimate; the request, input, and output limits
-are the provider-independent bounds. The context scenario verifies a substantial prompt crosses
-the real bridge; it is not a claim that the provider's advertised maximum context window was
-exhausted. Sanitized JSON reports include only aggregate diagnostics such as blocked request counts,
-whether retries were disabled, the terminal stream event, and whether the expected marker matched.
-There is no automatic persistence of results:
-
-```bash
-OCX_ALLOW_CLAUDE_LIVE_CERT=1 bun run certify:claude -- --live \
-  --provider <provider> --model <model> --max-budget-usd <amount> \
-  --confirm-live-provider-charges --json
-```
-
-Add `--scenario read-continuation`, `--scenario subagent`, or `--scenario long-context` to run one
-of the deeper checks. Run scenarios separately so each invocation has an explicit spend ceiling and
-an independently attributable result. A model that is available only through live catalog discovery
-may cause one authenticated, read-only model-list request before the inference limits begin; the JSON
-report identifies that with `discoveryPerformed`.
-
-The optional `high-context` tier is a distinct, fail-closed live certification (not the 128 KiB
-long-context smoke). It sends exactly one streaming request with a deterministic 900,000-byte
-punctuation-rich prompt, 64 output tokens, a 300-second timeout, and no tools or retries. It runs
-with a separate 1.5 MiB raw-request ceiling and only when both additive gates are present:
-`--confirm-live-high-context-costs` and
-`OCX_ALLOW_CLAUDE_HIGH_CONTEXT_CERT=1` (alongside the ordinary live consent gates). Preflight
-requires an authoritative catalog context window of at least 1,000,000 tokens from live, registry,
-or snapshot metadata; otherwise it skips with `capacity_undetermined` without making an inference
-request. Upstream usage must be authoritative (not estimated) and report at least 400,000 input
-tokens, and the response must contain the exact high-context marker.
-
-```bash
-OCX_ALLOW_CLAUDE_LIVE_CERT=1 OCX_ALLOW_CLAUDE_HIGH_CONTEXT_CERT=1 \
-bun run certify:claude -- --live --scenario high-context \
-  --provider <provider> --model <model> --max-budget-usd <amount> \
-  --confirm-live-provider-charges --confirm-live-high-context-costs --json
-```
-
-The ordinary `long-context` scenario remains the lower-cost 128 KiB smoke check and does not prove
-that a provider supports a million-token context window.
 
 Claude Desktop profile commands are:
 
@@ -303,7 +240,7 @@ Manage and apply the Grok Build model fence.
 
 ## Client config export
 
-### `ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|prime|aside|raycast>`
+### `ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|prime|aside|raycast|omo>`
 
 Print a client config wired to the running proxy. The command serializes the
 `opencodex` provider block — base URL, model list, and the client's credential
@@ -314,7 +251,7 @@ models Codex can currently see.
 
 | Flag | Action |
 | --- | --- |
-| `--client <opencode\|pi\|omp\|hermes\|openclaw\|kimi\|gajae\|dsh\|mcode\|zcode\|prime\|aside\|raycast>` | Required. Selects the client config dialect. |
+| `--client <opencode\|pi\|omp\|hermes\|openclaw\|kimi\|gajae\|dsh\|mcode\|zcode\|prime\|aside\|raycast\|omo>` | Required. Selects the client config dialect. |
 | `--json` | Print the generated document as JSON on stdout for scripts. This is JSON even when the selected client's native format is YAML, TOML, or JSON5. |
 | `--out <path>` | Write the client's native config format to `<path>`. Refuses to replace an existing file. |
 | `--force` | Allow `--out` to replace an existing file. |
@@ -345,6 +282,7 @@ client applies its own defaults for those).
 | `prime` | `~/.prime/agent/models.json` (`PRIME_AGENT_CODING_AGENT_DIR` wins when set; a relative value is refused) | `prime-models.json` | none — loopback placeholder |
 | `aside` | `~/.aside/u/<account>/models.json` for the account Aside's own `accounts.json` names as current; an unreadable manifest is refused rather than defaulting to an account | `aside-models.json` | none — loopback placeholder |
 | `raycast` | `~/.config/raycast/ai/providers.yaml` on macOS and Windows alike (Raycast does not honor `XDG_CONFIG_HOME`) | `raycast-providers.yaml` | none — loopback only, no `api_keys` entry is written |
+| `omo` | `~/.omo/agent/models.json` (`OMO_CODING_AGENT_DIR`, then `SENPI_CODING_AGENT_DIR`, then `PI_CODING_AGENT_DIR` win in that order when set; a relative value is refused) | `omo-models.json` | none — loopback placeholder |
 
 The managed DSH export requires DSH 0.1.0-rc.6 or newer and owns only
 `llm-pi-ai.providers.opencodex`. DSH hot reloads that provider; the user's default model and
@@ -396,8 +334,8 @@ the proxy binds beyond loopback; see
 [Remote access](/reference/configuration/#remote-access) for how admission keys are issued. Keys for
 the upstream providers themselves are a separate thing entirely, configured per
 [Providers](/guides/providers/).
-Gajae is the exception: `OPENCODEX_GAJAE_API_KEY` fills its provider credential from the
-environment, but its schema cannot send the remote admission header, so the generated Gajae
+gjc is the exception: `OPENCODEX_GAJAE_API_KEY` fills its provider credential from the
+environment, but its schema cannot send the remote admission header, so the generated gjc
 integration remains loopback-only.
 
 The same payload is served by `GET /api/client-config` and rendered on the dashboard's API tab, so
@@ -438,6 +376,8 @@ and are never classified as managed.
 Inspect and safely modify validated OpenCodex configuration. `show` and `get` mask secrets. Import
 validates before writing and requires `--yes`.
 
-#### Claude Code compatibility diagnostics
+### Usage from a connected client
 
-`ocx claude` warns but does not block launch below **2.1.201**. Upgrade with `npm install -g @anthropic-ai/claude-code`; the same state is available in `ocx doctor` and `ocx status --json`. This advisory floor is separate from the **2.1.129** `/model` picker capability.
+`ocx usage` reads the connected hub with this client's enrolled data key. Human output identifies the hub source and client-key scope; `--json` returns the same scoped data. Range, surface, provider/model filters and custom `--since`/`--until` bounds remain available. Account breakdowns and other clients' records are not shared. An old or unavailable hub produces an explicit error instead of substituting local usage; upgrade the hub if it does not support this read.
+
+The read-only data-plane endpoint is `GET /v1/usage`, using `x-opencodex-api-key` with a configured client key. Environment-wide and admin keys are refused. It accepts `range`, `surface`, `provider`, `model`, `since`, and `until`; unknown/repeated options and caller-selected key IDs are rejected. Oversized skipped rows retain the explicit incomplete-history warning.

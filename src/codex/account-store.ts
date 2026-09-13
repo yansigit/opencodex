@@ -13,6 +13,8 @@ import {
 import { assertNotRealHomeUnderTest } from "../lib/test-home-guard";
 import type { CodexAccountCredentialRecord, CodexAccountCredentials } from "../types";
 import { advanceCodexCredentialMutationEpoch } from "./credential-mutation-epoch";
+import { isValidCodexAccountId } from "./account-id";
+import type { PoolQuotaWriter } from "./quota-types";
 import { CODEX_REFRESH_FLIGHT_CEILING_MS } from "./quota-recovery-timing";
 
 type LegacyCodexAccountStore = Record<string, CodexAccountCredentials>;
@@ -58,7 +60,9 @@ function isCredentialRecord(value: unknown): value is CodexAccountCredentialReco
     && (value.replacedAt === undefined || typeof value.replacedAt === "number")
     && (value.lastCodexValidatedAt === undefined || typeof value.lastCodexValidatedAt === "number")
     && (value.lastCodexValidationStatus === undefined || value.lastCodexValidationStatus === "ok" || value.lastCodexValidationStatus === "failed")
-    && (value.lastCodexValidationError === undefined || typeof value.lastCodexValidationError === "string");
+    && (value.lastCodexValidationError === undefined || typeof value.lastCodexValidationError === "string")
+    && (value.codexValidationPending === undefined || typeof value.codexValidationPending === "boolean")
+    && (value.lastCodexValidationTerminal === undefined || typeof value.lastCodexValidationTerminal === "boolean");
 }
 
 export function refreshGrantFingerprintForToken(refreshToken: string): string {
@@ -118,11 +122,21 @@ function persistCredentialMutation(store: CodexAccountStore): void {
   advanceCodexCredentialMutationEpoch();
 }
 
+/**
+ * Validation metadata that survives a credential write.
+ *
+ * `lastCodexValidationTerminal` is deliberately NOT in this list. Every credential write —
+ * re-login, the CAS refresh commit, same-grant alias propagation — rebuilds the record from this
+ * pick list, so leaving the marker out is what makes a successful refresh or a re-authentication
+ * erase a terminal verdict. Both events disprove "the grant was revoked", and a verdict that
+ * could only ever be set would brand an account dead forever on one spurious `invalid_grant`.
+ */
 function preservedValidationMetadata(record: CodexAccountCredentialRecord | undefined): Pick<
   CodexAccountCredentialRecord,
-  "lastCodexValidatedAt" | "lastCodexValidationStatus" | "lastCodexValidationError"
+  "lastCodexValidatedAt" | "lastCodexValidationStatus" | "lastCodexValidationError" | "codexValidationPending"
 > {
   return {
+    ...(record?.codexValidationPending === true ? { codexValidationPending: true } : {}),
     ...(record?.lastCodexValidatedAt !== undefined ? { lastCodexValidatedAt: record.lastCodexValidatedAt } : {}),
     ...(record?.lastCodexValidationStatus !== undefined ? { lastCodexValidationStatus: record.lastCodexValidationStatus } : {}),
     ...(record?.lastCodexValidationError !== undefined ? { lastCodexValidationError: record.lastCodexValidationError } : {}),
@@ -135,8 +149,12 @@ export function getCodexAccountCredential(id: string): CodexAccountCredentials |
   return record.credential ?? null;
 }
 
-export function saveCodexAccountCredential(id: string, cred: CodexAccountCredentials): void {
-  withCredentialMutationLockSync(() => {
+export function saveCodexAccountCredential(
+  id: string,
+  cred: CodexAccountCredentials,
+  options: { validationPending?: boolean } = {},
+): number {
+  return withCredentialMutationLockSync(() => {
     const store = loadCodexAccountRecordStore();
     const current = store[id];
     const refreshGrantFingerprint = current?.credential?.refreshToken === cred.refreshToken
@@ -147,38 +165,86 @@ export function saveCodexAccountCredential(id: string, cred: CodexAccountCredent
       generation: (current?.generation ?? 0) + 1,
       refreshGrantFingerprint,
       replacedAt: current ? Date.now() : undefined,
+      quotaHistoryIdentity: crypto.randomUUID(),
       ...preservedValidationMetadata(current),
+      ...(options.validationPending ? {
+        codexValidationPending: true,
+        lastCodexValidatedAt: undefined,
+        lastCodexValidationStatus: undefined,
+        lastCodexValidationError: undefined,
+      } : {}),
     };
     persistCredentialMutation(store);
+    return store[id].generation;
   });
 }
 
-export function markCodexAccountValidated(id: string, atMs: number = Date.now()): void {
+export function markCodexAccountValidated(id: string, atMs: number = Date.now(), generation?: number): void {
   withCredentialMutationLockSync(() => {
     const store = loadCodexAccountRecordStore();
     const current = store[id];
     if (!current || current.deletedAt != null || !current.credential) return;
+    if (current.codexValidationPending && generation === undefined) return;
+    if (generation !== undefined && current.generation !== generation) return;
     store[id] = {
       ...current,
       lastCodexValidatedAt: atMs,
       lastCodexValidationStatus: "ok",
       lastCodexValidationError: undefined,
+      codexValidationPending: undefined,
+      // A completed validation is the direct refutation of a terminal verdict, and this
+      // spread would otherwise carry the old marker forward.
+      lastCodexValidationTerminal: undefined,
     };
-    persist(store);
+    // Becoming routable invalidates credential-derived caches; a timestamp-only
+    // update on an already validated account preserves the existing epoch policy.
+    if (current.codexValidationPending) persistCredentialMutation(store);
+    else persist(store);
   });
 }
 
-export function markCodexAccountValidationFailed(id: string, reason: string): void {
-  withCredentialMutationLockSync(() => {
+export interface MarkCodexAccountValidationFailedOptions {
+  /**
+   * Write only while the stored record is still at this generation.
+   *
+   * A validation attempt is not atomic with the store: an operator can re-authenticate the
+   * account, or another writer can commit a refresh, while a probe is still in flight. Without
+   * this fence the late failure lands on whatever credential happens to be there and brands a
+   * freshly installed one dead. Declining to write is the safe direction — the failure cannot be
+   * attributed to a credential the caller never observed.
+   */
+  expectedGeneration?: number;
+  /** The grant itself is revoked or expired; only a re-login clears it. */
+  terminal?: boolean;
+}
+
+/** Returns whether the verdict was actually persisted (false when the fence declined it). */
+export function markCodexAccountValidationFailed(
+  id: string,
+  reason: string,
+  options: MarkCodexAccountValidationFailedOptions = {},
+): boolean {
+  return withCredentialMutationLockSync(() => {
     const store = loadCodexAccountRecordStore();
     const current = store[id];
-    if (!current || current.deletedAt != null || !current.credential) return;
+    if (!current || current.deletedAt != null || !current.credential) return false;
+    // Deferred validation is settled only by a caller that names the generation it observed.
+    // An unfenced write must never resolve a pending account, whichever verdict it carries.
+    if (current.codexValidationPending && options.expectedGeneration === undefined) return false;
+    if (options.expectedGeneration !== undefined && current.generation !== options.expectedGeneration) {
+      return false;
+    }
     store[id] = {
       ...current,
       lastCodexValidationStatus: "failed",
       lastCodexValidationError: reason,
+      // Only ever set here. A transient failure must not clear a terminal marker set earlier,
+      // and it must not invent one either, so the flag is written only when the caller proves
+      // the grant is dead.
+      ...(options.terminal ? { lastCodexValidationTerminal: true } : {}),
     };
     persist(store);
+    return true;
   });
 }
 
@@ -192,6 +258,75 @@ export function listCodexAccountIds(): string[] {
 
 export function readCodexAccountRecord(id: string): CodexAccountCredentialRecord | null {
   return loadCodexAccountRecordStore()[id] ?? null;
+}
+
+const QUOTA_HISTORY_IDENTITY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+function validQuotaHistoryIdentity(value: unknown): value is string {
+  return typeof value === "string" && QUOTA_HISTORY_IDENTITY_RE.test(value);
+}
+
+type DispatchedPoolCredential = Pick<CodexAccountCredentials, "accessToken" | "chatgptAccountId"> & { generation: number };
+
+function matchesDispatchedPoolCredential(record: CodexAccountCredentialRecord | undefined | null, dispatched: DispatchedPoolCredential): record is CodexAccountCredentialRecord & { credential: CodexAccountCredentials } {
+  return !!record?.credential && record.deletedAt == null
+    && dispatched.accessToken.length > 0 && dispatched.chatgptAccountId.length > 0
+    && Number.isSafeInteger(dispatched.generation) && dispatched.generation >= 0
+    && record.generation === dispatched.generation
+    && record.credential.accessToken === dispatched.accessToken
+    && record.credential.chatgptAccountId === dispatched.chatgptAccountId;
+}
+
+/** Optional evidence capture; a stale credential or unavailable store never gains a new writer. */
+export function capturePoolQuotaWriter(accountId: string, dispatched: DispatchedPoolCredential): PoolQuotaWriter | undefined {
+  if (!isValidCodexAccountId(accountId)) return undefined;
+  try {
+    const current = readCodexAccountRecord(accountId);
+    if (!matchesDispatchedPoolCredential(current, dispatched)) return undefined;
+    if (validQuotaHistoryIdentity(current.quotaHistoryIdentity)) {
+      return { accountId, credentialGeneration: dispatched.generation, historyIdentity: current.quotaHistoryIdentity };
+    }
+    return withCredentialMutationLockSync(() => {
+      const store = loadCodexAccountRecordStore();
+      const locked = store[accountId];
+      if (!matchesDispatchedPoolCredential(locked, dispatched)) return undefined;
+      if (!validQuotaHistoryIdentity(locked.quotaHistoryIdentity)) {
+        locked.quotaHistoryIdentity = crypto.randomUUID();
+        // Identity metadata is not a new credential; preserve generation and mutation epoch.
+        persist(store);
+      }
+      return { accountId, credentialGeneration: dispatched.generation, historyIdentity: locked.quotaHistoryIdentity };
+    });
+  } catch {
+    // History is optional evidence. Permission, lock and disk errors cannot fail inference.
+    return undefined;
+  }
+}
+
+/** Read-only retention identity; unlike capture this never initializes legacy metadata. */
+export function poolQuotaHistoryIdentity(accountId: string): string | undefined {
+  if (!isValidCodexAccountId(accountId)) return undefined;
+  try {
+    const record = readCodexAccountRecord(accountId);
+    return record?.credential && record.deletedAt == null && validQuotaHistoryIdentity(record.quotaHistoryIdentity)
+      ? record.quotaHistoryIdentity : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Recheck append admission after upstream I/O; refresh may retire a writer without erasing history. */
+export function isPoolQuotaWriterLive(writer: PoolQuotaWriter): boolean {
+  if (!isValidCodexAccountId(writer.accountId)) return false;
+  try {
+    const record = readCodexAccountRecord(writer.accountId);
+    return !!record?.credential && record.deletedAt == null
+      && record.generation === writer.credentialGeneration
+      && validQuotaHistoryIdentity(writer.historyIdentity)
+      && record.quotaHistoryIdentity === writer.historyIdentity;
+  } catch {
+    return false;
+  }
 }
 
 export function isCodexAccountGenerationLive(id: string, generation: number): boolean {
@@ -218,6 +353,8 @@ export function saveCodexAccountCredentialIfGeneration(
       generation: generation + 1,
       refreshGrantFingerprint,
       replacedAt: current.replacedAt,
+      quotaHistoryIdentity: current.credential.chatgptAccountId === cred.chatgptAccountId
+        ? current.quotaHistoryIdentity : crypto.randomUUID(),
       ...preservedValidationMetadata(current),
     };
     persistCredentialMutation(store);
@@ -277,6 +414,8 @@ export function commitRefreshedCodexCredentialWithAliases(
       generation: generation + 1,
       refreshGrantFingerprint,
       replacedAt: current.replacedAt,
+      quotaHistoryIdentity: current.credential.chatgptAccountId === cred.chatgptAccountId
+        ? current.quotaHistoryIdentity : crypto.randomUUID(),
       ...preservedValidationMetadata(current),
     };
 
@@ -291,6 +430,7 @@ export function commitRefreshedCodexCredentialWithAliases(
       priorFingerprint !== undefined
       && priorCredential.refreshToken !== cred.refreshToken
       && !!priorCredential.chatgptAccountId
+      && priorCredential.chatgptAccountId === cred.chatgptAccountId
     ) {
       for (const [aliasId, alias] of Object.entries(store)) {
         if (aliasId === id || alias.deletedAt != null || !alias.credential) continue;
@@ -306,6 +446,7 @@ export function commitRefreshedCodexCredentialWithAliases(
           generation: aliasGeneration,
           refreshGrantFingerprint,
           replacedAt: alias.replacedAt,
+          quotaHistoryIdentity: alias.quotaHistoryIdentity,
           ...preservedValidationMetadata(alias),
         };
         propagatedAliases.push({ id: aliasId, generation: aliasGeneration });
@@ -688,8 +829,13 @@ export async function forceRefreshCodexPoolToken(
   };
 }
 
-export async function getValidCodexToken(id: string): Promise<CodexTokenResult> {
-  const result = await resolveCodexToken(id);
+export async function getValidCodexToken(
+  id: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<CodexTokenResult> {
+  // Cancellation ends THIS caller's wait. A shared refresh already in flight keeps running for
+  // whoever else awaits it, which is what `awaitOwnCancellation` inside the resolver preserves.
+  const result = await resolveCodexToken(id, undefined, options.signal);
   return {
     accessToken: result.accessToken,
     chatgptAccountId: result.chatgptAccountId,

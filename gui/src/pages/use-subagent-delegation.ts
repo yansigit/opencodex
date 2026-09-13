@@ -22,11 +22,17 @@ export type DelegationPatch = {
 };
 
 /** Ultra mode (Proactive delegation for every model/effort) via /api/v2. */
+export type UltraModeHintRecommendation = {
+  text: string;
+  revision: string;
+};
+
 export type UltraModeState = {
   loaded?: boolean;
   keepNativeChatGptOnV1?: boolean;
   enabled: boolean;
   hintText: string | null;
+  recommendation: UltraModeHintRecommendation | null;
   multiAgentV2Enabled: boolean;
   /** The raw multi-agent mode; Subagents renders the v1/base/v2 switch from it. */
   multiAgentMode: "v1" | "default" | "v2";
@@ -36,6 +42,8 @@ export type UltraModePatch = {
   multiAgentModeHintText?: string | null;
   /** The v1/base/v2 switch. Models owns the catalog-side copy; this is the delegation-side one. */
   multiAgentMode?: "v1" | "default" | "v2";
+  /** Answers the one-time surface advisory in the same request as a mode change. */
+  multiAgentSurfaceAdvisoryAcknowledged?: true;
 };
 
 export type V2NativeParentOverrideState = {

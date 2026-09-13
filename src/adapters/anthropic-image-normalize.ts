@@ -68,6 +68,14 @@ export interface NormalizeTarget {
   mediaType: string;
   replace(data: string, mediaType: string): void;
   drop(note: string): void;
+  /**
+   * True when `drop` leaves the original bytes on the wire instead of removing or
+   * textifying them (openai-chat, which has no downstream guard that could re-attach a
+   * dropped image). The core normally stops counting a dropped target, which is correct
+   * only when the bytes actually leave. Here they do not, so those bytes keep counting
+   * toward the budget and the demotion loop keeps shrinking the images it still can.
+   */
+  retainsBytesOnDrop?: boolean;
 }
 
 export interface NormalizeTargetsOptions extends NormalizeOptions {
@@ -127,11 +135,17 @@ export async function normalizeImageTargets(targets: NormalizeTarget[], options:
       if (newestFirstIndex >= processLimit) continue;
       if (b64.length > MAX_INPUT_BASE64_LENGTH) {
         target.drop(BOMB_TEXT);
+        if (target.retainsBytesOnDrop) {
+          entries[i] = { target, sourceB64: b64, sourceMedia: target.mediaType.toLowerCase(), pos: TERMINAL_POS, size: b64.length, done: true };
+        }
         continue;
       }
       const dims = sniffImageDimensions(b64);
       if (dims && dims.width * dims.height > MAX_INPUT_PIXELS) {
         target.drop(BOMB_TEXT);
+        if (target.retainsBytesOnDrop) {
+          entries[i] = { target, sourceB64: b64, sourceMedia: target.mediaType.toLowerCase(), pos: TERMINAL_POS, size: b64.length, done: true };
+        }
         continue;
       }
       const sourceMedia = target.mediaType.toLowerCase();
@@ -139,6 +153,9 @@ export async function normalizeImageTargets(targets: NormalizeTarget[], options:
       const result = await processAt(b64, pos, sourceMedia, encode, validate);
       if (result.kind === "failed") {
         target.drop(UNDECODABLE_TEXT);
+        if (target.retainsBytesOnDrop) {
+          entries[i] = { target, sourceB64: b64, sourceMedia, pos: TERMINAL_POS, size: b64.length, done: true };
+        }
         continue;
       }
       let size = b64.length;
@@ -178,8 +195,14 @@ export async function normalizeImageTargets(targets: NormalizeTarget[], options:
     const result = await processAt(entry.sourceB64, entry.pos + 1, entry.sourceMedia, encode, validate);
     if (result.kind === "failed") {
       entry.target.drop(UNDECODABLE_TEXT);
-      sum -= entry.size;
-      entries[entries.indexOf(entry)] = null;
+      if (entry.target.retainsBytesOnDrop) {
+        // Bytes stay on the wire, so they stay in the total; mark it terminal so the
+        // loop moves on to a target it can still shrink instead of retrying this one.
+        entry.done = true;
+      } else {
+        sum -= entry.size;
+        entries[entries.indexOf(entry)] = null;
+      }
       continue;
     }
     let newSize = entry.size;
@@ -202,6 +225,11 @@ export async function normalizeImageTargets(targets: NormalizeTarget[], options:
       const e = entries[i];
       if (!e) continue;
       e.target.drop(OVERFLOW_DROP_TEXT);
+      if (e.target.retainsBytesOnDrop) {
+        // The drop left the bytes in place, so they still count and dropping another
+        // copy of this target would not help. Move on to one that can actually leave.
+        continue;
+      }
       sum -= e.size;
       entries[i] = null;
     }

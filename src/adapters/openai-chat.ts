@@ -1,7 +1,9 @@
-import type { AdapterRequest, ProviderAdapter } from "./base";
+import { hasShrinkableOpenAIChatImages, normalizeOpenAIChatImages } from "./openai-chat-images";
+import type { AdapterRequest, IncomingMeta, ProviderAdapter } from "./base";
 import type { AdapterEvent, OcxAssistantMessage, OcxContentPart, OcxMessage, OcxParsedRequest, OcxProviderConfig, OcxTextContent, OcxThinkingContent, OcxToolCall, OcxUsage } from "../types";
 import { isAllowedToolChoice, modelInList, namespacedToolName, resolveToolChoiceWireName, toolChoiceToolPredicate } from "../types";
 import { mapReasoningEffort, modelRecordValue } from "../reasoning-effort";
+import { registryEntryForProviderDestination } from "../providers/registry";
 import { debugProviderDiagnostic } from "../lib/debug";
 import { sseFieldValue } from "../lib/sse-decoder";
 import { isDebugEnabled } from "../lib/debug-settings";
@@ -27,7 +29,7 @@ import {
   type ResolvedFastPolicy,
 } from "../providers/fastwire";
 import { openaiChatCompletionsUrl } from "./openai-chat-url";
-import { stripResponsesOnlyEncryptedMarker } from "./responses-tool-schema";
+import { stripResponsesOnlyEncryptedMarker, stripUnicodePropertyPatterns } from "./responses-tool-schema";
 import { agentRouterDefaultHeaders, frameAgentRouterMessages } from "./agentrouter";
 import {
   isXaiSchemaTarget,
@@ -96,7 +98,14 @@ function openAIChatTransport(provider: OcxProviderConfig): {
   };
   if (hasCredential) headers.Authorization = `Bearer ${provider.apiKey}`;
   if (provider.headers) Object.assign(headers, provider.headers);
-  return { url: openaiChatCompletionsUrl(provider.baseUrl), headers, hasCredential };
+  // A configured relative path wins, mirroring how the Responses adapter honours
+  // `responsesPath`. An upstream can serve both wires under different prefixes, and a
+  // per-model wire override only swaps the adapter, so without this the opted-in Chat
+  // request would be sent to the Responses base with `/chat/completions` appended.
+  const url = provider.chatCompletionsPath === undefined
+    ? openaiChatCompletionsUrl(provider.baseUrl)
+    : `${provider.baseUrl.replace(/\/$/, "")}${provider.chatCompletionsPath}`;
+  return { url, headers, hasCredential };
 }
 
 /**
@@ -123,6 +132,10 @@ export function buildOpenAIChatPassthroughRequest(
   for (const field of CHAT_PASSTHROUGH_FIELDS) {
     if (rawBody[field] !== undefined) body[field] = rawBody[field];
   }
+  const rawEfforts = modelRecordValue(provider.modelReasoningEfforts, modelId) ?? provider.reasoningEfforts;
+  if (modelInList(provider.noReasoningModels, modelId) || rawEfforts?.length === 0) {
+    delete body.reasoning_effort;
+  }
 
   const openRouterRouting = resolveOpenRouterRouting(provider, modelId);
   if (openRouterRouting) body.provider = openRouterProviderPayload(openRouterRouting);
@@ -140,6 +153,16 @@ export function buildOpenAIChatPassthroughRequest(
   // ingress enforces exactly that. A prefix match here would strip response_format from
   // `<listed>:<tag>` siblings the operator never opted out, silently returning prose.
   if (provider.noStructuredOutputModels?.includes(modelId)) delete body.response_format;
+  // Narrower neighbour: the model takes `json_object` but rejects `json_schema`. Downgrade
+  // rather than drop, so a caller that asked for JSON still gets JSON. The type check also
+  // makes the kill switch above win without an else — after its `delete` there is no type
+  // left to match.
+  const passthroughFormat = body.response_format;
+  if (provider.noJsonSchemaModels?.includes(modelId)
+      && typeof passthroughFormat === "object" && passthroughFormat !== null
+      && (passthroughFormat as { type?: unknown }).type === "json_schema") {
+    body.response_format = { type: "json_object" };
+  }
 
   // Run the same complete Fast policy as the translated Chat path, including explicit
   // fastMode and foreign-tier handling. On inherited canonical Fast, the passthrough still
@@ -187,7 +210,7 @@ export function buildOpenAIChatPassthroughRequest(
       messageCount: Array.isArray(body.messages) ? body.messages.length : 0,
       toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
       hasCredential,
-      bodyBytes: new TextEncoder().encode(bodyJson).length,
+      bodyBytes: Buffer.byteLength(bodyJson, "utf8"),
     });
   }
 
@@ -716,10 +739,14 @@ function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProviderCon
   };
 
   const nativeOpenAI = isNativeOpenAIChatTarget(provider);
+  // Hoisting a newly appended reminder rewrites the reusable prompt prefix.
+  // Keep this compatibility exception on the destination/model tested with OCG.
+  const chronologicalSystem = parsed.modelId === "deepseek-v4.1-flash"
+    && registryEntryForProviderDestination(provider)?.id === "opencode-go";
   const toolCatalogNudge = shouldInjectNonOpenAIToolCatalogNudge(provider)
     ? buildNonOpenAIToolCatalogNudgeForTools(context.tools, options.toolChoice)
     : undefined;
-  const developerSystemParts = nativeOpenAI
+  const developerSystemParts = nativeOpenAI || chronologicalSystem
     ? []
     : context.messages
       .map(developerSystemText)
@@ -745,11 +772,15 @@ function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProviderCon
         const hasImages = parts?.some(p => p.type === "image") ?? false;
         let chatMsg: Record<string, unknown>;
         if (msg.role === "developer" && !hasImages) {
-          if (!nativeOpenAI) break;
+          if (!nativeOpenAI && !chronologicalSystem) break;
           const text = typeof msg.content === "string"
             ? msg.content
             : parts!.map(p => (p as OcxTextContent).text).join("");
-          chatMsg = { role: "developer", content: text };
+          // A non-text timeline part (video, for example) serializes to nothing here.
+          // The generic path drops such a message; the chronological exception must not
+          // turn it into an empty system message that some upstreams reject.
+          if (!nativeOpenAI && text.length === 0) break;
+          chatMsg = { role: nativeOpenAI ? "developer" : "system", content: text };
         } else if (typeof msg.content === "string") {
           chatMsg = { role: "user", content: msg.content };
         } else if (!hasImages) {
@@ -1331,7 +1362,7 @@ function toolsToChatFormat(parsed: OcxParsedRequest, provider: OcxProviderConfig
       : moonshotTarget
         ? normalizeMoonshotToolParameters(t.parameters)
         : ensureRootObjectType(t.parameters);
-    const parameters = stripResponsesOnlyEncryptedMarker(normalized);
+    const parameters = stripUnicodePropertyPatterns(stripResponsesOnlyEncryptedMarker(normalized));
 
     if (parameters === undefined) return [];
     return [{
@@ -1445,202 +1476,212 @@ export function createOpenAIChatAdapter(provider: OcxProviderConfig): ProviderAd
 
     formatErrorBody: formatOpenAIChatErrorBody,
 
-    buildRequest(parsed: OcxParsedRequest) {
+    buildRequest(parsed: OcxParsedRequest, incoming?: IncomingMeta) {
       lastRequestedModelId = parsed.modelId;
       const { url, headers, hasCredential } = openAIChatTransport(provider);
       const messages = frameAgentRouterMessages(provider.baseUrl, messagesToChatFormat(parsed, provider));
-      const tools = toolsToChatFormatForProvider(parsed, provider);
-      const toolChoice = toolChoiceToChatFormat(parsed.options.toolChoice, parsed.context.tools, provider);
+      const finish = (): AdapterRequest => {
+        const tools = toolsToChatFormatForProvider(parsed, provider);
+        const toolChoice = toolChoiceToChatFormat(parsed.options.toolChoice, parsed.context.tools, provider);
 
-      const body: Record<string, unknown> = {
-        model: provider.modelSuffixBracketStrip ? stripBracketedModelSuffix(parsed.modelId) : parsed.modelId,
-        messages,
-        stream: parsed.stream,
-      };
-      // A policy-produced canonical decision has already passed capability validation. Without
-      // that decision, a canonical caller value still requires an explicit true capability;
-      // unclassified Chat routes remain behind the caller-forwarding opt-in.
-      const serviceTier = parsed.options.serviceTier;
-      const tierDecision = parsed.options.tierDecision;
-      const canSerializeServiceTier = canSerializeOpenAIChatServiceTier(
-        provider,
-        parsed.modelId,
-        serviceTier,
-        tierDecision,
-      );
-      if (canSerializeServiceTier && serviceTier !== undefined) {
-        body.service_tier = serviceTier;
-      }
-      if (modelInList(provider.reasoningSplitModels, parsed.modelId)) body.reasoning_split = true;
-      const maxTokens = resolveMaxTokens(provider, parsed);
-      const openRouterRouting = resolveOpenRouterRouting(provider, parsed.modelId);
-      if (openRouterRouting) body.provider = openRouterProviderPayload(openRouterRouting);
-      const vercelRouting = resolveVercelGatewayRouting(provider, parsed.modelId);
-      if (vercelRouting) body.provider = vercelGatewayProviderPayload(vercelRouting);
-      if (tools) body.tools = tools;
-      if (tools && toolChoice !== undefined) {
-        body.tool_choice = modelInList(provider.autoToolChoiceOnlyModels, parsed.modelId)
-          ? (toolChoice === "none" ? "none" : "auto")
-          : toolChoice;
-      }
-      if (maxTokens !== undefined) body.max_tokens = maxTokens;
-      if (parsed.options.temperature !== undefined && !modelInList(provider.noTemperatureModels, parsed.modelId)) {
-        body.temperature = parsed.options.temperature;
-      }
-      if (parsed.options.topP !== undefined && !modelInList(provider.noTopPModels, parsed.modelId)) {
-        body.top_p = parsed.options.topP;
-      }
-      if (parsed.options.stopSequences !== undefined) body.stop = parsed.options.stopSequences;
-      const reasoningDisabled = modelInList(provider.noReasoningModels, parsed.modelId);
-      // Some gateways accept a reasoning-effort field on a plain turn but reject the
-      // effort + tools combination. `noReasoningModels` would fix that only by
-      // stripping reasoning everywhere, costing the model its whole picker. This keeps
-      // the ladder advertised and drops the wire field for tool-bearing requests only.
-      const omitReasoningEffortWithTools = !!tools
-        && modelInList(provider.omitReasoningEffortWithToolsModels, parsed.modelId);
-      const reasoningEffort = omitReasoningEffortWithTools
-        ? undefined
-        : mapReasoningEffort(provider, parsed.modelId, parsed.options.reasoning);
-      const nativeOpenAI = isNativeOpenAIChatTarget(provider);
-      let reasoningLog: AdapterRequest["reasoningLog"];
-      if (!reasoningDisabled && !omitReasoningEffortWithTools && provider.reasoningWireFormat === "gateway-object" && parsed.options.reasoning === "none") {
-        if (nativeOpenAI) {
-          body.reasoning_effort = "none";
-          reasoningLog = {
-            effectiveEffort: "none",
-            wireField: "reasoning_effort",
-            wireValue: "none",
-          };
-        } else {
-          body.reasoning = { enabled: false };
-          reasoningLog = {
-            effectiveEffort: "none",
-            wireField: "reasoning.enabled",
-            wireValue: false,
-          };
+        const body: Record<string, unknown> = {
+          model: provider.modelSuffixBracketStrip ? stripBracketedModelSuffix(parsed.modelId) : parsed.modelId,
+          messages,
+          stream: parsed.stream,
+        };
+        // A policy-produced canonical decision has already passed capability validation. Without
+        // that decision, a canonical caller value still requires an explicit true capability;
+        // unclassified Chat routes remain behind the caller-forwarding opt-in.
+        const serviceTier = parsed.options.serviceTier;
+        const tierDecision = parsed.options.tierDecision;
+        const canSerializeServiceTier = canSerializeOpenAIChatServiceTier(
+          provider,
+          parsed.modelId,
+          serviceTier,
+          tierDecision,
+        );
+        if (canSerializeServiceTier && serviceTier !== undefined) {
+          body.service_tier = serviceTier;
         }
-      } else if (reasoningEffort !== undefined) {
-        if (provider.reasoningWireFormat === "gateway-object") {
+        if (modelInList(provider.reasoningSplitModels, parsed.modelId)) body.reasoning_split = true;
+        const maxTokens = resolveMaxTokens(provider, parsed);
+        const openRouterRouting = resolveOpenRouterRouting(provider, parsed.modelId);
+        if (openRouterRouting) body.provider = openRouterProviderPayload(openRouterRouting);
+        const vercelRouting = resolveVercelGatewayRouting(provider, parsed.modelId);
+        if (vercelRouting) body.provider = vercelGatewayProviderPayload(vercelRouting);
+        if (tools) body.tools = tools;
+        if (tools && toolChoice !== undefined) {
+          body.tool_choice = modelInList(provider.autoToolChoiceOnlyModels, parsed.modelId)
+            ? (toolChoice === "none" ? "none" : "auto")
+            : toolChoice;
+        }
+        if (maxTokens !== undefined) body.max_tokens = maxTokens;
+        if (parsed.options.temperature !== undefined && !modelInList(provider.noTemperatureModels, parsed.modelId)) {
+          body.temperature = parsed.options.temperature;
+        }
+        if (parsed.options.topP !== undefined && !modelInList(provider.noTopPModels, parsed.modelId)) {
+          body.top_p = parsed.options.topP;
+        }
+        if (parsed.options.stopSequences !== undefined) body.stop = parsed.options.stopSequences;
+        const reasoningDisabled = modelInList(provider.noReasoningModels, parsed.modelId);
+        // Some gateways accept a reasoning-effort field on a plain turn but reject the
+        // effort + tools combination. `noReasoningModels` would fix that only by
+        // stripping reasoning everywhere, costing the model its whole picker. This keeps
+        // the ladder advertised and drops the wire field for tool-bearing requests only.
+        const omitReasoningEffortWithTools = !!tools
+          && modelInList(provider.omitReasoningEffortWithToolsModels, parsed.modelId);
+        const reasoningEffort = omitReasoningEffortWithTools
+          ? undefined
+          : mapReasoningEffort(provider, parsed.modelId, parsed.options.reasoning);
+        const nativeOpenAI = isNativeOpenAIChatTarget(provider);
+        let reasoningLog: AdapterRequest["reasoningLog"];
+        if (!reasoningDisabled && !omitReasoningEffortWithTools && provider.reasoningWireFormat === "gateway-object" && parsed.options.reasoning === "none") {
           if (nativeOpenAI) {
+            body.reasoning_effort = "none";
+            reasoningLog = {
+              effectiveEffort: "none",
+              wireField: "reasoning_effort",
+              wireValue: "none",
+            };
+          } else {
+            body.reasoning = { enabled: false };
+            reasoningLog = {
+              effectiveEffort: "none",
+              wireField: "reasoning.enabled",
+              wireValue: false,
+            };
+          }
+        } else if (reasoningEffort !== undefined) {
+          if (provider.reasoningWireFormat === "gateway-object") {
+            if (nativeOpenAI) {
+              body.reasoning_effort = reasoningEffort;
+              reasoningLog = {
+                effectiveEffort: reasoningEffort,
+                wireField: "reasoning_effort",
+                wireValue: reasoningEffort,
+              };
+            } else {
+              body.reasoning = { enabled: true, effort: reasoningEffort };
+              reasoningLog = {
+                effectiveEffort: reasoningEffort,
+                wireField: "reasoning.effort",
+                wireValue: reasoningEffort,
+              };
+            }
+          } else if (modelInList(provider.thinkingBudgetModels, parsed.modelId)) {
+            const budget = thinkingBudgetForEffort(parsed, reasoningEffort, maxTokens);
+            if (budget !== undefined) {
+              body.thinking_budget = budget;
+              reasoningLog = {
+                effectiveEffort: parsed.options.reasoning === "minimal" ? "minimal" : reasoningEffort,
+                wireField: "thinking_budget",
+                wireValue: budget,
+              };
+            }
+          } else if (modelInList(provider.thinkingToggleModels, parsed.modelId)) {
+            if (reasoningEffort === "enabled" || reasoningEffort === "disabled" || reasoningEffort === "adaptive") {
+              body.thinking = { type: reasoningEffort };
+              reasoningLog = {
+                effectiveEffort: reasoningEffort,
+                wireField: "thinking.type",
+                wireValue: reasoningEffort,
+              };
+            }
+          } else {
             body.reasoning_effort = reasoningEffort;
             reasoningLog = {
               effectiveEffort: reasoningEffort,
               wireField: "reasoning_effort",
               wireValue: reasoningEffort,
             };
-          } else {
-            body.reasoning = { enabled: true, effort: reasoningEffort };
-            reasoningLog = {
-              effectiveEffort: reasoningEffort,
-              wireField: "reasoning.effort",
-              wireValue: reasoningEffort,
-            };
           }
-        } else if (modelInList(provider.thinkingBudgetModels, parsed.modelId)) {
-          const budget = thinkingBudgetForEffort(parsed, reasoningEffort, maxTokens);
-          if (budget !== undefined) {
-            body.thinking_budget = budget;
-            reasoningLog = {
-              effectiveEffort: parsed.options.reasoning === "minimal" ? "minimal" : reasoningEffort,
-              wireField: "thinking_budget",
-              wireValue: budget,
-            };
-          }
-        } else if (modelInList(provider.thinkingToggleModels, parsed.modelId)) {
-          if (reasoningEffort === "enabled" || reasoningEffort === "disabled" || reasoningEffort === "adaptive") {
-            body.thinking = { type: reasoningEffort };
-            reasoningLog = {
-              effectiveEffort: reasoningEffort,
-              wireField: "thinking.type",
-              wireValue: reasoningEffort,
-            };
-          }
-        } else {
-          body.reasoning_effort = reasoningEffort;
-          reasoningLog = {
-            effectiveEffort: reasoningEffort,
-            wireField: "reasoning_effort",
-            wireValue: reasoningEffort,
-          };
         }
-      }
-      if (parsed.options.presencePenalty !== undefined && !modelInList(provider.noPenaltyModels, parsed.modelId)) {
-        body.presence_penalty = parsed.options.presencePenalty;
-      }
-      if (parsed.options.frequencyPenalty !== undefined && !modelInList(provider.noPenaltyModels, parsed.modelId)) {
-        body.frequency_penalty = parsed.options.frequencyPenalty;
-      }
-      if (provider.promptCacheKey && parsed.options.promptCacheKey !== undefined) {
-        body.prompt_cache_key = parsed.options.promptCacheKey;
-      }
-      // Structured-output support varies by the physical upstream model even when one
-      // gateway exposes a uniform OpenAI-compatible endpoint. Keep the #1137 translation
-      // as the default, but let an exact model opt out instead of forcing a provider-wide
-      // rollback that would silently return prose for siblings that support JSON Schema.
-      if (!provider.noStructuredOutputModels?.includes(parsed.modelId)) {
-        const textFormat = parsed.options.textFormat;
-        if (textFormat?.type === "json_object") {
-          body.response_format = { type: "json_object" };
-        } else if (textFormat?.type === "json_schema") {
-          body.response_format = {
-            type: "json_schema",
-            json_schema: {
-              name: textFormat.name ?? "response",
-              ...(textFormat.description !== undefined ? { description: textFormat.description } : {}),
-              ...(textFormat.schema !== undefined ? { schema: textFormat.schema } : {}),
-              ...(textFormat.strict !== undefined ? { strict: textFormat.strict } : {}),
-            },
-          };
+        if (parsed.options.presencePenalty !== undefined && !modelInList(provider.noPenaltyModels, parsed.modelId)) {
+          body.presence_penalty = parsed.options.presencePenalty;
         }
-      }
-
-      if (tools) {
-        if (provider.parallelToolCalls === false) {
-          // NIM documents the Boolean defaulting to false and kimi rejects true; pin the
-          // wire bit so Codex cannot opt in via request.options. Other opted-out providers
-          // omit the field by default so strict OpenAI-compatible hosts never see an
-          // unsupported knob, but a self-hosted gateway that DOES honor the field and keeps
-          // emitting parallel calls without it can opt in via pinParallelToolCallsFalse.
-          if (provider.baseUrl === "https://integrate.api.nvidia.com/v1"
-              || provider.pinParallelToolCallsFalse === true) {
-            body.parallel_tool_calls = false;
+        if (parsed.options.frequencyPenalty !== undefined && !modelInList(provider.noPenaltyModels, parsed.modelId)) {
+          body.frequency_penalty = parsed.options.frequencyPenalty;
+        }
+        if (provider.promptCacheKey && parsed.options.promptCacheKey !== undefined) {
+          body.prompt_cache_key = parsed.options.promptCacheKey;
+        }
+        // Structured-output support varies by the physical upstream model even when one
+        // gateway exposes a uniform OpenAI-compatible endpoint. Keep the #1137 translation
+        // as the default, but let an exact model opt out instead of forcing a provider-wide
+        // rollback that would silently return prose for siblings that support JSON Schema.
+        if (!provider.noStructuredOutputModels?.includes(parsed.modelId)) {
+          const textFormat = parsed.options.textFormat;
+          if (textFormat?.type === "json_object") {
+            body.response_format = { type: "json_object" };
+          } else if (textFormat?.type === "json_schema") {
+            // Same downgrade as the passthrough path: the schema is dropped because the
+            // upstream rejects it, but the JSON-mode request itself survives.
+            body.response_format = provider.noJsonSchemaModels?.includes(parsed.modelId)
+              ? { type: "json_object" }
+              : {
+                type: "json_schema",
+                json_schema: {
+                  name: textFormat.name ?? "response",
+                  ...(textFormat.description !== undefined ? { description: textFormat.description } : {}),
+                  ...(textFormat.schema !== undefined ? { schema: textFormat.schema } : {}),
+                  ...(textFormat.strict !== undefined ? { strict: textFormat.strict } : {}),
+                },
+              };
           }
-        } else if (provider.parallelToolCalls === true) {
-          body.parallel_tool_calls = parsed.options.parallelToolCalls !== false;
         }
-      }
-      if (parsed.stream) body.stream_options = { include_usage: true };
 
-      const bodyJson = JSON.stringify(body);
-      const actualServiceTier = typeof body.service_tier === "string" ? body.service_tier : null;
-      const tierLog = createAdapterTierMetadata(
-        parsed.options.tierObservation,
-        parsed.options.tierDecision,
-        actualServiceTier === null ? null : "service-tier",
-        actualServiceTier,
-      );
-      if (isDebugEnabled()) {
-        let host = "upstream";
-        try { host = new URL(url).host; } catch { /* keep fallback */ }
-        debugProviderDiagnostic("openai-chat", "request", {
-          host,
-          model: body.model,
-          stream: parsed.stream,
-          messageCount: Array.isArray(messages) ? messages.length : 0,
-          toolCount: Array.isArray(tools) ? tools.length : 0,
-          hasCredential,
-          bodyBytes: new TextEncoder().encode(bodyJson).length,
-        });
-      }
+        if (tools) {
+          if (provider.parallelToolCalls === false) {
+            // NIM documents the Boolean defaulting to false and kimi rejects true; pin the
+            // wire bit so Codex cannot opt in via request.options. Other opted-out providers
+            // omit the field by default so strict OpenAI-compatible hosts never see an
+            // unsupported knob, but a self-hosted gateway that DOES honor the field and keeps
+            // emitting parallel calls without it can opt in via pinParallelToolCallsFalse.
+            if (provider.baseUrl === "https://integrate.api.nvidia.com/v1"
+                || provider.pinParallelToolCallsFalse === true) {
+              body.parallel_tool_calls = false;
+            }
+          } else if (provider.parallelToolCalls === true) {
+            body.parallel_tool_calls = parsed.options.parallelToolCalls !== false;
+          }
+        }
+        if (parsed.stream) body.stream_options = { include_usage: true };
 
-      return {
-        url,
-        method: "POST",
-        headers,
-        body: bodyJson,
-        ...(reasoningLog ? { reasoningLog } : {}),
-        ...(tierLog ? { tierLog } : {}),
+        const bodyJson = JSON.stringify(body);
+        const actualServiceTier = typeof body.service_tier === "string" ? body.service_tier : null;
+        const tierLog = createAdapterTierMetadata(
+          parsed.options.tierObservation,
+          parsed.options.tierDecision,
+          actualServiceTier === null ? null : "service-tier",
+          actualServiceTier,
+        );
+        if (isDebugEnabled()) {
+          let host = "upstream";
+          try { host = new URL(url).host; } catch { /* keep fallback */ }
+          debugProviderDiagnostic("openai-chat", "request", {
+            host,
+            model: body.model,
+            stream: parsed.stream,
+            messageCount: Array.isArray(messages) ? messages.length : 0,
+            toolCount: Array.isArray(tools) ? tools.length : 0,
+            hasCredential,
+            bodyBytes: Buffer.byteLength(bodyJson, "utf8"),
+          });
+        }
+
+        return {
+          url,
+          method: "POST",
+          headers,
+          body: bodyJson,
+          ...(reasoningLog ? { reasoningLog } : {}),
+          ...(tierLog ? { tierLog } : {}),
+        };
       };
+      if (hasShrinkableOpenAIChatImages(messages)) {
+        return normalizeOpenAIChatImages(messages, { tierBias: incoming?.imageTierBias }).then(finish, finish);
+      }
+      return finish();
     },
 
     async *parseStream(
@@ -2059,7 +2100,7 @@ export function createOpenAIChatAdapter(provider: OcxProviderConfig): ProviderAd
       if (Object.hasOwn(json, "service_tier")) {
         tierMetadata?.observeResponseServiceTier(json.service_tier);
       }
-      const responseBytes = new TextEncoder().encode(JSON.stringify(json)).byteLength;
+      const responseBytes = Buffer.byteLength(JSON.stringify(json), "utf8");
       budget.chargeRetained(responseBytes, { kind: "retained_collectors" });
       try {
         const payload = unwrapChatCompletionPayload(json);

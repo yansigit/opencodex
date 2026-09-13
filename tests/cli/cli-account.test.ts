@@ -137,11 +137,12 @@ function json(body: unknown, status = 200): Response {
 
 async function mockManagementApi(req: Request): Promise<Response> {
   const url = new URL(req.url);
-  const body = req.method === "PUT" || req.method === "POST" ? await req.json() : undefined;
+  const body = req.method === "PUT" || req.method === "POST" ? await req.json().catch(() => undefined) : undefined;
   requests.push({ method: req.method, path: url.pathname, search: url.search, body });
 
-  if (req.method === "GET" && url.pathname === "/api/codex-auth/accounts") {
-    if (url.searchParams.get("refresh") === "1" && codexRefreshFailure) {
+  if ((req.method === "GET" && url.pathname === "/api/codex-auth/accounts")
+    || (req.method === "POST" && url.pathname === "/api/codex-auth/accounts/refresh")) {
+    if ((url.searchParams.get("refresh") === "1" || req.method === "POST") && codexRefreshFailure) {
       return json({ error: codexRefreshFailure.error }, codexRefreshFailure.status);
     }
     if (lastDeletedType === "codex" && postDeleteReadFailure) {
@@ -585,6 +586,88 @@ afterEach(() => {
 });
 
 describe("ocx account CLI (issue #180 matrix)", () => {
+  test("OAuth quota diagnostics use a closed code in human and JSON output", async () => {
+    oauthAccounts = [{ id: "acct_1", quotaUnavailable: true, quotaFailure: "dns_failed" }];
+    const human = await run(["list", "anthropic", "--quota"]);
+    expect(human.code).toBe(0);
+    expect(human.stdout).toContain("unavailable (dns_failed)");
+    const machine = await run(["list", "anthropic", "--quota", "--json"]);
+    expect(JSON.parse(machine.stdout).accounts[0].quotaFailure).toBe("dns_failed");
+    oauthAccounts = [{ id: "acct_1", quotaUnavailable: true, quotaFailure: RAW_SENTINEL }];
+    const unknown = await run(["list", "anthropic", "--quota", "--json"]);
+    expect(unknown.stdout).not.toContain(RAW_SENTINEL);
+    expect(JSON.parse(unknown.stdout).accounts[0]).not.toHaveProperty("quotaFailure");
+  });
+
+  test("plan exclusions survive the API projection and use the policy plan", async () => {
+    codexAccounts = [{ id: "policy", plan: "plus", selectionExcludedReason: "plan_excluded", selectionExcludedPlan: "free", paused: false }];
+    const human = await run(["list", "openai"]);
+    expect(human.code).toBe(0);
+    expect(human.stdout).toContain("not-auto-selected(plan=free)");
+    const machine = await run(["list", "openai", "--json"]);
+    expect(JSON.parse(machine.stdout).accounts[0]).toMatchObject({ selectionExcludedReason: "plan_excluded", selectionExcludedPlan: "free" });
+    codexAccounts = [{ id: "policy", plan: "plus", selectionExcludedReason: "unrecognized", selectionExcludedPlan: "free" }];
+    expect((await run(["list", "openai"])).stdout).not.toContain("not-auto-selected");
+    expect(JSON.parse((await run(["list", "openai", "--json"])).stdout).accounts[0]).not.toHaveProperty("selectionExcludedReason");
+  });
+
+  test.each(["estimated", "insufficient-evidence"] as const)("human and JSON history preserve capacity status %s", async status => {
+    const capacity = status === "estimated" ? { status, estimates: [{ window: "weekly", estimatedTokens: 10000, sampleCount: 2, confidence: "low" }] }
+      : { status, reason: "ledger_truncated", estimates: [] };
+    const deps: AccountDeps = { baseUrl: "http://127.0.0.1:10100", fetchImpl: (async () => Response.json({ observations: [{
+      observedAt: 1_800_000_000_000, source: "wham", windows: [{ family: "account", window: "weekly", usedPercent: 20 }],
+    }], capacity })) as typeof fetch };
+    const human = await run(["history", "openai", "pool-a"], deps);
+    expect(human.code).toBe(0);
+    expect(human.stdout).toContain(status === "estimated" ? "~10000 reported tokens / 100%\t2 samples" : "insufficient evidence (ledger_truncated)");
+    const json = await run(["history", "openai", "pool-a", "--json"], deps);
+    expect(JSON.parse(json.stdout).capacity).toEqual(capacity);
+  });
+
+  test("human quota history renders populated rows and safely handles oversized reset dates", async () => {
+    const result = await run(["history", "openai", "pool-a"], { baseUrl: "http://127.0.0.1:10100", fetchImpl: (async () => Response.json({
+      observations: [{ observedAt: 1_800_000_000_000, source: "wham", windows: [
+        { family: "account", window: "weekly", usedPercent: 20, resetAtMs: 1e20 },
+      ] }],
+    })) as typeof fetch });
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("2027-01-15T08:00:00.000Z\twham\taccount/weekly\t20%\tunknown");
+  });
+
+  test("history reads one cached endpoint and rejects invalid arguments before I/O", async () => {
+    let calls = 0;
+    const deps: AccountDeps = { baseUrl: "http://127.0.0.1:10100", fetchImpl: (async input => {
+      calls++;
+      expect(String(input)).toBe("http://127.0.0.1:10100/api/codex-auth/quota/history?accountId=pool-a&limit=2");
+      return Response.json({ accountId: "pool-a", observations: [], retention: { maxObservations: 200, maxAgeDays: 30 }, truncated: false });
+    }) as typeof fetch };
+    const result = await run(["history", "openai", "pool-a", "--limit", "2", "--json"], deps);
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout).observations).toEqual([]);
+    for (const args of [["anthropic", "pool-a"], ["openai", "__main__"], ["openai", "pool-a", "--limit", "201"], ["openai", "pool-a", "--unknown"]]) {
+      expect((await run(["history", ...args], deps)).code).toBe(1);
+    }
+    expect(calls).toBe(1);
+  });
+
+  test.each([100, 12])("pending validation stays visible at %s percent usage without exposing raw health details", async weeklyPercent => {
+    codexAccounts = [{ id: "pending", email: "p***@example.test", quota: { weeklyPercent },
+      health: { status: "warning", reason: "validation_pending", message: RAW_SENTINEL } }];
+    for (const command of [["list", "openai"], ["refresh", "openai"]]) {
+      const human = await run(command);
+      expect(human.code).toBe(0);
+      expect(human.stdout).toContain("validation-pending");
+      expect(human.output).not.toContain(RAW_SENTINEL);
+      const machine = await run([...command, "--json"]);
+      expect(JSON.parse(machine.stdout).accounts[0].validationPending).toBe(true);
+      expect(machine.output).not.toContain(RAW_SENTINEL);
+    }
+    codexAccounts = [{ id: "pending", quota: { weeklyPercent: 12 }, health: { status: "healthy" } }];
+    const recovered = await run(["refresh", "openai", "--json"]);
+    expect(JSON.parse(recovered.stdout).accounts[0]).not.toHaveProperty("validationPending");
+    expect((await run(["refresh", "openai"])).stdout).not.toContain("validation-pending");
+  });
+
   test("main quota diagnostics survive opt-in JSON without copying upstream data", async () => {
     codexAccounts = [{ id: "__main__", isMain: true, quota: null,
       quotaRefresh: { status: "http_error", httpStatus: 503, message: RAW_SENTINEL } }];
@@ -907,7 +990,7 @@ describe("ocx account CLI (issue #180 matrix)", () => {
 
     expect(human.code).toBe(0);
     expect(requests.some(request =>
-      request.path === "/api/codex-auth/accounts" && request.search === "?refresh=1"
+      request.path === "/api/codex-auth/accounts/refresh" && request.method === "POST"
     )).toBe(true);
     expect(human.stdout).toContain("weekly 42%");
     expect(human.stdout).toContain("monthly 17%");
@@ -2104,6 +2187,24 @@ describe("ocx account CLI (issue #180 matrix)", () => {
     expect(result.stdout).toContain("1 imported, 0 updated, 1 failed, 1 unsupported");
     expect(result.stdout).toContain("#2 failed (credential_rejected)");
     expect(result.stdout).toContain("#3 unsupported (unsupported_format)");
+  });
+
+  test("quota-pending login reports registration and recovery instead of ready model guidance", async () => {
+    codexLoginStatus = { status: "done", validationPending: true };
+    const sleepSpy = spyOn(Bun, "sleep").mockImplementation(async () => {});
+    try {
+      const human = await run(["login", "openai"]);
+      expect(human.code).toBe(0);
+      expect(human.stdout).toContain("validation pending (routing disabled)");
+      expect(human.stdout).toContain("ocx gui");
+      expect(human.stdout).not.toContain("Logged in");
+      expect(human.stdout).not.toContain("ocx models");
+      const machine = await run(["login", "openai", "--json"]);
+      expect(JSON.parse(machine.stdout)).toMatchObject({ validationPending: true, recoveryCommand: "ocx gui" });
+      expect(JSON.parse(machine.stdout)).not.toHaveProperty("modelSelection");
+    } finally {
+      sleepSpy.mockRestore();
+    }
   });
 
   test("pending Codex login keeps success and prints generic recovery guidance", async () => {

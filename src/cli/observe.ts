@@ -14,10 +14,14 @@ import { formatUsageReport } from "./usage-report";
 import { USAGE_RANGES, USAGE_SURFACES, type UsageSummary } from "../usage/summary";
 import { parseUsageTimeWindow, type UsageTimeWindow } from "../usage/time-range";
 import { redactSecretString } from "../lib/redact";
+import { readClientConnectionState, sameClientConnectionOwner } from "../client/state";
+import { readServiceApiTokenState } from "../lib/service-secrets";
+import { fetchHubUsage } from "../client/hub-client";
+import type { HubUsageReport } from "../remote/hub-usage";
 
 const USAGE = `Usage:
   ocx observe logs [--provider <name>] [--model <id>] [--status <code>]
-      [--conversation <id>] [--limit <n>] [--follow] [--json|--jsonl]
+      [--conversation <id>] [--account <label>] [--limit <n>] [--follow] [--json|--jsonl]
   ocx logs explain <request-id> [--json]
   ocx logs rebuild-index
   ocx logs index-status
@@ -58,7 +62,14 @@ function formatLog(row: LogEntry): string {
   const conversation = typeof row.conversationId === "string" && row.conversationId.length > 0
     ? `conv=${row.conversationId}`
     : "";
-  return [time, String(status), route, duration, conversation].filter(Boolean).join("  ");
+  // The account label is printed for the same reason, and for one more: it is the answer to
+  // "which of my accounts served this?" (#4057). It is only ever the stable non-PII label the
+  // proxy already persists (`main`, `p<hex6>`, `o<hex6>`) — never an email, a key, or an
+  // upstream account id. Rows from a single-account provider carry no label and print none.
+  const account = typeof row.accountLogLabel === "string" && row.accountLogLabel.length > 0
+    ? `acct=${row.accountLogLabel}`
+    : "";
+  return [time, String(status), route, duration, account, conversation].filter(Boolean).join("  ");
 }
 
 async function logs(argv: string[], deps: RuntimeApiDeps): Promise<void> {
@@ -72,6 +83,9 @@ async function logs(argv: string[], deps: RuntimeApiDeps): Promise<void> {
   // Both spellings, because the server accepts both (`request-log.ts:1032`) and an operator
   // should not have to remember which one this surface wanted.
   const conversationId = takeOption(args, "--conversation") ?? takeOption(args, "--conversationId");
+  // Server-side, so `--limit` caps the rows that MATCHED rather than the rows scanned; a
+  // client-side filter after a 200-row cap would silently hide older matches.
+  const account = takeOption(args, "--account");
   const limit = takeIntegerOption(args, "--limit", { min: 1 }) ?? 200;
   rejectArgs(args, USAGE);
   if (wantsJson && wantsJsonl) throw new CliUsageError("--json and --jsonl cannot be combined", USAGE);
@@ -80,7 +94,7 @@ async function logs(argv: string[], deps: RuntimeApiDeps): Promise<void> {
   }
   let seen = new Set<string>();
   do {
-    const data = await runtimeRequest(`/api/logs${query({ provider, model, status, conversationId, limit })}`, {}, deps);
+    const data = await runtimeRequest(`/api/logs${query({ provider, model, status, conversationId, account, limit })}`, {}, deps);
     const rows = logRows(data);
     if (!follow && wantsJson) printData(data, true);
     else {
@@ -165,7 +179,30 @@ async function usage(argv: string[], deps: RuntimeApiDeps): Promise<void> {
     throw new CliUsageError(`--surface must be one of ${USAGE_SURFACES.join(", ")}`, USAGE);
   }
   rejectArgs(args.map(redactSecretString), USAGE);
-  const result = await runtimeRequest<UsageSummary>(`/api/usage${query({ range, surface, provider, model, since: window?.since, until: window?.until })}`, {}, deps);
+  const suffix = query({ range, surface, provider, model, since: window?.since, until: window?.until });
+  const connection = readClientConnectionState();
+  let result: UsageSummary | HubUsageReport;
+  if (connection.kind === "invalid" || connection.kind === "mismatched") {
+    throw new Error(`Client usage unavailable: ${connection.reason}`);
+  }
+  if (connection.kind === "connected") {
+    const token = readServiceApiTokenState();
+    if (token.kind !== "present" || token.fingerprint !== connection.value.tokenFingerprint) {
+      throw new Error("Client usage unavailable: the enrolled data key is missing or changed; repair the client connection");
+    }
+    result = await fetchHubUsage(connection.value.serverUrl, token.token, new URLSearchParams(suffix), {
+      fetchImpl: deps.fetchImpl, timeoutMs: 60_000,
+    });
+    const current = readClientConnectionState();
+    const currentToken = readServiceApiTokenState();
+    if (current.kind !== "connected" || !sameClientConnectionOwner(current.value, connection.value)
+      || current.value.tokenFingerprint !== token.fingerprint
+      || currentToken.kind !== "present" || currentToken.fingerprint !== token.fingerprint) {
+      throw new Error("Client connection changed while reading usage; retry for the current connection");
+    }
+  } else {
+    result = await runtimeRequest<UsageSummary>(`/api/usage${suffix}`, {}, deps);
+  }
   // Older daemons ignore custom bounds and return successful preset reports.
   if (window && (result?.customWindow !== true || result.since !== window.since || result.until !== window.until)) {
     throw new Error("The server did not confirm the requested custom usage window. Upgrade and restart the proxy, then retry.");

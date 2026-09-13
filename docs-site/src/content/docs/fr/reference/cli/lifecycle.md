@@ -40,6 +40,11 @@ Vérifie de manière idempotente qu’un proxy d’arrière-plan est actif, puis
 
 Rétablit le fonctionnement natif de Codex **sans arrêter** le proxy : les lignes de configuration injectées et les entrées routées du catalogue sont supprimées, de sorte qu’une invocation simple de `codex` utilise de nouveau Codex directement. `eject` est un alias de `restore`.
 
+Le catalogue restauré exclut les modèles natifs retirés, dont `gpt-5.3-codex-spark`,
+que leurs identifiants soient nus ou qualifiés par un compte de confiance. Cette règle
+s’applique avec ou sans sauvegarde ; la sauvegarde originale et les anciens choix de modèles
+enregistrés par l’utilisateur sont conservés.
+
 Ajoutez `back` à l’une ou l’autre forme pour rediriger une invocation simple de `codex` vers un proxy déjà actif, sans modifier le cycle de vie du proxy :
 
 ```bash
@@ -52,6 +57,10 @@ ocx eject back
 Récupération explicite destinée aux anciennes versions de développement qui remappaient l’historique de Codex App avant l’ajout des sauvegardes réversibles. Fermez d’abord Codex si sa base de données d’historique est verrouillée.
 
 Il s'agit d'un réétiquetage large et destructif : chaque fil contenant un message utilisateur et actuellement marqué `opencodex` passe à `openai`, `exec` est normalisé en `cli` et l'indicateur d'événement est activé. L'historique légitime d'un fournisseur dédié est également concerné. Sauvegardez l'état et n'exécutez la commande que si vous souhaitez cette portée complète.
+
+### `ocx recover-history --ocx-compaction <thread-id> --yes`
+
+Réparez l'historique d'une tâche compactée par un fournisseur routé avant de la reprendre avec Codex natif. La commande sélectionne exactement une tâche par UUID, enregistre d'abord une sauvegarde privée octet par octet, puis convertit uniquement l'état de compaction `ocx1:` propre à OpenCodeX en résumé ordinaire relisible par Codex natif. Le contenu chiffré natif et les autres tâches restent inchangés. Fermez la tâche sélectionnée avant d'exécuter la commande ; toute modification simultanée du rollout interrompt la récupération sans remplacer le fichier.
 
 ### `ocx uninstall` · `ocx remove`
 
@@ -145,6 +154,22 @@ Si des processus Codex `app-server` de longue durée sont encore actifs, `ocx sy
 ### `ocx sync-cache [--restart-codex]`
 
 Invalide le cache local du sélecteur de modèles de Codex afin qu’il soit reconstruit à partir du catalogue opencodex actif. Le même avertissement concernant un `app-server` obsolète et le même comportement facultatif `--restart-codex` que pour `ocx sync` s’appliquent.
+
+### `ocx catalog pull <https-url> [--auth-env <NAME>] [--json] [--restart-codex]`
+
+Installe un catalogue complet servi par le point de terminaison `/v1/catalog` d'une autre instance
+OpenCodex, puis synchronise `models_cache.json`. L'URL doit être en HTTPS ; le HTTP est accepté
+uniquement en loopback. Les identifiants intégrés à l'URL, les requêtes, les fragments, les
+redirections, les réponses trop volumineuses et les catalogues invalides sont refusés avant toute
+écriture locale. L'authentification est facultative et lue uniquement par référence à une variable
+d'environnement (`--auth-env`), jamais depuis argv.
+
+Le catalogue et le cache sont écrits sous le verrou de catalogue Codex partagé ; un échec préserve
+les derniers fichiers valides connus. Des octets identiques constituent une non-opération qui
+préserve les mtimes. `--restart-codex` ne s'applique qu'après une écriture réelle. Les requêtes
+conditionnelles `ETag` et le redémarrage de l'application Desktop ne font pas partie de cette
+commande. Voir la [référence anglaise](/reference/cli/lifecycle/) pour l'enveloppe `--json`
+complète et les codes de sortie.
 
 ## Service d’arrière-plan
 

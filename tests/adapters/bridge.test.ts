@@ -176,27 +176,26 @@ describe("Responses bridge reasoning and usage parity", () => {
     expect(firstOutputs).toBe(1);
   });
 
-  test("streaming raw reasoning is routed through the expandable summary channel", async () => {
+  test("streaming raw reasoning rides the content channel like native gpt-oss", async () => {
     const frames = await collectSse(bridgeToResponsesSSE(replay([
       { type: "reasoning_raw_delta", text: "raw detail" },
       { type: "done", usage: { inputTokens: 10, outputTokens: 5, cachedInputTokens: 3, reasoningOutputTokens: 2 } },
     ]), "routed/model"));
 
-    // Chat-completions providers (DeepSeek-style) deliver thinking as raw
-    // reasoning_content. Codex renders the expandable reasoning trace from the
-    // Responses summary channel only, so raw reasoning is routed through the
-    // summary channel (issue #45) instead of the content channel.
-    expect(frames.find(f => f.event === "response.reasoning_summary_text.delta")?.data)
-      .toMatchObject({ summary_index: 0, delta: "raw detail" });
-    expect(frames.some(f => f.event === "response.reasoning_text.delta")).toBe(false);
+    // Raw reasoning_content rides the content channel so Codex applies its own display
+    // policy: the desktop band shows the "Thinking…" placeholder, and raw text appears
+    // only when show_raw_agent_reasoning is enabled — never as a fake summary.
+    expect(frames.find(f => f.event === "response.reasoning_text.delta")?.data)
+      .toMatchObject({ content_index: 0, delta: "raw detail" });
+    expect(frames.some(f => f.event === "response.reasoning_summary_text.delta")).toBe(false);
 
     const completed = frames.find(f => f.event === "response.completed")?.data.response as Record<string, unknown>;
     const output = completed.output as Record<string, unknown>[];
     expect(output[0]).toMatchObject({
       type: "reasoning",
-      summary: [{ type: "summary_text", text: "raw detail" }],
+      summary: [],
+      content: [{ type: "reasoning_text", text: "raw detail" }],
     });
-    expect((output[0] as { content?: unknown }).content).toBeUndefined();
     expect(completed.usage).toMatchObject({
       input_tokens: 10,
       input_tokens_details: { cached_tokens: 3 },
@@ -591,9 +590,9 @@ describe("Responses bridge reasoning and usage parity", () => {
     const output = json.output as Record<string, unknown>[];
     expect(output.map(item => item.type)).toEqual(["reasoning", "message"]);
     expect(output[0]).toMatchObject({
-      summary: [{ type: "summary_text", text: "raw json" }],
+      summary: [],
+      content: [{ type: "reasoning_text", text: "raw json" }],
     });
-    expect((output[0] as { content?: unknown }).content).toBeUndefined();
     expect(json.usage).toMatchObject({
       input_tokens: 6,
       input_tokens_details: { cached_tokens: 1, cache_write_tokens: 2 },

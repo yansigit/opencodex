@@ -2,12 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { nativeModelRows } from "../../src/codex/catalog";
-import { loadConfig, replacePersistedConfig, saveConfig } from "../../src/config";
+import { loadConfig, saveConfig } from "../../src/config";
 import { handleManagementAPI } from "../../src/server/management-api";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
 import { catalogConvergenceFactory } from "../helpers/catalog-convergence";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
-import { inMemoryManagementPersistence, isolatedDiskManagementPersistence, ManagementRequest as Request } from "../helpers/management-auth";
+import { ManagementRequest as Request } from "../helpers/management-auth";
 import { listManagementModelRows, type ManagementModelRow } from "../../src/server/management/model-rows";
 import { routedSlug } from "../../src/providers/slug-codec";
 
@@ -27,9 +27,9 @@ beforeEach(() => {
     defaultProvider: "google-antigravity",
     providers: {
       "google-antigravity": {
-        adapter: "google",
-        baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-        authMode: "oauth",
+        adapter: "openai-chat",
+        baseUrl: "https://api.example.test/v1",
+        apiKey: "test-key",
         liveModels: false,
         models: ["claude-opus-4-6-thinking", "claude-sonnet-4-6", "gemini-3.1-pro", "gemini-3.6-flash", "gpt-oss-120b-medium", "vendor/model"],
         selectedModels: ["gemini-3.1-pro", "gemini-3.6-flash"],
@@ -51,17 +51,13 @@ afterEach(() => {
   if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
 });
 
-async function putWithConfig(
-  body: unknown,
-  config = loadConfig(),
-  persistence = isolatedDiskManagementPersistence(),
-): Promise<Response> {
+async function putWithConfig(body: unknown, config = loadConfig()): Promise<Response> {
   const url = new URL("http://localhost/api/model-visibility");
   const response = await handleManagementAPI(new Request(url, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: typeof body === "string" ? body : JSON.stringify(body),
-  }), url, config, { ...persistence, createManagementConvergeCodex: catalogConvergenceFactory(() => { refreshes += 1; }) });
+  }), url, config, { createManagementConvergeCodex: catalogConvergenceFactory(() => { refreshes += 1; }) });
   if (!response) throw new Error("model visibility route was not handled");
   return response;
 }
@@ -140,7 +136,7 @@ describe("atomic model visibility management", () => {
   });
 
   test("treats a physical combo provider with no configured combos as a routed provider", async () => {
-    replacePersistedConfig({
+    saveConfig({
       port: 0,
       defaultProvider: "combo",
       providers: {
@@ -205,7 +201,7 @@ describe("atomic model visibility management", () => {
       "other/keep",
       "other/provider",
     ];
-    replacePersistedConfig(config);
+    saveConfig(config);
 
     expect((await put({ scope: "provider", provider: "anthropic", targets: [{ id: "claude-a" }], enabled: true })).status).toBe(200);
     expect(loadConfig().providers.anthropic.selectedModels).toBeUndefined();
@@ -235,15 +231,14 @@ describe("atomic model visibility management", () => {
       free: { alias: "anthropic/fast", targets: [{ provider: "google-antigravity", model: "gemini-3.1-pro" }] },
     };
     config.disabledModels = ["anthropic/fast", "other/keep"];
-    const persistence = inMemoryManagementPersistence(config);
 
-    expect((await putWithConfig({ scope: "models", provider: "combo", targets: [{ id: "free" }], enabled: true }, config, persistence)).status).toBe(200);
+    expect((await putWithConfig({ scope: "models", provider: "combo", targets: [{ id: "free" }], enabled: true }, config)).status).toBe(200);
     expect(config.providers.combo.selectedModels).toEqual(["physical-only"]);
     expect(config.disabledModels).toEqual(["other/keep"]);
     expect(refreshes).toBe(1);
 
     config.disabledModels = ["combo/free", "anthropic/fast", "other/keep"];
-    expect((await putWithConfig({ scope: "provider", provider: "combo", targets: [{ id: "free" }], enabled: true }, config, persistence)).status).toBe(200);
+    expect((await putWithConfig({ scope: "provider", provider: "combo", targets: [{ id: "free" }], enabled: true }, config)).status).toBe(200);
     expect(config.providers.combo.selectedModels).toEqual(["physical-only"]);
     expect(config.disabledModels).toEqual(["other/keep"]);
     expect(refreshes).toBe(2);
@@ -378,14 +373,13 @@ test("configured manual OpenAI rows can be toggled alongside native rows", async
   const config = loadConfig();
   config.providers.openai = {adapter:"openai-responses",authMode:"forward",baseUrl:"https://chatgpt.com/backend-api/codex",liveModels:false};
   config.customModels = [{id:"manual-gpt",provider:"openai",modelId:"gpt-5.5",contextWindow:128_000}];
-  config.disabledModels = ["openai/gpt-5.5", "gpt-5.4"];
-  const persistence = inMemoryManagementPersistence(config);
-  expect((await putWithConfig({scope:"models",provider:"openai",targets:[{id:"gpt-5.5",native:false}],enabled:true},config,persistence)).status).toBe(200);
-  expect(config.disabledModels).toEqual(["gpt-5.4"]);
-  expect((await putWithConfig({scope:"models",provider:"openai",targets:[{id:"gpt-5.5",native:false},{id:"gpt-5.4",native:true}],enabled:false},config,persistence)).status).toBe(200);
+  config.disabledModels = ["openai/gpt-5.5", "gpt-5.6-luna"];
+  expect((await putWithConfig({scope:"models",provider:"openai",targets:[{id:"gpt-5.5",native:false}],enabled:true},config)).status).toBe(200);
+  expect(config.disabledModels).toEqual(["gpt-5.6-luna"]);
+  expect((await putWithConfig({scope:"models",provider:"openai",targets:[{id:"gpt-5.5",native:false},{id:"gpt-5.6-luna",native:true}],enabled:false},config)).status).toBe(200);
   expect(config.disabledModels).toContain("openai/gpt-5.5");
-  expect(config.disabledModels).toContain("gpt-5.4");
-  expect((await putWithConfig({scope:"models",provider:"openai",targets:[{id:"not-configured",native:false}],enabled:true},config,persistence)).status).toBe(400);
+  expect(config.disabledModels).toContain("gpt-5.6-luna");
+  expect((await putWithConfig({scope:"models",provider:"openai",targets:[{id:"not-configured",native:false}],enabled:true},config)).status).toBe(400);
 });
 
 test("provider-group toggles persist mixed native and manual OpenAI targets together", async () => {
@@ -397,15 +391,15 @@ test("provider-group toggles persist mixed native and manual OpenAI targets toge
   config.customModels = [{ id: "manual-gpt", provider: "openai", modelId: "gpt-5.5" }];
   const unrelatedDisabled = [...config.disabledModels!];
   const unrelatedProvider = structuredClone(config.providers["google-antigravity"]);
-  const targets = [{ id: "gpt-5.5", native: false }, { id: "gpt-5.4", native: true }];
-  replacePersistedConfig(config);
+  const targets = [{ id: "gpt-5.5", native: false }, { id: "gpt-5.6-luna", native: true }];
+  saveConfig(config);
 
   const disabled = await putWithConfig({ scope: "provider", provider: "openai", targets, enabled: false }, config);
   expect(disabled.status).toBe(200);
   expect(await disabled.json()).toMatchObject({ ok: true, scope: "provider", provider: "openai", enabled: false });
-  expect(config.disabledModels).toEqual([...unrelatedDisabled, "openai/gpt-5.5", "gpt-5.4"]);
+  expect(config.disabledModels).toEqual([...unrelatedDisabled, "openai/gpt-5.5", "gpt-5.6-luna"]);
   expect(config.providers.openai.selectedModels).toEqual(["gpt-5.5"]);
-  expect(loadConfig().disabledModels).toEqual([...unrelatedDisabled, "openai/gpt-5.5", "gpt-5.4"]);
+  expect(loadConfig().disabledModels).toEqual([...unrelatedDisabled, "openai/gpt-5.5", "gpt-5.6-luna"]);
   expect(loadConfig().providers.openai.selectedModels).toEqual(["gpt-5.5"]);
   expect(loadConfig().providers["google-antigravity"]).toEqual(unrelatedProvider);
   expect(refreshes).toBe(1);
@@ -428,18 +422,18 @@ test("an invalid trailing target leaves a mixed OpenAI provider-group update ato
     baseUrl: "https://chatgpt.com/backend-api/codex", selectedModels: ["gpt-5.5"],
   };
   config.customModels = [{ id: "manual-gpt", provider: "openai", modelId: "gpt-5.5" }];
-  replacePersistedConfig(config);
+  saveConfig(config);
 
   for (const enabled of [false, true]) {
     // Both valid targets would change state before the final invalid target is reached.
-    config.disabledModels = enabled ? ["other/keep", "openai/gpt-5.5", "gpt-5.4"] : ["other/keep"];
-    replacePersistedConfig(config);
+    config.disabledModels = enabled ? ["other/keep", "openai/gpt-5.5", "gpt-5.6-luna"] : ["other/keep"];
+    saveConfig(config);
     const before = structuredClone(config);
     const persistedBefore = loadConfig();
     for (const invalid of [{ id: "not-configured", native: false }, { id: "gpt-9.9-imaginary", native: true }]) {
       const response = await putWithConfig({
         scope: "provider", provider: "openai", enabled,
-        targets: [{ id: "gpt-5.5", native: false }, { id: "gpt-5.4", native: true }, invalid],
+        targets: [{ id: "gpt-5.5", native: false }, { id: "gpt-5.6-luna", native: true }, invalid],
       }, config);
       expect(response.status).toBe(400);
       expect(await response.json()).toMatchObject({ error: "invalid model visibility target" });
@@ -520,7 +514,6 @@ describe("provider workspace custom-model API round trips", () => {
         headers: { "content-type": "application/json" }, body: JSON.stringify(body),
       }),
     }), url, loadConfig(), {
-      ...isolatedDiskManagementPersistence(),
       createManagementConvergeCodex: catalogConvergenceFactory(() => { refreshes += 1; }),
     });
     if (!response) throw new Error(`management route was not handled: ${path}`);
@@ -559,7 +552,7 @@ describe("provider workspace custom-model API round trips", () => {
       models: [], selectedModels: ["other-selected"],
     };
     config.disabledModels!.push(routedSlug(provider, modelId), routedSlug("other-static", modelId));
-    replacePersistedConfig(config);
+    saveConfig(config);
     const hidden = [...loadConfig().disabledModels!];
     const selected = [...loadConfig().providers[provider].selectedModels!];
     const otherProvider = structuredClone(loadConfig().providers["other-static"]);
@@ -602,7 +595,7 @@ describe("provider workspace custom-model API round trips", () => {
       ...(bareHidden ? [modelId] : []),
       ...(routedHidden ? [routedSlug("openai", modelId)] : []),
     );
-    replacePersistedConfig(config);
+    saveConfig(config);
     const hidden = [...loadConfig().disabledModels!];
     const selected = [...loadConfig().providers.openai.selectedModels!];
     const manualId = await createCustom("openai", modelId);
@@ -672,7 +665,7 @@ describe("provider workspace custom-model API round trips", () => {
     const qualifiedId = `desktop/${accountModel}`;
     config.customModels = [{ id: "qualified-custom", provider: "openai", modelId: qualifiedId }];
     config.disabledModels!.push(qualifiedId, routedSlug("openai", qualifiedId));
-    replacePersistedConfig(config);
+    saveConfig(config);
     writeFileSync(join(isolatedCodexHome!.path, "models_cache.json"), JSON.stringify({ models: [{
       slug: accountModel, supported_in_api: true, visibility: "list",
       base_instructions: "You are Codex.", comp_hash: null, shell_type: "unified_exec",

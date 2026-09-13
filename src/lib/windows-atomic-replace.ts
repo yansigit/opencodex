@@ -34,6 +34,7 @@ export type ReplacePublisher =
   | "codex-agent-roles"
   | "lab-automation"
   | "lab-ledger"
+  | "remote-workspace"
   | "storage-cleanup"
   | "tray";
 

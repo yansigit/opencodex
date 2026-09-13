@@ -1,4 +1,5 @@
 import { readJsonIfOk } from "../fetch-json";
+import { readSubagentSurfaceAdvisory, type SubagentSurfaceAdvisory } from "../subagent-surface";
 import {
   beginPollEpoch,
   settingsPollMayCommit,
@@ -50,6 +51,8 @@ export type EffortCapPoll = {
 export type DashboardOverviewPoll = {
   health: HealthData | null;
   providers: ProviderInfo[];
+  error: boolean;
+  failure?: "auth" | "denied" | "request" | "invalid" | "unavailable";
 };
 
 /** Multi-agent extras — slower peers must not gate status/uptime/provider counts. */
@@ -77,6 +80,8 @@ export type DashboardSettingsPoll = {
 
 export type DashboardMaModePoll = {
   maMode: "v1" | "default" | "v2";
+  /** Null when the runtime predates the advisory or the call failed. */
+  advisory?: SubagentSurfaceAdvisory | null;
 };
 
 export type DashboardEpochRefs = {
@@ -236,53 +241,62 @@ export async function fetchDashboardMaMode(
   try {
     const v2Res = await fetch(`${apiBase}/api/v2`, { signal });
     if (!v2Res.ok) return { maMode: "default" };
-    const v2Data = await v2Res.json() as { multiAgentMode?: unknown };
+    const v2Data = await v2Res.json() as { multiAgentMode?: unknown; multiAgentSurfaceAdvisory?: unknown };
+    const advisory = readSubagentSurfaceAdvisory(v2Data.multiAgentSurfaceAdvisory);
     if (v2Data.multiAgentMode === "v1" || v2Data.multiAgentMode === "v2") {
-      return { maMode: v2Data.multiAgentMode };
+      return { maMode: v2Data.multiAgentMode, advisory };
     }
-    return { maMode: "default" };
+    return { maMode: "default", advisory };
   } catch (error) {
     if (isAbortError(error, signal)) throw error;
     return { maMode: "default" };
   }
-}
-
-async function fetchDashboardHealth(primaryUrl: string, apiBase: string, signal: AbortSignal): Promise<HealthData> {
-  try {
-    const primary = await fetch(primaryUrl, { signal });
-    if (primary.ok) {
-      const data = (await primary.json()) as HealthData;
-      if (
-        data
-        && typeof (data as { status?: unknown }).status === "string"
-        && typeof (data as { version?: unknown }).version === "string"
-        && typeof (data as { uptime?: unknown }).uptime === "number"
-      ) return data;
-    }
-  } catch (error) {
-    if (isAbortError(error, signal)) throw error;
-  }
-  const fallback = await fetch(`${apiBase}/healthz`, { signal });
-  return requireJson<HealthData>(fallback);
 }
 
 export async function fetchDashboardOverview(
   apiBase: string,
   signal: AbortSignal,
 ): Promise<DashboardOverviewPoll> {
+  const failed = (failure: DashboardOverviewPoll["failure"]): DashboardOverviewPoll => ({ health: null, providers: [], error: true, failure });
+  const controller = new AbortController();
+  const requestSignal = AbortSignal.any([signal, controller.signal]);
+  let accessFailure: "auth" | "denied" | undefined;
+  let notifyAccess!: () => void;
+  const accessChanged = new Promise<"access">(resolve => { notifyAccess = () => resolve("access"); });
+  const observe = (response: Response) => {
+    if (response.status === 401 || response.status === 403) {
+      if (response.status === 403 || accessFailure === undefined) accessFailure = response.status === 403 ? "denied" : "auth";
+      notifyAccess();
+    }
+    return response;
+  };
   try {
-    // Remote Hub serves authenticated health here; the helper retains the legacy fallback.
-    const healthDataPromise = fetchDashboardHealth(`${apiBase}/api/system/health`, apiBase, signal);
-
-    const providersPromise = fetch(`${apiBase}/api/providers`, { signal }).then((response) =>
-      requireJson<ProviderInfo[]>(response),
-    );
-    const [health, providers] = await Promise.all([healthDataPromise, providersPromise]);
-    if (!Array.isArray(providers)) throw new Error("empty overview response");
-    return { health, providers };
-  } catch (error) {
-    if (isAbortError(error, signal)) throw error;
-    throw error instanceof Error ? error : new Error("overview unavailable");
+    const requests = ["/api/system/health", "/api/providers"].map(path =>
+      Promise.resolve().then(() => fetch(`${apiBase}${path}`, { signal: requestSignal })).then(observe));
+    // Access failure must not be lost behind a rejected or stalled peer request.
+    const result = await Promise.race([Promise.allSettled(requests), accessChanged]);
+    signal.throwIfAborted();
+    if (result === "access") return failed(accessFailure ?? "auth");
+    const [hResult, pResult] = result;
+    if (hResult.status === "rejected" || pResult.status === "rejected") return failed("unavailable");
+    const hRes = hResult.value;
+    const pRes = pResult.value;
+    if (!hRes.ok || !pRes.ok) return failed("request");
+    try {
+      const health = await requireJson<HealthData>(hRes);
+      const providers = await requireJson<ProviderInfo[]>(pRes);
+      if (!health || typeof health.status !== "string" || typeof health.version !== "string"
+        || !Number.isFinite(health.uptime) || health.uptime < 0
+        || !Array.isArray(providers) || providers.some(row => !row || typeof row.name !== "string"
+          || typeof row.adapter !== "string" || typeof row.baseUrl !== "string" || typeof row.hasApiKey !== "boolean"
+          || (row.defaultModel !== undefined && typeof row.defaultModel !== "string"))) return failed("invalid");
+      return { health, providers, error: false };
+    } catch (error) {
+      if (isAbortError(error, signal)) throw error;
+      return failed("invalid");
+    }
+  } finally {
+    controller.abort();
   }
 }
 

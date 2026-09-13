@@ -5,7 +5,12 @@ import { applyProxyEnv, loadConfig } from "../config";
 import type { OcxConfig } from "../types";
 import { collectOrcaCodexHomeDiagnostic } from "./home";
 import { summarizeComboCatalogOmissions, type ComboCatalogOmission } from "./catalog/aggregation";
-import { shouldSyncCodexOnStart } from "./desired-state";
+import {
+  localClientSkipMessage,
+  localClientSkipReason,
+  shouldSyncCodexOnStart,
+  type LocalClientSkipReason,
+} from "./desired-state";
 import { admitCodexWrite, type CodexAdmission } from "./admission";
 import type { CodexCatalogSyncOptions } from "./catalog/sync";
 import { resetCodexAppServerCatalogStateCache } from "./app-server-processes";
@@ -14,11 +19,12 @@ export interface CodexSyncResult {
   /**
    * `skipped` is policy truth, never evidence that Codex was written.
    * `catalog-only` means an explicit sync refreshed the catalog/cache while
-   * Codex injection stayed OFF; config and history were not touched.
+   * config/history injection was skipped (OFF, externally owned, or protected history).
    */
   status: "applied" | "skipped" | "catalog-only" | "refused";
   ok: boolean;
-  skippedReason?: "desired_disabled";
+  /** `hub-gated` is the hub-role gate, not the user's toggle — the two read very differently. */
+  skippedReason?: LocalClientSkipReason;
   /** Present when unattended convergence refused another service's native home. */
   authority?: "service-home";
   added: number;
@@ -26,6 +32,12 @@ export interface CodexSyncResult {
   catalogExists: boolean;
   catalogWritten: boolean;
   cacheSynced: boolean;
+  /**
+   * Whether the catalog owner committed a validated catalog or refused the
+   * refresh. Only a `catalog-only` result carries it; `ok` already answers the
+   * question for callers that do not care which half refused.
+   */
+  refreshOutcome?: "committed" | "refused";
   message: string;
   warning?: string;
   comboOmissions?: ComboCatalogOmission[];
@@ -39,8 +51,8 @@ export interface CodexSyncOptions {
    * Explicit `ocx sync` is also the refresh path for side profiles that consume
    * the OpenCodex catalog without injection. When set, the sync still refreshes
    * the catalog and models cache even if the Codex integration toggle is OFF or
-   * an external `model_provider` owns config.toml. Config/history injection is
-   * skipped in those cases, so the behavior is harmless to a native home.
+   * an external `model_provider` owns config.toml, or paginated history refuses
+   * injection. Config/history injection is skipped in those cases.
    */
   catalogEvenWhenNotInjected?: boolean;
 }
@@ -85,19 +97,24 @@ export async function syncModelsToCodex(
   // durable user switch and must be read again at this production boundary: a
   // PUT OFF while provider discovery is in flight cannot be allowed to commit
   // through an older captured object.
-  const desiredDisabled = !shouldSyncCodexOnStart(loadConfig());
+  const gateSnapshot = loadConfig();
+  const desiredDisabled = !shouldSyncCodexOnStart(gateSnapshot);
   const catalogEvenWhenNotInjected = options.catalogEvenWhenNotInjected === true;
   if (desiredDisabled && !catalogEvenWhenNotInjected) {
     return {
       status: "skipped",
-      skippedReason: "desired_disabled",
+      skippedReason: localClientSkipReason(gateSnapshot),
       ok: true,
       added: 0,
       catalogPath: null,
       catalogExists: false,
       catalogWritten: false,
       cacheSynced: false,
-      message: "Codex integration is OFF; no Codex config, catalog, cache, or history was changed.",
+      message: localClientSkipMessage(
+        gateSnapshot,
+        "Codex integration is OFF; no Codex config, catalog, cache, or history was changed.",
+        "No Codex config, catalog, cache, or history was changed.",
+      ),
     };
   }
   // Catalog gathering precedes injection and can itself write the native
@@ -131,8 +148,16 @@ export async function syncModelsToCodex(
     applyProxyEnv(config);
     const refreshed = await refreshCatalogForSync(config, deps, { allowWhenDesiredDisabled: true }, log);
     const message = refreshed.catalogWritten || refreshed.cacheSynced
-      ? "Codex integration is OFF; catalog and models cache refreshed, Codex config untouched."
-      : "Codex integration is OFF; catalog refresh skipped, Codex config untouched.";
+      ? localClientSkipMessage(
+        gateSnapshot,
+        "Codex integration is OFF; catalog and models cache refreshed, Codex config untouched.",
+        "Catalog and models cache refreshed, Codex config untouched.",
+      )
+      : localClientSkipMessage(
+        gateSnapshot,
+        "Codex integration is OFF; catalog refresh skipped, Codex config untouched.",
+        "Catalog refresh skipped, Codex config untouched.",
+      );
     return {
       status: "catalog-only",
       ok: true,
@@ -184,6 +209,25 @@ export async function syncModelsToCodex(
   // working catalog/cache into the partial result of an otherwise unnecessary refresh.
   const preflight = await deps.injectCodexConfig(p, config, { validateOnly: true });
   if (!preflight.success) {
+    // Explicit model refresh does not require legacy history relabeling. Keep the
+    // injector's refusal intact and publish only through the existing catalog owner.
+    // Unattended sync and other config/integrity refusals retain their hard failure.
+    if (catalogEvenWhenNotInjected
+      && preflight.historyPreflightFailureReason === "history_paginated_requires_native_writer") {
+      applyProxyEnv(config);
+      const refreshed = await refreshCatalogForSync(config, deps, undefined, log);
+      const ok = refreshed.refreshOutcome === "committed" && refreshed.catalogExists;
+      const message = ok
+        ? "Model catalog synchronized; Codex config and conversation history left unchanged because paginated history requires its native writer."
+        : "Model catalog refresh did not complete; Codex config and conversation history were left unchanged.";
+      reportCodexHomeTarget(log, deps.collectCodexHomeDiagnostic ?? collectOrcaCodexHomeDiagnostic);
+      return {
+        ...refreshed,
+        status: "catalog-only",
+        ok,
+        message,
+      };
+    }
     log?.error(preflight.message);
     reportCodexHomeTarget(log, deps.collectCodexHomeDiagnostic ?? collectOrcaCodexHomeDiagnostic);
     return {
@@ -242,8 +286,9 @@ export async function syncModelsToCodex(
   if (result.status === "skipped") {
     return {
       status: "skipped",
-      // The apply direction's only under-lock policy skip is desired OFF.
-      skippedReason: "desired_disabled",
+      // The apply direction's only under-lock policy skips are desired OFF and the hub gate;
+      // carry whichever the injector reported so the caller can say the honest thing.
+      skippedReason: result.skippedReason === "hub-gated" ? "hub-gated" : "desired_disabled",
       ok: true,
       added: 0,
       catalogPath: null,
@@ -288,6 +333,7 @@ async function refreshCatalogForSync(
   catalogWritten: boolean;
   cacheSynced: boolean;
   comboOmissions: ComboCatalogOmission[];
+  refreshOutcome?: "committed" | "refused";
   warning?: string;
 }> {
   let added = 0;
@@ -296,9 +342,11 @@ async function refreshCatalogForSync(
   let catalogWritten = false;
   let cacheSynced = false;
   let warning: string | undefined;
+  let refreshOutcome: "committed" | "refused" | undefined;
   let comboOmissions: ComboCatalogOmission[] = [];
   try {
     const cat = await deps.refreshCodexModelCatalog(config, undefined, catalogOptions);
+    refreshOutcome = cat.refreshOutcome;
     added = cat.added;
     catalogExists = cat.catalogExists;
     catalogWritten = cat.catalogWritten;
@@ -320,5 +368,6 @@ async function refreshCatalogForSync(
     warning = `catalog sync skipped: ${e instanceof Error ? e.message : String(e)}`;
     log?.error(warning);
   }
-  return { added, catalogPath, catalogExists, catalogWritten, cacheSynced, comboOmissions, ...(warning ? { warning } : {}) };
+  return { added, catalogPath, catalogExists, catalogWritten, cacheSynced, comboOmissions,
+    ...(refreshOutcome ? { refreshOutcome } : {}), ...(warning ? { warning } : {}) };
 }

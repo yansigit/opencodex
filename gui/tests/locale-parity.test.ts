@@ -99,6 +99,9 @@ const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   "nav.grok",
   // Other short identifiers, commands, and product names kept in English
   "api.clientConfig.clientOpencode",
+  // Cline CLI is a product name, not untranslated interface copy.
+  "integrations.tab.cline",
+  "api.clientConfig.clientCline",
   "api.clientConfig.clientPi",
   "api.clientConfig.clientOmp",
   "api.clientConfig.clientHermes",
@@ -109,8 +112,8 @@ const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   "codexAuth.codexApp",
   "codexAuth.creditNextBadge",
   "common.github",
-  // The title template contains only a localized page slot, punctuation, and the product name.
-  "app.pageTitle",
+  // Windows PowerShell is a product name, not an untranslated prose placeholder.
+  "remote.pairingCommandWindows",
   "grok.title",
   // Integration tabs: client/product proper nouns kept in English
   "integrations.tab.codex",
@@ -134,6 +137,12 @@ const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   "api.clientConfig.clientAside",
   "integrations.tab.raycast",
   "api.clientConfig.clientRaycast",
+  // "omo" is the product's own lowercase spelling, identical in every locale.
+  "integrations.tab.omo",
+  "api.clientConfig.clientOmo",
+  // Cline product name and CLI acronym are intentionally preserved.
+  "integrations.tab.cline",
+  "api.clientConfig.clientCline",
   "integrations.codex.title",
   // Provider proper nouns kept in English
   "provider.name.commandCodeAuth",
@@ -156,7 +165,6 @@ const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   "models.v2Mode_default",
   "models.v2Mode_v1",
   "models.v2Mode_v2",
-  "pws.aiStudio",
   "prov.accountId",
   "pws.sort.az",
   "pws.sort.za",

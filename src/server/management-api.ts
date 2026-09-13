@@ -1,3 +1,4 @@
+import { remoteWorkspaceEnabled } from "../remote-control/workspace-activation";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { CatalogModel } from "../codex/catalog";
@@ -62,7 +63,6 @@ import { handleLogsUsageRoutes } from "./management/logs-usage-routes";
 import { handleStorageLogGuardRoutes } from "./management/storage-log-guard-routes";
 import { handleRequestHistoryRoutes } from "./management/request-history-routes";
 import { handleRoutingAnalyticsRoutes } from "./management/routing-analytics-routes";
-import { handleReplitProviderRoutes } from "./management/replit-provider-routes";
 import { handleProviderRoutes } from "./management/provider-routes";
 import { handleModelRoutes } from "./management/model-routes";
 import { handleAgentSettingsRoutes } from "./management/agent-settings-routes";
@@ -75,7 +75,6 @@ import { handleIntegrationRoutes } from "./management/integration-routes";
 import { handleNativeIntegrationRoutes } from "./management/native-integration-routes";
 import { handleCursorIntegrationRoutes } from "./management/cursor-integration-routes";
 import type { ManagementContext } from "./management/context";
-import { ManagementPersistenceError, MissingManagementPersistenceError } from "./management/context";
 import type { ManagementPrincipal, ManagementSessionControl } from "./management-auth";
 export type { ManagementApiDeps } from "./management/context";
 import { fetchAllModels } from "./management/shared";
@@ -143,6 +142,26 @@ async function handleQuotaResetRoutesOnDemand(ctx: ManagementContext): Promise<R
   if (!pathInManagementNamespace(ctx.url.pathname, "/api/quota-resets", false)) return null;
   const { handleQuotaResetRoutes } = await import("./management/quota-reset-routes");
   return handleQuotaResetRoutes(ctx);
+}
+
+async function handleGrokCouponRoutesOnDemand(ctx: ManagementContext): Promise<Response | null> {
+  if (!pathInManagementNamespace(ctx.url.pathname, "/api/grok/reset-coupons", true)) return null;
+  const { handleGrokCouponRoutes } = await import("./management/grok-coupon-routes");
+  return handleGrokCouponRoutes(ctx);
+}
+
+async function handleRemoteWorkspaceRoutesOnDemand(ctx: ManagementContext): Promise<Response | null> {
+  if (!pathInManagementNamespace(ctx.url.pathname, "/api/remote-workspace")) return null;
+  if (!remoteWorkspaceEnabled(ctx.config)) {
+    return Response.json({ available: false, reason: "Remote Workspace requires Hub mode and OCX_REMOTE_WORKSPACE_ENABLED=1.", devices: [], runtimes: {}, sessions: [] }, {
+      status: ctx.req.method === "GET" ? 200 : 404, headers: { "cache-control": "no-store" },
+    });
+  }
+  if (ctx.req.method !== "GET" && ctx.principal !== "gui-session") {
+    return Response.json({ error: "A dashboard session is required for Remote Workspace changes." }, { status: 403 });
+  }
+  const { handleRemoteWorkspaceRoutes } = await import("./management/remote-workspace-routes");
+  return handleRemoteWorkspaceRoutes(ctx);
 }
 
 export async function handleManagementAPI(
@@ -235,21 +254,18 @@ export async function handleManagementAPI(
     } catch { /* best-effort */ }
   }
   const ctx: ManagementContext = { req, url, config, deps, version: VERSION, principal, sessionControl, convergeCodexCatalog, syncClaudeAgentDefsBestEffort };
-  const configBeforeDispatch = (["GET", "HEAD", "OPTIONS"].includes(req.method)
-    || (req.method === "POST" && url.pathname === "/api/providers/test"))
-    ? undefined
-    : structuredClone(config);
   let routed: Response | null;
   try {
     routed = handleSessionRoutes(ctx)
+    ??     (await handleRemoteWorkspaceRoutesOnDemand(ctx))
     ??     (await handleConfigRoutes(ctx))
     ??     (await handleStorageLogGuardRoutes(ctx))
     ??     (await handleLogsUsageRoutes(ctx))
     ??     (await handleRequestHistoryRoutes(ctx))
     ??     (await handleQuotaResetRoutesOnDemand(ctx))
+    ??     (await handleGrokCouponRoutesOnDemand(ctx))
     ??     (await handleRoutingAnalyticsRoutes(ctx))
     ??     (await handleRoutingProfileRoutesOnDemand(ctx))
-    ??     (await handleReplitProviderRoutes(ctx))
     ??     (await handleProviderRoutes(ctx))
     ??     (await handleModelRoutes(ctx))
     ??     (await handleIntegrationRoutes(ctx))
@@ -265,13 +281,6 @@ export async function handleManagementAPI(
   } catch (error) {
     const tooLarge = managementBodyTooLargeResponse(error, req, config);
     if (tooLarge) return tooLarge;
-    if (error instanceof MissingManagementPersistenceError || error instanceof ManagementPersistenceError) {
-      if (configBeforeDispatch === undefined) throw error;
-      const response = error instanceof ManagementPersistenceError ? error.response : undefined;
-      for (const key of Object.keys(config)) delete (config as unknown as Record<string, unknown>)[key];
-      Object.assign(config, configBeforeDispatch);
-      return response ?? jsonResponse({ error: "management persistence unavailable" }, 500, req, config);
-    }
     if (error instanceof OAuthMutationBusyError) {
       return new Response(JSON.stringify({ error: { type: "server_error", code: "oauth_mutation_busy", message: error.message } }), {
         status: 503,
@@ -312,6 +321,20 @@ export async function handleManagementAPI(
         success: false,
         code: "respawnable_service",
         message: "This proxy is managed by a Task Scheduler wrapper that can respawn it, so the stop must be run by `ocx stop`, which verifies the respawn window. Nothing was changed.",
+      }, 409, req, config);
+    }
+    if (respawnRisk === "self-unload") {
+      // This proxy IS the launchd/systemd job, so stopping the manager below would
+      // terminate the handler before the shared teardown at the end of this route restores
+      // the native Codex keys — the dashboard Stop button left `openai_base_url`,
+      // `experimental_realtime_ws_base_url` and `model_catalog_json` pointed at a dead
+      // proxy (#4023). Refuse before touching anything, like the Windows branch above.
+      // `ocx stop` is safe because it runs outside this process and owns the teardown
+      // through its receipt, which is why the receipt-backed caller never reaches here.
+      return jsonResponse({
+        success: false,
+        code: "self_unload_service",
+        message: "This proxy is running as the installed service, so stopping the manager from inside it would end this process before native Codex is restored. Run `ocx stop`, which stops the service from outside and completes the restore. Nothing was changed.",
       }, 409, req, config);
     }
     if (respawnRisk === "unknown") {
@@ -381,11 +404,18 @@ export async function handleManagementAPI(
   }
 
   if (url.pathname.startsWith("/api/codex-auth/")) {
+    // Native-main device reauth (#3898): a dedicated namespace the generic
+    // codex-auth dispatch must not swallow (it would 404 as an unknown pool
+    // route). Same management origin/auth/session wrapping as every /api/*.
+    if (url.pathname === "/api/codex-auth/main/reauth-device") {
+      const { handleMainDeviceReauthAPI } = await import("../codex/main-device-reauth-api");
+      return handleMainDeviceReauthAPI(req, url, config);
+    }
     const { handleCodexAuthAPI } = await import("../codex/auth-api");
     const { ConfigMutationLockError } = await import("../config");
     const { CodexCredentialRefreshLockTimeoutError } = await import("../codex/account-store");
     try {
-      return await handleCodexAuthAPI(req, url, config, convergeCodexCatalog);
+      return await handleCodexAuthAPI(req, url, config, convergeCodexCatalog, principal);
     } catch (error) {
       // Credential writers remap ConfigMutationLockError to CodexCredentialRefreshLockTimeoutError;
       // treat both as the same retryable busy response.

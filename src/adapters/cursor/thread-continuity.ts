@@ -66,7 +66,7 @@ export function clearCursorThreadContinuityForTests(): void {
   overrides.clear();
 }
 
-/** Max conversation-id remints after the first surfaced overflow (senpi cap). */
+/** Max conversation-id remints after the first surfaced overflow per retained scope. */
 export const CURSOR_OVERFLOW_REMINT_MAX = 3;
 export const CURSOR_OVERFLOW_REMINT_TTL_MS = 60 * 60 * 1000;
 export const CURSOR_OVERFLOW_REMINT_MAX_ENTRIES = 2_048;
@@ -107,25 +107,13 @@ function overflowRemintEntry(scopeKey: string): OverflowRemintState {
   return fresh;
 }
 
-/**
- * Stable scope for overflow remint accounting. Thread-identified clients key by
- * thread + identity; conversation-only clients key by the base conversation id
- * captured before any remint (wire id may rotate).
- */
+/** Stable client-thread ownership survives conversation remints; wire ids alone do not. */
 export function cursorOverflowRemintScopeKey(
-  parsed: {
-    _clientThreadId?: string;
-    _cursorIdentityScope?: string;
-  },
-  baseConversationId?: string,
+  threadOwner: string | undefined,
+  identityScope?: string,
 ): string | null {
-  if (parsed._clientThreadId) {
-    return `overflow\0${cursorThreadScopeKey(parsed._clientThreadId, parsed._cursorIdentityScope)}`;
-  }
-  const base = baseConversationId?.trim();
-  if (!base) return null;
-  const scope = parsed._cursorIdentityScope?.trim() || "local";
-  return `overflow\0${scope}\0conv\0${base}`;
+  if (!threadOwner) return null;
+  return `overflow\0${cursorThreadScopeKey(threadOwner, identityScope)}`;
 }
 
 /** True until the first overflow for this scope has been surfaced for Codex compact. */
@@ -140,8 +128,14 @@ export function markCursorOverflowSurfaced(scopeKey: string): void {
 }
 
 export function shouldSkipCursorOverflowRemint(scopeKey: string): boolean {
-  pruneOverflowRemints(now());
+  const at = now();
+  pruneOverflowRemints(at);
   const entry = overflowRemintByScope.get(scopeKey);
+  if (entry) {
+    entry.updatedAt = at;
+    overflowRemintByScope.delete(scopeKey);
+    overflowRemintByScope.set(scopeKey, entry);
+  }
   return entry?.skip === true || (entry?.remintCount ?? 0) >= CURSOR_OVERFLOW_REMINT_MAX;
 }
 

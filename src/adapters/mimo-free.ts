@@ -110,6 +110,7 @@ async function fetchJwt(signal?: AbortSignal): Promise<string> {
   const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
   const response = await fetch(BOOTSTRAP_URL, {
     method: "POST",
+    redirect: "manual",
     headers: {
       "Content-Type": "application/json",
       "User-Agent": randomUserAgent(),
@@ -224,7 +225,7 @@ export function createMimoFreeAdapter(provider: OcxProviderConfig): ProviderAdap
 
       // Let the base adapter build the wire body (handles reasoning, tools, etc.)
       // but override the URL and headers after.
-      const baseReq = base.buildRequest(parsed, incoming) as AdapterRequest;
+      const baseReq = await base.buildRequest(parsed, incoming);
       const baseBody = JSON.parse(baseReq.body as string) as unknown;
       const markedBody = injectMimoSystemMarker(baseBody);
 
@@ -249,6 +250,7 @@ export function createMimoFreeAdapter(provider: OcxProviderConfig): ProviderAdap
     async fetchResponse(request: AdapterRequest, ctx): Promise<Response> {
       const response = await fetch(request.url, {
         method: request.method,
+        redirect: "manual",
         headers: request.headers as Record<string, string>,
         body: request.body,
         signal: ctx?.abortSignal,
@@ -268,6 +270,7 @@ export function createMimoFreeAdapter(provider: OcxProviderConfig): ProviderAdap
         };
         return fetch(request.url, {
           method: request.method,
+          redirect: "manual",
           headers: retryHeaders,
           body: request.body,
           signal: ctx?.abortSignal,

@@ -20,9 +20,10 @@ import type { AdapterTierMetadata } from "../providers/fastwire";
 import { redactSecretString, sanitizeLogMetadataString } from "../lib/redact";
 import {
   appendUsageEntry,
-  isKnownAgentKind,
   isKnownAdmissionKind,
   isKnownInboundProtocol,
+  isKnownTerminalSource,
+  isKnownTransportPhase,
   isKnownUsageSurface,
   isCodexUsageAccountLogLabel,
   isValidReasoningWireValue,
@@ -49,8 +50,8 @@ import { enforceAppOwnedMemoryBudget, type RetainedStoreSnapshot } from "../lib/
 import { capEstimateAtContextWindow } from "../lib/token-estimate";
 import { inferCursorContextWindow } from "../adapters/cursor/discovery";
 import { KIRO_MODEL_CONTEXT_WINDOWS, normalizeKiroModelId } from "../providers/kiro-models";
+import { DEVIN_MODEL_CONTEXT_WINDOWS } from "../adapters/devin/live-models";
 import { modelRecordValue } from "../reasoning-effort";
-import type { AgentKind } from "./effort-policy";
 
 export interface RequestLogContext {
   model: string;
@@ -77,7 +78,6 @@ export interface RequestLogContext {
    * rather than looking like a lost request.
    */
   localTerminalReason?: string;
-  agentKind?: AgentKind;
   /** Stable non-PII Codex Pool account identity for durable usage attribution. */
   accountLogLabel?: string;
   requestedModel?: string;
@@ -172,7 +172,6 @@ export interface RequestLogEntry {
    *  product: widening that enum would merge Responses and Chat Completions,
    *  since both leave it undefined. */
   inboundProtocol?: "responses" | "chat" | "messages";
-  agentKind?: AgentKind;
   accountLogLabel?: string;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
@@ -288,7 +287,6 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     timestamp: entry.timestamp,
     model: entry.model,
     provider: entry.provider,
-    ...(isKnownAgentKind(entry.agentKind) ? { agentKind: entry.agentKind } : {}),
     ...(entry.firstOutputMs !== undefined ? { firstOutputMs: entry.firstOutputMs } : {}),
     ...(isKnownUsageSurface(entry.surface) ? { surface: entry.surface } : {}),
     ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
@@ -325,6 +323,8 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     ...(entry.usage ? { usage: entry.usage } : {}),
     ...(entry.totalTokens !== undefined ? { totalTokens: entry.totalTokens } : {}),
     ...(entry.attempts !== undefined ? { attempts: entry.attempts } : {}),
+    ...(isKnownTransportPhase(entry.transportPhase) ? { transportPhase: entry.transportPhase } : {}),
+    ...(isKnownTerminalSource(entry.terminalSource) ? { terminalSource: entry.terminalSource } : {}),
     ...(routeDecision ? { routeDecision } : {}),
     ...(claudeCompatibility ? { claudeCompatibility } : {}),
   };
@@ -415,7 +415,6 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(entry.apiKeyId ? { apiKeyId: entry.apiKeyId } : {}),
       ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
       ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
-      ...(isKnownAgentKind(entry.agentKind) ? { agentKind: entry.agentKind } : {}),
       ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
         ? { accountLogLabel: entry.accountLogLabel }
         : {}),
@@ -447,6 +446,8 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(entry.usage ? { usage: entry.usage } : {}),
       ...(entry.totalTokens !== undefined ? { totalTokens: entry.totalTokens } : {}),
       ...(entry.attempts !== undefined ? { attempts: entry.attempts } : {}),
+      ...(isKnownTransportPhase(entry.transportPhase) ? { transportPhase: entry.transportPhase } : {}),
+      ...(isKnownTerminalSource(entry.terminalSource) ? { terminalSource: entry.terminalSource } : {}),
       ...failureDiagnostics,
       ...(entry.routeDecision ? { routeDecision: entry.routeDecision } : {}),
       ...(entry.claudeCompatibility ? { claudeCompatibility: entry.claudeCompatibility } : {}),
@@ -593,7 +594,6 @@ export function requestLogErrorCode(
   // Keep the high-confidence message fallback for runtimes/providers that stripped the
   // structured code before emitting response.failed.
   if (classifiedCode === CYBER_POLICY_ERROR_CODE) return CYBER_POLICY_ERROR_CODE;
-  if (classifiedCode === "insufficient_quota") return classifiedCode;
   if (status === 400 || status === 409) return "invalid_request_error";
   if (status === 401) return "invalid_api_key";
   if (status === 403) {
@@ -1046,7 +1046,6 @@ export function addFinalRequestLog(
     ...(logCtx.localTerminalReason
       ? { localTerminalReason: sanitizeLogMetadataString(logCtx.localTerminalReason) }
       : {}),
-    ...(logCtx.agentKind ? { agentKind: logCtx.agentKind } : {}),
     ...(isCodexUsageAccountLogLabel(logCtx.accountLogLabel)
       ? { accountLogLabel: logCtx.accountLogLabel }
       : {}),
@@ -1121,6 +1120,16 @@ export function filterRequestLogs(logs: RequestLogEntry[], params: URLSearchPara
     filtered = filtered.filter(entry => entry.model === model
       || entry.attempts?.some(attempt => attempt.model === model));
   }
+  // #4057: "which account served this request" is the first question asked when one provider
+  // holds several accounts, and until now the only way to answer it was to grep usage.jsonl by
+  // hand. Attempts are matched for the same reason `provider` and `model` match them: when a
+  // request failed over between pool accounts, a search for the account that finally served it
+  // has to find that request, not only the account that first refused it.
+  const account = params.get("account")?.trim();
+  if (account) {
+    filtered = filtered.filter(entry => entry.accountLogLabel === account
+      || entry.attempts?.some(attempt => attempt.accountLogLabel === account));
+  }
   const status = params.get("status")?.trim().toLowerCase();
   if (status) {
     filtered = /^[1-5]xx$/.test(status)
@@ -1181,6 +1190,9 @@ function contextWindowForModel(adapter: string, modelId: string | undefined): nu
   }
   if (adapter === "cursor" || adapter.startsWith("cursor-")) {
     return inferCursorContextWindow(modelId);
+  }
+  if (adapter === "devin") {
+    return modelRecordValue(DEVIN_MODEL_CONTEXT_WINDOWS, modelId);
   }
   return undefined;
 }
@@ -1322,7 +1334,6 @@ export function finishRequestAttempt(
   status: number,
   durationMs: number,
   usage?: OcxUsage,
-  upstreamError?: string,
 ): PersistedUsageAttempt {
   const finalized = finalizedUsage(
     attempt.adapter,
@@ -1338,7 +1349,7 @@ export function finishRequestAttempt(
   else delete attempt.usage;
   if (finalized.totalTokens !== undefined) attempt.totalTokens = finalized.totalTokens;
   else delete attempt.totalTokens;
-  const errorCode = requestLogErrorCode(status, upstreamError);
+  const errorCode = requestLogErrorCode(status);
   if (errorCode) attempt.errorCode = errorCode;
   else delete attempt.errorCode;
   return attempt;

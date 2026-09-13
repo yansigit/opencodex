@@ -52,6 +52,56 @@ async function run(argv: string[], body: unknown): Promise<{ code: number; out: 
 }
 
 describe("formatUsageReport", () => {
+  test("keeps malformed token counts and every human line inert", () => {
+    const control = "before\x1b[2J\x07\u2028after\u2029";
+    const body = payload({
+      range: control,
+      summary: { requests: 1, totalTokens: control, inputTokens: Infinity, outputTokens: control },
+      providers: [{ provider: null, requests: 1, totalTokens: control }],
+      accounts: [{ accountLogLabel: control, requests: 1, totalTokens: control }],
+    });
+    const lines = formatUsageReport(body as never);
+    expect(lines.every(line => !/[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(line))).toBe(true);
+    expect(lines.join("\n")).toContain("before\\x1b[2J\\x07\\u2028after\\u2029");
+    expect(lines.find(line => line.startsWith("Tokens"))).toBe("Tokens     —  (in — / out —)");
+    expect(body.summary).toEqual({ requests: 1, totalTokens: control, inputTokens: Infinity, outputTokens: control });
+  });
+
+  test("escapes Unicode line separators on the no-match return too", () => {
+    const lines = formatUsageReport(payload({
+      filter: { provider: "before\u2028after", model: null, matched: false, comboOverlap: false },
+    }) as never);
+    expect(lines.every(line => !/[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(line))).toBe(true);
+    expect(lines.join("\n")).toContain("before\\u2028after");
+  });
+
+  test("preserves ordinary per-account totals and keeps JSON unchanged", async () => {
+    const body = payload({ accounts: [{ accountLogLabel: "account-1", requests: 12, totalTokens: 345, estimatedCostUsd: 0.125 }] });
+    expect(formatUsageReport(body as never).join("\n")).toMatch(/account-1\s+12\s+345\s+~\$0\.1250/);
+    const malformed = payload({ summary: { requests: 1, outputTokens: "\x1b[2J" } });
+    const { code, out } = await run(["usage", "--json"], malformed);
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual(malformed);
+  });
+
+  test("incomplete usage retains readable totals and warns even with no data or no match", () => {
+    const partial = { usageIncomplete: true, usageIncompleteReason: "oversized_rows" };
+    const out = formatUsageReport(payload(partial) as never).join("\n");
+    expect(out).toContain("WARNING: Usage is incomplete");
+    expect(out).toContain("Requests   1,447");
+    expect(out).toContain("grok-4.6");
+    expect(out.indexOf("WARNING:")).toBeLessThan(out.indexOf("Requests"));
+    const empty = payload({ ...partial, summary: { requests: 0, totalTokens: 0 }, providers: [], models: [], days: [] });
+    expect(formatUsageReport(empty as never).join("\n")).toContain("WARNING: Usage is incomplete");
+    const noMatch = formatUsageReport({ ...empty,
+      filter: { provider: "nope", model: null, matched: false, comboOverlap: false },
+    } as never).join("\n");
+    expect(noMatch).toContain("WARNING: Usage is incomplete");
+    expect(noMatch).toContain("skipped records may contain matches");
+    expect(noMatch).not.toContain("No usage recorded");
+    expect(formatUsageReport(payload() as never).join("\n")).not.toContain("WARNING: Usage is incomplete");
+  });
+
   test("prints per-provider and per-model cost, not an item count", () => {
     const out = formatUsageReport(payload() as never).join("\n");
     expect(out).toContain("~$12.3456");
@@ -136,6 +186,17 @@ describe("formatUsageReport", () => {
 });
 
 describe("ocx usage command", () => {
+  test("incomplete usage succeeds with human warning and unchanged JSON metadata", async () => {
+    const body = payload({ usageIncomplete: true, usageIncompleteReason: "oversized_rows" });
+    const human = await run(["usage"], body);
+    expect(human.code).toBe(0);
+    expect(human.out).toContain("WARNING: Usage is incomplete");
+    expect(human.out).toContain("grok-4.6");
+    const json = await run(["usage", "--json"], body);
+    expect(json.code).toBe(0);
+    expect(JSON.parse(json.out)).toEqual(body);
+  });
+
   test("duplicate, inline and stray custom-bound arguments do not echo credential-shaped values", async () => {
     const secret = "sk-" + "a".repeat(40);
     const errors: string[] = [];

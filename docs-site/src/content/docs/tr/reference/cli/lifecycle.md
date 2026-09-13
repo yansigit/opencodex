@@ -65,6 +65,10 @@ Proxy'yi **durdurmadan** yerel Codex'i geri yükleyin — enjekte edilen
 yapılandırma satırlarını ve yönlendirilen katalog girdilerini kaldırır, böylece
 düz `codex` tekrar yerel olarak çalışır. `eject`, `restore`'un bir takma adıdır.
 
+Geri yüklenen katalog, `gpt-5.3-codex-spark` dahil kullanımdan kaldırılan yerel modellerin
+yalın kimliklerini ve güvenilir hesap önekli girdilerini dışarıda bırakır. Katalog yedeği olsa da
+olmasa da bu kural geçerlidir; özgün yedek ve kullanıcının geçmiş model seçimleri korunur.
+
 Proxy yaşam döngüsünü değiştirmeden düz `codex`'i zaten çalışan bir proxy'ye
 yeniden yönlendirmek için her iki yazıma da `back` iletin:
 
@@ -83,6 +87,10 @@ Bu, geniş kapsamlı ve yıkıcı bir yeniden etiketlemedir: kullanıcı iletisi
 `opencodex` olarak etiketlenmiş her thread `openai` olarak değiştirilir, `exec` değeri `cli`
 olarak normalleştirilir ve event marker ayarlanır. Geçerli dedicated-provider geçmişi de kapsama
 dahildir. Durumu yedekleyin ve yalnızca bu kapsamın tamamını istiyorsanız çalıştırın.
+
+### `ocx recover-history --ocx-compaction <thread-id> --yes`
+
+Yönlendirilmiş bir sağlayıcı üzerinden sıkıştırılmış bir görevi yerel Codex ile sürdürmeden önce geçmişini onarın. Komut UUID ile yalnızca bir görevi seçer, önce özel ve bayt bayt bir yedek kaydeder, ardından yalnızca OpenCodeX'e ait `ocx1:` sıkıştırma durumunu yerel Codex'in yeniden oynatabileceği düz bir özete dönüştürür. Yerel şifreli içerik ve diğer görevler değişmeden kalır. Komutu çalıştırmadan önce seçili görevi kapatın; işlem sırasında rollout değişirse kurtarma dosyayı değiştirmeden durur.
 
 ### `ocx uninstall` · `ocx remove`
 
@@ -233,6 +241,21 @@ eşleştirmesinden kasıtlı olarak kaçınılır.
 Codex'in yerel model seçici önbelleğini geçersiz kılın, böylece aktif opencodex
 kataloğundan yeniden oluşturulur. `ocx sync` ile aynı eski `app-server` uyarısı
 ve isteğe bağlı `--restart-codex` davranışı geçerlidir.
+
+### `ocx catalog pull <https-url> [--auth-env <NAME>] [--json] [--restart-codex]`
+
+Başka bir OpenCodex örneğinin `/v1/catalog` uç noktasının sunduğu eksiksiz kataloğu kurar ve
+ardından `models_cache.json` dosyasını eşitler. URL HTTPS olmalıdır; HTTP yalnızca loopback için
+kabul edilir. URL içine gömülü kimlik bilgileri, sorgular, parçalar, yönlendirmeler, boyutu aşan
+yanıtlar ve geçersiz kataloglar, herhangi bir yerel yazma işleminden önce reddedilir. Kimlik
+doğrulama isteğe bağlıdır ve yalnızca ortam değişkeni adıyla (`--auth-env`) okunur, argv'den
+alınmaz.
+
+Katalog ve önbellek, paylaşılan Codex katalog kilidi altında yazılır; bir hata durumunda
+last-known-good dosyalar korunur. Aynı baytlar, mtime değerlerini koruyan bir no-op'tur.
+`--restart-codex` yalnızca gerçek bir yazmadan sonra uygulanır. `ETag` koşullu istekleri ve Desktop
+uygulamasının yeniden başlatılması bu komutun kapsamında değildir. Tam `--json` zarfı ve çıkış
+kodları için [İngilizce referansa](/reference/cli/lifecycle/) bakın.
 
 ## Arka plan servisi
 

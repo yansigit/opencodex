@@ -1,5 +1,7 @@
+import { remoteWorkspaceEnabled } from "../remote-control/workspace-activation";
+
+import { AuxiliaryListenerBindError } from "./ports";
 import { markActivity } from "../lib/sidecar-tracker";
-import { allowPlaintextRemoteForTests } from "../lib/test-server-start";
 import { knownModelIdsForProvider } from "../router";
 import {
   buildWarmupCompletionFrames,
@@ -9,6 +11,8 @@ import {
   buildResponsesWsData,
   sendResponseToWebSocket,
   sendTextFrame,
+  type LiveSidebandUpstreamFailure,
+  type LiveSidebandUpstreamHandoff,
   type WsData,
 } from "./ws-bridge";
 import type { Server, ServerWebSocket } from "bun";
@@ -17,21 +21,21 @@ import {
   armClaudeCodeBaseline,
   loadConfig,
   saveConfig,
-  saveConfigPreservingClaudeCode,
-  mutatePersistedConfig,
   getConfigDir,
+  loopbackCompanionBindError,
   websocketsEnabled,
 } from "../config";
-import { prepareSensitiveResponsePersistence } from "../responses/state";
 import { grokDefaultReasoningEffort } from "../grok/effort";
 import { flushConfigDirHardening } from "../config/paths";
 import { migrateStartupSubagentModels } from "./subagent-models-startup";
 import { migrateStartupXaiResponses } from "./xai-responses-startup";
+import { migrateStartupZaiResponses } from "./zai-responses-startup";
 import { reconcileOAuthProviders } from "../oauth";
 import { withCatalogWriteSerialization } from "../codex/catalog-write-serialization";
 import { invalidateCodexModelsCacheWithPermit } from "../codex/catalog/sync";
 import { currentServiceHomes, serviceStatePathsForOpenCodexHome } from "../service";
 import { shouldSyncCodexOnStart } from "../codex/desired-state";
+import { effectiveLoopbackListenerPort } from "../codex/loopback-target";
 import {
   createWindowsTaskListingCache,
   inspectNativeCodexOwnership,
@@ -50,11 +54,6 @@ import {
 } from "../lib/state-store-registrations";
 import { startUserCostOverlayReconciler } from "../usage/user-cost-overlay-reconciler";
 import {
-  getStorageCleanupPolicyJobState,
-  getStorageCleanupPolicyTestStreamResponse,
-  requestStorageCleanupPolicyRun,
-} from "../storage/policy-job";
-import {
   configureAppOwnedMemoryBudget,
   enforceAppOwnedMemoryBudget,
   resolveAppOwnedMemoryBudgetBytes,
@@ -69,11 +68,15 @@ import { activateLab, labActivationRequired } from "../lib/lab-activation";
 import { runOpenAiTierStartupMigration } from "../providers/openai-tier-startup";
 import { runAlibabaRegionStartupMigration } from "../providers/alibaba-region-startup";
 import { runModelRenameStartupMigration } from "../providers/model-rename-startup";
+import { runDevinProviderMergeStartupMigration } from "../providers/devin-provider-merge-migration";
 import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
 import { providerCodexAccountMode } from "../providers/registry";
-import type { OcxConfig, StorageCleanupPolicy } from "../types";
-import { MAX_DECOMPRESSED_BODY_BYTES } from "./request-decompress";
-import { canonicalServerOrigin } from "../lib/server-tls";
+import type { StorageCleanupPolicy } from "../types";
+import {
+  MAX_CONFIGURABLE_INBOUND_BODY_BYTES,
+  MIN_CONFIGURABLE_INBOUND_BODY_BYTES,
+  resolveInboundBodyLimitBytes,
+} from "./request-decompress";
 import {
   CodexAccountCooldownError,
   cooldownErrorMessage,
@@ -131,7 +134,6 @@ import {
   type RequestLogEntry,
 } from "./request-log";
 import { sessionLaneIdFromRequest } from "./request-log-conversation";
-import { classifyAgentKind } from "./effort-policy";
 export {
   addFinalRequestLog,
   filterRequestLogs,
@@ -154,6 +156,7 @@ import {
 } from "./relay";
 export {
   consumeForInspection,
+  codexSafetyBufferingFilterOptions,
   relaySseWithFailedTail,
   relaySseWithHeartbeat,
   relayWithAbort,
@@ -171,7 +174,6 @@ import {
   jsonResponse,
   admissionFields,
   resolveApiAuth,
-  resolveDataPlaneAdmissionSecret,
   resolveResponsesApiAuth,
   requestPolicyView,
   type DataPlaneAdmission,
@@ -181,7 +183,6 @@ import {
   withCors,
   withManagementCors,
 } from "./auth-cors";
-import { managementBodyTooLargeResponse, readManagementJsonBody } from "./management/body";
 export {
   assertServerAuthConfig,
   corsHeaders,
@@ -199,6 +200,7 @@ import { anthropicErrorResponse } from "../claude/outbound";
 import { buildDesktop3pRegistry, generateDesktop3pModels } from "../claude/desktop-3p";
 import { buildDesktopDiscoveryInputs } from "../claude/desktop-discovery-inputs";
 import { runClaudeAuthModeMigration } from "../claude/auth-mode-migration";
+import { runRetiredCodexModelMigration } from "../codex/retired-model-migration";
 import {
   bindNativeMainStartupLifecycle,
   blockNativeMainStartupForUnownedServiceHome,
@@ -209,7 +211,16 @@ import {
 } from "../codex/native-profile-startup";
 import { handleImages } from "./images";
 import { handleLive, logLiveSidebandFrame, parseLiveSidebandTarget, resolveLiveSidebandUpgrade } from "./live";
+import { handleAudioTranscriptions } from "./audio-transcriptions";
+import { resolveAudioAdmission, TRANSCRIPTION_MODEL } from "./audio-upstream";
+import { resolveAudioClient } from "./audio-client";
+import { resolveDictationSocket } from "./audio-dictation";
+import { handleExternalLive, resolveExternalLiveSocket } from "./audio-live";
+import { EXTERNAL_CALL_PREFIX, LiveCallBindings } from "./live-call-bindings";
+import { clearableDeadline } from "../lib/abort";
 import { handleSearch } from "./search";
+import { handleContextHistory } from "./context-history";
+import { codexCompatibleUrl, contextEndpoint, contextRelayActivated } from "../codex/context-compat";
 import { fetchAllModels, handleManagementAPI, VERSION, type ManagementApiDeps } from "./management-api";
 import {
   createManagementSessionControl,
@@ -249,32 +260,7 @@ import { recordCursorSeen } from "../integrations/cursor-seen";
 import { detectCursorInstalls } from "../integrations/cursor-detect";
 import { loadCursorEffortTable } from "../integrations/cursor-effort-table";
 import { expandCursorEffortRow, knownEffortRowIds } from "./effort-row";
-import { runAiStudioNativeLogin } from "../oauth/aistudio-native-daemon";
 import { catalogFastRowEligible, expandFastRow } from "./fast-row";
-
-function isAiStudioSessionOrigin(origin: string | null, config: Pick<OcxConfig, "corsAllowOrigins">): boolean {
-  return !!origin && (
-    origin === "https://aistudio.google.com"
-    || (origin.startsWith("chrome-extension://") && config.corsAllowOrigins?.includes(origin) === true)
-  );
-}
-
-export function isLoopbackPeerAddress(address: string | null | undefined): boolean {
-  if (!address) return false;
-  const normalized = address.toLowerCase().replace(/^\[|\]$/g, "").split("%")[0] ?? "";
-  if (normalized === "::1") return true;
-  const ipv4 = normalized.startsWith("::ffff:") ? normalized.slice("::ffff:".length) : normalized;
-  const octets = ipv4.split(".");
-  return octets.length === 4
-    && octets.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
-    && Number(octets[0]) === 127;
-}
-
-function withAiStudioSessionCors(resp: Response, req: Request, config: RequestPolicyView): Response {
-  const origin = req.headers.get("Origin");
-  if (isAiStudioSessionOrigin(origin, config) && origin) resp.headers.set("Access-Control-Allow-Origin", origin);
-  return resp;
-}
 
 export const MAX_WS_FRAME_BYTES = 50 * 1024 * 1024;
 const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 0;
@@ -283,6 +269,7 @@ const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 0;
 // class could inject a header break or a control character into a response we control.
 const REMOTE_CATALOG_KEY_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 const GUI_PAIRING_EXCHANGE_BODY_LIMIT = 4 * 1024;
+const REMOTE_WORKSPACE_PAIRING_BODY_LIMIT = 32 * 1024;
 
 /**
  * Read at most `limit` bytes of a request body, or refuse.
@@ -349,6 +336,29 @@ function withRemoteCatalogKeyId(response: Response, admission: DataPlaneAdmissio
 const LIVE_SIDEBAND_PENDING_MAX = 32;
 const LIVE_SIDEBAND_PENDING_BYTES_MAX = 1024 * 1024;
 const LIVE_SIDEBAND_CLOSE_FALLBACK_MS = 1_000;
+/**
+ * Bound the pre-upgrade upstream handshake. A sideband join that cannot reach 101
+ * must fail the client upgrade promptly rather than hold it open indefinitely.
+ */
+export const LIVE_SIDEBAND_UPSTREAM_OPEN_TIMEOUT_MS = 10_000;
+
+/**
+ * Outcome of the upstream sideband handshake performed before the client upgrade.
+ *
+ * `ok: false` carries the HTTP status the client upgrade must fail with. Only an
+ * upgrade failure reaches codex-rs as a connect error, and only a connect error
+ * ends its sideband reconnect loop (`realtime_conversation/sideband.rs`: the `Err`
+ * arm always breaks). A 101 followed by a close is instead read as `TransportLost`
+ * and retried forever against the same, permanently dead call id.
+ */
+export type LiveSidebandUpstreamOpenResult =
+  | {
+      ok: true;
+      socket: WebSocket;
+      /** Owns capture and terminal events until the downstream relay attaches. */
+      handoff: LiveSidebandUpstreamHandoff;
+    }
+  | { ok: false; status: number; code: string; message: string; socket?: WebSocket };
 
 export function exceedsLiveSidebandFrameByteLimit(frameBytes: number): boolean {
   return frameBytes > MAX_WS_FRAME_BYTES;
@@ -383,6 +393,7 @@ export function enqueueLiveSidebandPendingFrame(
 type LiveSidebandWebSocketFactory = (
   url: string,
   headers: Record<string, string>,
+  protocols?: string[],
 ) => WebSocket;
 
 function releaseLiveSidebandAdmission(ws: ServerWebSocket<WsData>): void {
@@ -415,8 +426,22 @@ function finalizeLiveSideband(ws: ServerWebSocket<WsData>, upstream?: WebSocket)
   ws.data.liveUpstream = undefined;
   ws.data.livePending = undefined;
   ws.data.livePendingBytes = undefined;
+  if (ws.data.liveConnectTimer !== undefined) clearTimeout(ws.data.liveConnectTimer);
+  if (ws.data.liveSessionTimer !== undefined) clearTimeout(ws.data.liveSessionTimer);
+  ws.data.liveConnectTimer = undefined;
+  ws.data.liveSessionTimer = undefined;
+  ws.data.liveUpstreamHeaders = undefined;
+  ws.data.liveUpstreamProtocols = undefined;
+  ws.data.liveValidateFrame = undefined;
+  if (ws.data.liveAbortListener) ws.data.liveAbortSignal?.removeEventListener("abort", ws.data.liveAbortListener);
+  ws.data.liveAbortSignal = undefined;
+  ws.data.liveAbortListener = undefined;
   ws.data.cancel = undefined;
-  releaseLiveSidebandAdmission(ws);
+  const finish = ws.data.liveFinish;
+  ws.data.liveFinish = undefined;
+  try { finish?.(ws.data.liveOutcome); }
+  catch { console.warn("[audio] upstream accounting failed during close"); }
+  finally { releaseLiveSidebandAdmission(ws); }
 }
 
 function armLiveSidebandCloseFallback(ws: ServerWebSocket<WsData>, upstream: WebSocket): void {
@@ -446,9 +471,55 @@ function armLiveSidebandCloseFallback(ws: ServerWebSocket<WsData>, upstream: Web
   }, LIVE_SIDEBAND_CLOSE_FALLBACK_MS);
 }
 
+function closeLiveSidebandBeforeUpgrade(
+  upstream: WebSocket,
+  release: () => void,
+  code = 1000,
+  reason = "",
+): void {
+  // There is no downstream socket to own this transport yet. Mirror
+  // closeLiveSideband's bounded close contract directly: release only after a
+  // close event or an observed CLOSED state, never merely after requesting close.
+  let released = false;
+  let fallback: ReturnType<typeof setTimeout> | undefined;
+  const releaseOnce = (): void => {
+    if (released) return;
+    released = true;
+    if (fallback !== undefined) clearTimeout(fallback);
+    release();
+  };
+  upstream.addEventListener("close", releaseOnce, { once: true });
+  if (upstream.readyState === WebSocket.CLOSED) {
+    releaseOnce();
+    return;
+  }
+  fallback = setTimeout(() => {
+    if (upstream.readyState === WebSocket.CLOSED) {
+      releaseOnce();
+      return;
+    }
+    try {
+      upstream.close(1000, "upstream close timeout");
+    } catch {
+      /* retain ownership until CLOSED is observed */
+    }
+    if ((upstream.readyState as number) === 3) releaseOnce();
+  }, LIVE_SIDEBAND_CLOSE_FALLBACK_MS);
+  try {
+    upstream.close(code, reason);
+  } catch {
+    /* the bounded fallback retries without releasing ownership */
+  }
+  if ((upstream.readyState as number) === 3) releaseOnce();
+}
+
 function closeLiveSideband(ws: ServerWebSocket<WsData>, code = 1000, reason = ""): void {
   if (ws.data.liveClosing) return;
   ws.data.liveClosing = true;
+  if (ws.data.liveConnectTimer !== undefined) clearTimeout(ws.data.liveConnectTimer);
+  if (ws.data.liveSessionTimer !== undefined) clearTimeout(ws.data.liveSessionTimer);
+  ws.data.liveConnectTimer = undefined;
+  ws.data.liveSessionTimer = undefined;
   ws.data.livePending = undefined;
   ws.data.livePendingBytes = undefined;
   ws.data.cancel = undefined;
@@ -478,32 +549,278 @@ function closeLiveSideband(ws: ServerWebSocket<WsData>, code = 1000, reason = ""
   }
 }
 
-function attachLiveSidebandUpstream(
+/**
+ * Dial the upstream sideband and report whether its handshake reached 101.
+ *
+ * Bun's client WebSocket does not surface the upstream handshake status, so the
+ * result is "opened" or "failed" and nothing finer. That is sufficient for the
+ * property this exists to guarantee: the client is never told the relay is live
+ * when it is not. Frames the upstream sends before the client socket exists are
+ * captured and handed back by `drain`, because a session preamble such as
+ * `session.created` arrives immediately after the upstream opens.
+ */
+export function openLiveSidebandUpstream(
+  url: string,
+  headers: Record<string, string>,
+  createWebSocket: LiveSidebandWebSocketFactory = (socketUrl, socketHeaders) => (
+    new WebSocket(socketUrl, { headers: socketHeaders } as unknown as string[])
+  ),
+  timeoutMs: number = LIVE_SIDEBAND_UPSTREAM_OPEN_TIMEOUT_MS,
+  signal?: AbortSignal,
+): Promise<LiveSidebandUpstreamOpenResult> {
+  return new Promise(resolve => {
+    let socket: WebSocket;
+    try {
+      socket = createWebSocket(url, headers);
+    } catch {
+      resolve({ ok: false, status: 502, code: "upstream_error", message: "voice upstream connect failed" });
+      return;
+    }
+
+    const buffered: Array<string | Buffer> = [];
+    let bufferedBytes = 0;
+    let capturing = true;
+    let settled = false;
+    let terminalFailure: LiveSidebandUpstreamFailure | undefined;
+    let removeAbortListener = (): void => {};
+
+    const finish = (result: LiveSidebandUpstreamOpenResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      removeAbortListener();
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      const failure = { status: 504, code: "upstream_timeout", message: "voice upstream did not open in time" };
+      terminalFailure = failure;
+      capturing = false;
+      buffered.length = 0;
+      bufferedBytes = 0;
+      finish({ ok: false, ...failure, socket });
+      try {
+        socket.close();
+      } catch {
+        /* ignore */
+      }
+    }, timeoutMs);
+
+    const failCapture = (failure: LiveSidebandUpstreamFailure): void => {
+      if (!capturing || terminalFailure) return;
+      terminalFailure = failure;
+      capturing = false;
+      buffered.length = 0;
+      bufferedBytes = 0;
+      finish({ ok: false, ...failure, socket });
+      try {
+        socket.close(1009, "sideband preamble overflow");
+      } catch {
+        /* the terminal failure is already retained for the downstream handoff */
+      }
+    };
+    const handoff: LiveSidebandUpstreamHandoff = {
+      failure: () => terminalFailure,
+      take: () => {
+        capturing = false;
+        if (terminalFailure) return { ok: false, failure: terminalFailure };
+        const frames = buffered.slice();
+        buffered.length = 0;
+        bufferedBytes = 0;
+        return { ok: true, frames };
+      },
+    };
+
+    socket.addEventListener("message", event => {
+      if (!capturing) return;
+      const frameBytes = webSocketFrameBytes(event.data);
+      if (exceedsLiveSidebandFrameByteLimit(frameBytes)) {
+        failCapture({ status: 502, code: "upstream_overflow", message: "voice upstream preamble frame is too large" });
+        return;
+      }
+      if (buffered.length >= LIVE_SIDEBAND_PENDING_MAX) {
+        failCapture({ status: 502, code: "upstream_overflow", message: "voice upstream sent too many preamble frames" });
+        return;
+      }
+      if (exceedsLiveSidebandPendingByteLimit(bufferedBytes, frameBytes)) {
+        failCapture({ status: 502, code: "upstream_overflow", message: "voice upstream preamble is too large" });
+        return;
+      }
+      if (typeof event.data === "string") buffered.push(event.data);
+      else if (event.data instanceof ArrayBuffer) buffered.push(Buffer.from(new Uint8Array(event.data)));
+      else if (ArrayBuffer.isView(event.data)) {
+        buffered.push(Buffer.from(new Uint8Array(event.data.buffer, event.data.byteOffset, event.data.byteLength)));
+      } else return;
+      bufferedBytes += frameBytes;
+    });
+    socket.addEventListener("open", () => {
+      finish({
+        ok: true,
+        socket,
+        handoff,
+      });
+    });
+    socket.addEventListener("error", () => {
+      const failure = { status: 502, code: "upstream_error", message: "voice upstream rejected the sideband join" };
+      terminalFailure ??= failure;
+      capturing = false;
+      buffered.length = 0;
+      bufferedBytes = 0;
+      finish({ ok: false, ...terminalFailure, socket });
+      try {
+        socket.close();
+      } catch {
+        /* the terminal failure is already retained */
+      }
+    });
+    socket.addEventListener("close", event => {
+      const failure = {
+        status: 502,
+        code: "upstream_error",
+        message: `voice upstream closed before opening (code ${event.code})`,
+        closeCode: event.code,
+        closeReason: event.reason,
+      };
+      terminalFailure ??= failure;
+      capturing = false;
+      buffered.length = 0;
+      bufferedBytes = 0;
+      finish({ ok: false, ...terminalFailure, socket });
+    });
+    const abortOpen = (): void => {
+      const failure = { status: 499, code: "request_cancelled", message: "voice sideband join was cancelled" };
+      terminalFailure ??= failure;
+      capturing = false;
+      buffered.length = 0;
+      bufferedBytes = 0;
+      finish({ ok: false, ...terminalFailure, socket });
+      try {
+        socket.close();
+      } catch {
+        /* the cancelled join no longer owns the socket */
+      }
+    };
+    if (signal) {
+      signal.addEventListener("abort", abortOpen, { once: true });
+      removeAbortListener = () => signal.removeEventListener("abort", abortOpen);
+      if (signal.aborted) abortOpen();
+    }
+  });
+}
+
+export function attachLiveSidebandUpstream(
   ws: ServerWebSocket<WsData>,
-  createWebSocket: LiveSidebandWebSocketFactory = (url, headers) => (
-    new WebSocket(url, { headers } as unknown as string[])
+  createWebSocket: LiveSidebandWebSocketFactory = (url, headers, protocols) => (
+    new WebSocket(url, { headers, protocols } as unknown as string[])
   ),
 ): void {
-  const url = ws.data.liveUpstreamUrl;
-  if (!url) {
-    closeLiveSideband(ws, 1011, "missing upstream");
+  if (ws.data.liveAbortSignal?.aborted) {
+    closeLiveSideband(ws, 1000, "audio connection canceled");
     return;
   }
+  const preOpened = ws.data.liveUpstream;
   let upstream: WebSocket;
-  try {
-    // Bun accepts per-handshake headers; the DOM lib types only list protocol arrays.
-    upstream = createWebSocket(url, ws.data.liveUpstreamHeaders ?? {});
-  } catch {
-    closeLiveSideband(ws, 1011, "upstream connect failed");
-    return;
+  if (preOpened) {
+    upstream = preOpened;
+  } else {
+    const url = ws.data.liveUpstreamUrl;
+    if (!url) {
+      closeLiveSideband(ws, 1011, "missing upstream");
+      return;
+    }
+    try {
+      // Bun accepts per-handshake headers; the DOM lib types only list protocol arrays.
+      upstream = createWebSocket(url, ws.data.liveUpstreamHeaders ?? {}, ws.data.liveUpstreamProtocols);
+    } catch {
+      closeLiveSideband(ws, 1011, "upstream connect failed");
+      return;
+    }
   }
   ws.data.liveUpstream = upstream;
+  ws.data.liveUpstreamHeaders = undefined;
+  ws.data.liveUpstreamProtocols = undefined;
   ws.data.liveClosing = false;
   ws.data.cancel = () => closeLiveSideband(ws, 1000, "client closed");
+  if (ws.data.liveMaxSessionMs !== undefined) {
+    ws.data.liveConnectTimer = setTimeout(() => {
+      ws.data.liveOutcome = "timeout";
+      closeLiveSideband(ws, 1011, "audio connection timed out");
+    }, 10_000);
+    ws.data.liveSessionTimer = setTimeout(() => closeLiveSideband(ws, 1000, "audio session expired"), ws.data.liveMaxSessionMs);
+  }
+
+  upstream.addEventListener("close", (event) => {
+    if (ws.data.liveUpstream !== upstream) return;
+    if (ws.data.liveFinish && !ws.data.liveClosing && event.code !== 1000) ws.data.liveOutcome = "connect_error";
+    ws.data.liveClosing = true;
+    finalizeLiveSideband(ws, upstream);
+    try {
+      const external = ws.data.liveMaxSessionMs !== undefined;
+      const validCode = event.code === 1000 || (event.code >= 1001 && event.code <= 1014 && ![1004, 1005, 1006].includes(event.code))
+        || (event.code >= 3000 && event.code <= 4999);
+      ws.close(external && !validCode ? 1011 : event.code || 1000, external ? "audio upstream closed" : event.reason || "");
+    } catch {
+      /* ignore */
+    }
+  });
+  upstream.addEventListener("error", () => {
+    if (ws.data.liveUpstream !== upstream) return;
+    if (ws.data.liveFinish && !ws.data.liveClosing) ws.data.liveOutcome = "connect_error";
+    closeLiveSideband(ws, 1011, "upstream error");
+  });
+  if (ws.data.liveAbortSignal) {
+    ws.data.liveAbortListener = () => closeLiveSideband(ws, 1000, "audio connection canceled");
+    ws.data.liveAbortSignal.addEventListener("abort", ws.data.liveAbortListener, { once: true });
+    if (ws.data.liveAbortSignal.aborted) closeLiveSideband(ws, 1000, "audio connection canceled");
+  }
+
+  if (preOpened) {
+    // The upstream opened before this socket existed, so its `open` event has already
+    // fired and the listener below will never run. Its early frames were captured for
+    // us; forward the capture now rather than dropping the session preamble.
+    const handoff = ws.data.liveUpstreamHandoff;
+    ws.data.liveUpstreamHandoff = undefined;
+    const takeover = handoff?.take();
+    if (!takeover?.ok || preOpened.readyState !== WebSocket.OPEN) {
+      const failure = takeover && !takeover.ok ? takeover.failure : undefined;
+      closeLiveSideband(
+        ws,
+        failure?.closeCode ?? 1011,
+        failure?.closeReason ?? "upstream closed before relay attachment",
+      );
+      return;
+    }
+    ws.data.liveOpened = true;
+    // The upstream opened before this socket existed, so the "open" listener
+    // below can never fire for it. Disarm the connect watchdog exactly as that
+    // listener would, or every session with a max lifetime is force-closed ten
+    // seconds after attach. The session timer stays armed: it bounds the whole
+    // session, not the connect phase.
+    if (ws.data.liveConnectTimer !== undefined) clearTimeout(ws.data.liveConnectTimer);
+    ws.data.liveConnectTimer = undefined;
+    for (const frame of takeover.frames) {
+      try {
+        // Mirror the live message listener exactly: same ceiling, same diagnostic
+        // record. These frames are upstream-to-client like any other.
+        if (exceedsLiveSidebandFrameByteLimit(webSocketFrameBytes(frame))) {
+          closeLiveSideband(ws, 1009, "message too large");
+          return;
+        }
+        logLiveSidebandFrame("u2c", frame);
+        ws.send(frame);
+      } catch {
+        closeLiveSideband(ws, 1011, "client send failed");
+        return;
+      }
+    }
+  }
 
   upstream.addEventListener("open", () => {
     if (ws.data.liveUpstream !== upstream || ws.data.liveClosing) return;
     ws.data.liveOpened = true;
+    if (ws.data.liveConnectTimer !== undefined) clearTimeout(ws.data.liveConnectTimer);
+    ws.data.liveConnectTimer = undefined;
+    // An accepted transport alone does not prove inference/quota recovery.
+    // Keep healthy closes neutral; explicit transport failures are recorded below.
     const pending = ws.data.livePending ?? [];
     ws.data.livePending = undefined;
     ws.data.livePendingBytes = undefined;
@@ -524,28 +841,18 @@ function attachLiveSidebandUpstream(
         return;
       }
       logLiveSidebandFrame("u2c", event.data);
-      if (typeof event.data === "string") ws.send(event.data);
-      else if (event.data instanceof ArrayBuffer) ws.send(event.data);
+      let sent: number;
+      if (typeof event.data === "string") sent = ws.send(event.data);
+      else if (event.data instanceof ArrayBuffer) sent = ws.send(event.data);
       else if (ArrayBuffer.isView(event.data)) {
-        ws.send(event.data.buffer.slice(event.data.byteOffset, event.data.byteOffset + event.data.byteLength));
-      } else ws.send(event.data as Buffer);
+        sent = ws.send(event.data.buffer.slice(event.data.byteOffset, event.data.byteOffset + event.data.byteLength));
+      } else sent = ws.send(event.data as Buffer);
+      if (ws.data.liveMaxSessionMs !== undefined && (sent === 0 || ws.getBufferedAmount() > MAX_WS_FRAME_BYTES)) {
+        closeLiveSideband(ws, 1013, "audio client backpressure");
+      }
     } catch {
       closeLiveSideband(ws, 1011, "client send failed");
     }
-  });
-  upstream.addEventListener("close", (event) => {
-    if (ws.data.liveUpstream !== upstream) return;
-    ws.data.liveClosing = true;
-    finalizeLiveSideband(ws, upstream);
-    try {
-      ws.close(event.code || 1000, event.reason || "");
-    } catch {
-      /* ignore */
-    }
-  });
-  upstream.addEventListener("error", () => {
-    if (ws.data.liveUpstream !== upstream) return;
-    closeLiveSideband(ws, 1011, "upstream error");
   });
 }
 
@@ -609,12 +916,6 @@ function withRequestLogId(response: Response, requestId: string): Response {
   });
 }
 
-export function remoteDashboardStartupHint(hostname: string | undefined): string | null {
-  return isLoopbackHostname(hostname)
-    ? "   Remote dashboard → SSH tunnel guide: https://opencodex.me/reference/configuration/server/#ssh-port-forwarding"
-    : null;
-}
-
 export interface StartServerDeps {
   /** Test-only seam; production always initializes its own management credential state. */
   managementAuthState?: ManagementAuthState;
@@ -634,8 +935,6 @@ export interface StartServerDeps {
   readinessGate?: ReadinessGate;
   /** Test-only package-tree observation; production captures package.json identity at boot. */
   packageTreeIntegrity?: PackageTreeIntegrityGuard;
-  /** Test-only seam for the awaited native AI Studio login process. */
-  runAiStudioNativeLogin?: typeof runAiStudioNativeLogin;
   /** Test-only seam for observing quota-worker registration ownership. */
   registerCodexQuotaAutoRefreshWorker?: typeof registerCodexQuotaAutoRefreshWorker;
 }
@@ -695,35 +994,38 @@ export function warnAgentTaskRecoveryStartup(config: {
   console.warn("   Recovered plaintext assignment data is retained only in a bounded, process-local in-memory cache; exact fidelity is not guaranteed and the path depends on undocumented backend behavior.");
 }
 
+export function warnPlaintextV2AgentMessagesStartup(config: { plaintextV2AgentMessages?: boolean }): void {
+  if (config.plaintextV2AgentMessages !== true) return;
+  console.warn("⚠️  Experimental plaintext V2 agent messages are enabled.");
+  console.warn("   Eligible ChatGPT collaboration calls may carry plaintext message arguments. HTTPS remains encrypted, but task text may be retained in Codex history, selected providers, and local response/debug state.");
+  console.warn("   This depends on undocumented ChatGPT and Codex behavior; it does not decrypt existing tasks.");
+}
+
 export function startServer(port?: number, deps: StartServerDeps = {}): Server<WsData> {
-  const managementApi: ManagementApiDeps = {
-    saveConfigPreservingClaudeCode,
-    mutatePersistedConfig,
-    storageCleanupPolicyJob: {
-      getState: getStorageCleanupPolicyJobState,
-      getTestStream: getStorageCleanupPolicyTestStreamResponse,
-      requestRun: requestStorageCleanupPolicyRun,
-    },
-    ...deps.managementApi,
-  };
   const localAttestationSecret = deps.localAttestationSecret ?? createLocalAttestationSecret();
   // Captured before loadConfig() starts the optional ACL flight so stop() drains the same dir
   // even if OPENCODEX_HOME changes underneath a long-lived process.
   const startupConfigDir = getConfigDir();
   const startupConfig = migrateStartupSubagentModels(
-    runModelRenameStartupMigration(runAlibabaRegionStartupMigration(runOpenAiTierStartupMigration(loadConfig()))),
+    runModelRenameStartupMigration(
+      runDevinProviderMergeStartupMigration(
+        runAlibabaRegionStartupMigration(runOpenAiTierStartupMigration(loadConfig())),
+      ),
+    ),
   );
   // Reconcile disk-backed presets first: it replaces provider rows and must not undo
   // an in-memory wire upgrade when that upgrade's persistence is temporarily unavailable.
   reconcileOAuthProviders(startupConfig);
-  const config = migrateStartupXaiResponses(startupConfig);
+  const config = migrateStartupZaiResponses(migrateStartupXaiResponses(startupConfig));
+  warnPlaintextV2AgentMessagesStartup(config);
   warnAgentTaskRecoveryStartup(config);
   setLiveStateStoreConfig(config);
   applyProxyEnv(config);
-  assertServerAuthConfig(config, { allowPlaintextRemoteForTests: allowPlaintextRemoteForTests() });
+  assertServerAuthConfig(config);
   const managementAuth = deps.managementAuthState ?? initializeManagementAuthState(config);
   const managementSessionControl = createManagementSessionControl(managementAuth);
   let userCostOverlayReconciler: { stop(): void } | null = null;
+  const liveCallBindings = new LiveCallBindings();
   // Arm synchronously before listen. A pending journal therefore makes __main__ unusable
   // before any request can resolve its physical credential, while health/management/Pool stay live.
   reconcileLiveStateStores();
@@ -732,24 +1034,11 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   // indistinguishable from "never chose". Pin those to subscription once so an upgrade
   // never silently moves a deliberate subscriber onto proxy.
   if (runClaudeAuthModeMigration(config)) saveConfig(config);
-  // Sidecar model migration (KST 2026-07-10 06:00 = UTC 2026-07-09 21:00): auto-migrate the old
-  // gpt-5.4-mini default to gpt-5.6-luna for both search and vision sidecars. Only touches configs
-  // still on the old default — explicit user choices are preserved.
-  {
-    const SIDECAR_MIGRATION_CUTOFF = Date.UTC(2026, 6, 9, 21, 0); // July 9 21:00 UTC = KST July 10 06:00
-    if (Date.now() >= SIDECAR_MIGRATION_CUTOFF) {
-      let migrated = false;
-      if (config.webSearchSidecar?.model === "gpt-5.4-mini") {
-        config.webSearchSidecar = { ...config.webSearchSidecar, model: "gpt-5.6-luna" };
-        migrated = true;
-      }
-      if (config.visionSidecar?.model === "gpt-5.4-mini") {
-        config.visionSidecar = { ...config.visionSidecar, model: "gpt-5.6-luna" };
-        migrated = true;
-      }
-      if (migrated) saveConfig(config);
-    }
-  }
+  // Retired Codex-login models: a stored gpt-5.4-mini is a guaranteed 404 for the search and
+  // vision sidecars and for pool warmup, so it moves to gpt-5.6-luna. Extracted so the rule is
+  // testable on its own; see src/codex/retired-model-migration.ts for why exact equality also
+  // rewrites an explicit choice.
+  if (runRetiredCodexModelMigration(config)) saveConfig(config);
   // Resolve unattended service-home authority before any Codex lock, cache, owner,
   // journal, or credential path. Both positive foreign evidence and an unprovable
   // ownership state are non-authority.
@@ -825,8 +1114,16 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   const bindHost = !configuredHost || /^localhost$/i.test(configuredHost) ? "127.0.0.1" : configuredHost;
 
   // Unauthenticated loopback listener (#1102). Off unless explicitly enabled.
+  // A port-less enabled entry is the companion form: same port as the public listener, on
+  // 127.0.0.1 (#4236). Refuse an impossible pair here, before any bind, so a hand edit that
+  // bypassed validateConfigCandidate reports the collision rather than EADDRINUSE from a
+  // rollback that looks like a foreign process holding the port.
   const loopbackListener = config.unauthenticatedLoopbackListener;
-  const loopbackListenerPort = loopbackListener?.enabled ? loopbackListener.port : null;
+  if (loopbackListener?.enabled === true && loopbackListener.port === undefined) {
+    const companionError = loopbackCompanionBindError(config.hostname, listenPort);
+    if (companionError) throw new Error(companionError);
+  }
+  const loopbackListenerPort = effectiveLoopbackListenerPort(config, listenPort);
   // Hub management ingress is a third, management-only listener. Its address is intentionally
   // fixed: the kernel loopback bind is the trust boundary that permits Tailscale identity headers.
   const managementIngress = config.runtimeRole === "hub" ? config.hub?.managementIngress : undefined;
@@ -864,6 +1161,25 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
    * keeps the paid upstream behind its own admission and forward-credential checks, so admit only
    * the exact methods and paths it serves (#3428).
    *
+   * `POST /v1/messages` (Anthropic wire) and `POST /v1/chat/completions` (OpenAI chat wire)
+   * are the inference endpoints the hub's OWN local clients speak: `ocx claude` and the
+   * `system-env` injection and Claude Desktop 3P dial the first, Cursor Private Inference, the
+   * vision `routed-describe` helper and aside/opencode the second (#4236). On a hub whose
+   * public listener binds a tailnet address there is no other local socket for them, so
+   * leaving them off this list left every non-Codex local client pointed at a closed port.
+   * Both handlers resolve their own admission from the RECEIVING listener's policy view — the
+   * same resolver and the same loopback short-circuit `/v1/responses` already uses — so this
+   * adds a wire, not a trust level. `/api/*` is deliberately still absent: local management
+   * discovery goes to the authenticated management surface, never to this listener.
+   *
+   * `POST /v1/messages/count_tokens` completes that Anthropic wire. It is admitted on a
+   * narrower argument than the other two rather than on symmetry: it spends no provider quota,
+   * reaches no stored credential, and returns a token count computed from the request body the
+   * caller already holds. Withholding it bought no confinement — the same caller may POST the
+   * whole conversation to `/v1/messages` on this socket — and cost Claude Code its server-side
+   * count, which it then silently replaces with a local estimate. `/api/*`, `/healthz`,
+   * `/readyz` and the GUI remain 404 here, which is the boundary that actually matters.
+   *
    * `GET /v1/models` is on the list for a reason that is easy to miss. When catalog
    * materialization fails or finds no source, `syncCodex` warns and injects with
    * `catalogPath: null`; Codex then builds an ONLINE model manager and `model/list` refreshes
@@ -876,7 +1192,12 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       return req.method === "POST" || req.headers.get("upgrade")?.toLowerCase() === "websocket";
     }
     if (path === "/v1/responses/compact") return req.method === "POST";
+    if (path === "/v1/messages" || path === "/v1/chat/completions") return req.method === "POST";
+    if (path === "/v1/messages/count_tokens") return req.method === "POST";
+    if (path === "/v1/audio/transcriptions") return req.method === "POST";
+    if (path === "/v1/audio/transcriptions/stream") return req.headers.get("upgrade")?.toLowerCase() === "websocket";
     if (path === "/v1/alpha/search") return req.method === "POST";
+    if (contextEndpoint(path)) return req.method === "POST";
     if (path === "/v1/images/generations" || path === "/v1/images/edits") {
       return req.method === "POST";
     }
@@ -907,7 +1228,10 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
    */
   function managementIngressRouteAllowed(url: URL, req: Request): boolean {
     const rawPath = url.pathname;
-    if (req.headers.get("upgrade")?.toLowerCase() === "websocket") return false;
+    if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+      return remoteWorkspaceEnabled(config) && rawPath === "/remote-workspace/agent";
+    }
+    if (rawPath === "/remote-workspace/pair") return remoteWorkspaceEnabled(config) && req.method === "POST";
     if (rawPath === "/opencodex-session") return req.method === "GET" || req.method === "POST";
     if (rawPath.startsWith("/api/")) return true;
     if (req.method !== "GET" && req.method !== "HEAD") return false;
@@ -1079,6 +1403,22 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   let loopbackServer: Server<WsData> | null = null;
   let managementIngressServer: Server<WsData> | null = null;
 
+  // Resolved once, before any listener binds. The clamp is silent inside the resolver so it
+  // stays pure and per-request cheap; the operator is told here instead, once, because a
+  // config value that was quietly reduced is exactly the thing they would otherwise debug
+  // against the wrong limit.
+  const inboundBodyLimitBytes = resolveInboundBodyLimitBytes(config.maxInboundBodyBytes);
+  const requestedInboundBodyLimit = config.maxInboundBodyBytes;
+  if (requestedInboundBodyLimit !== undefined
+    && requestedInboundBodyLimit > 0
+    && requestedInboundBodyLimit !== inboundBodyLimitBytes) {
+    console.warn(
+      `[server] maxInboundBodyBytes=${requestedInboundBodyLimit} is outside the supported range `
+      + `[${MIN_CONFIGURABLE_INBOUND_BODY_BYTES}, ${MAX_CONFIGURABLE_INBOUND_BODY_BYTES}]; `
+      + `using ${inboundBodyLimitBytes} bytes.`,
+    );
+  }
+
   type ServerIngress = "public" | "unauthenticated-loopback" | "hub-management";
   function ingressForServer(requestServer: Server<WsData>): ServerIngress {
     if (requestServer === loopbackServer) return "unauthenticated-loopback";
@@ -1087,6 +1427,24 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   }
   let backgroundLifecycle: ReturnType<typeof acquireServerBackgroundLifecycle> | null = null;
   let unregisterQuotaAutoRefresh: (() => void) | null = null;
+  let remoteWorkspaceStopping = false;
+  let remoteWorkspaceShutdown: (() => Promise<void>) | undefined;
+  const managementApiDeps: ManagementApiDeps = {
+    ...deps.managementApi,
+    remoteWorkspaceStopping: () => remoteWorkspaceStopping,
+    onRemoteWorkspaceShutdown: shutdown => { remoteWorkspaceShutdown = shutdown; },
+  };
+  let workspaceRuntimeFlight: Promise<typeof import("../remote-control/workspace-runtime")> | undefined;
+  const loadRemoteWorkspaceRuntime = () => {
+    workspaceRuntimeFlight ??= import("../remote-control/workspace-runtime");
+    remoteWorkspaceShutdown = async () => {
+      const runtime = await workspaceRuntimeFlight!;
+      const sessions = deps.managementApi?.remoteWorkspaceSessions ?? runtime.initializedRemoteWorkspaceSessionsForConfig(config);
+      const hub = deps.managementApi?.remoteWorkspaceHub ?? runtime.initializedRemoteWorkspaceHubForConfig(config);
+      try { await sessions?.shutdown(); } finally { hub?.closeAllConnections(); }
+    };
+    return workspaceRuntimeFlight;
+  };
   try {
     backgroundLifecycle = acquireServerBackgroundLifecycle(applyPolicy);
     unregisterQuotaAutoRefresh = (deps.registerCodexQuotaAutoRefreshWorker
@@ -1096,15 +1454,18 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     // Started inside the guarded startup transaction so the catch below can
     // release the owner-scoped lease on any listener failure.
     userCostOverlayReconciler = startUserCostOverlayReconciler({ liveConfig: config });
-    const plaintextServeOptions = {
+    const serveOptions = {
       idleTimeout: 255,
-      maxRequestBodySize: MAX_DECOMPRESSED_BODY_BYTES,
+      // Bun rejects an oversized body before `fetch` runs, so the listener has to be raised
+      // with the admission limit or the opt-in would do nothing. Fixed at bind time: a live
+      // `maxInboundBodyBytes` edit needs a restart, which the config doc states.
+      maxRequestBodySize: inboundBodyLimitBytes,
       async fetch(req: Request, requestServer: Server<WsData>): Promise<Response> {
       const ingress = ingressForServer(requestServer);
       // The unauthenticated loopback listener (#1102) serves a fixed allowlist and nothing
       // else. Rejecting here, before any handler runs, is what keeps the surface from growing
       // silently when a route is added below.
-      if (ingress === "unauthenticated-loopback" && !loopbackRouteAllowed(new URL(req.url), req)) {
+      if (ingress === "unauthenticated-loopback" && !loopbackRouteAllowed(codexCompatibleUrl(req.url), req)) {
         return withCors(
           formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${new URL(req.url).pathname}`),
           req,
@@ -1113,7 +1474,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       }
       // Tailscale Serve terminates only on this separately bound loopback socket. Reject before
       // dispatch so no data, readiness, health, WebSocket, or unknown-static handler can run.
-      if (ingress === "hub-management" && !managementIngressRouteAllowed(new URL(req.url), req)) {
+      if (ingress === "hub-management" && !managementIngressRouteAllowed(codexCompatibleUrl(req.url), req)) {
         return withCors(
           formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${new URL(req.url).pathname}`),
           req,
@@ -1126,7 +1487,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       // same code path a plain loopback bind has always taken — Host-header check included.
       // Routing, provider selection and response bodies keep using `config`.
       const policy: RequestPolicyView = ingress === "unauthenticated-loopback" ? loopbackPolicy() : config;
-      const url = new URL(req.url);
+      const url = codexCompatibleUrl(req.url);
       markActivity(`${req.method} ${url.pathname}`);
 
       // Readiness is exact-GET on the literal /readyz path. Compare the DECODED
@@ -1171,22 +1532,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         if (readyzPath !== undefined) {
           return withCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, policy);
         }
-        if (url.pathname === "/api/aistudio/session") {
-          const origin = req.headers.get("Origin");
-          const peerAddress = requestServer.requestIP(req)?.address ?? null;
-          if (isLoopbackPeerAddress(peerAddress) && isAiStudioSessionOrigin(origin, policy)) {
-            return new Response(null, {
-              status: 204,
-              headers: {
-                "Access-Control-Allow-Origin": origin as string,
-                "Access-Control-Allow-Methods": "POST, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type, X-OpenCodex-API-Key",
-                Vary: "Origin, Access-Control-Request-Headers",
-              },
-            });
-          }
-          return new Response(null, { status: 403, headers: corsHeaders() });
-        }
         const managementPreflight = url.pathname.startsWith("/api/");
         const allowed = managementPreflight
           ? isAllowedManagementOrigin(req, config)
@@ -1198,6 +1543,133 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           status: 204,
           headers: managementPreflight ? managementCorsHeaders(req, config) : corsHeaders(req, policy),
         });
+      }
+
+      // An OCX-only executor exchanges one short-lived pairing code for a device-scoped
+      // token. This is intentionally outside /api: management auth belongs to the browser
+      // that created the grant, while the new device owns only that one-time code.
+      if (url.pathname === "/remote-workspace/pair" && req.method === "POST") {
+        if (!remoteWorkspaceEnabled(config)) {
+          return Response.json({ error: "Remote Workspace is not enabled on this OpenCodex instance." }, { status: 404 });
+        }
+        // Browser JavaScript must use the authenticated dashboard route. Refusing Origin-bearing
+        // requests leaves this exchange to an explicit OCX device process and avoids turning a
+        // copied pairing code into a cross-site enrollment action.
+        if (req.headers.get("origin") !== null) {
+          return Response.json({ error: "Remote Workspace device pairing does not accept browser-origin requests." }, {
+            status: 403,
+            headers: { "cache-control": "no-store" },
+          });
+        }
+        const [{ remoteWorkspaceHubForConfig }, { RemoteWorkspacePairingRateLimitError }] = await Promise.all([
+          loadRemoteWorkspaceRuntime(),
+          import("../remote-control/workspace-hub"),
+        ]);
+        if (remoteWorkspaceStopping) return Response.json({ error: "Remote Workspace is stopping." }, { status: 503 });
+        const hub = deps.managementApi?.remoteWorkspaceHub ?? remoteWorkspaceHubForConfig(config);
+        // A loopback socket alone cannot prove that Tailscale Serve supplied its identity header:
+        // another local process can connect directly and forge it. Pairing therefore uses only the
+        // kernel-observed peer on every listener; proxied management users intentionally share the
+        // loopback bucket rather than gaining a header-rotation bypass.
+        const peer = requestServer.requestIP(req)?.address ?? "unknown";
+        const pairingSource = `${ingress}:${peer}`;
+        const rateLimitResponse = (error: unknown): Response | null => {
+          if (!(error instanceof RemoteWorkspacePairingRateLimitError)) return null;
+          return Response.json({ error: "Remote Workspace pairing is temporarily rate limited." }, {
+            status: 429,
+            headers: {
+              "cache-control": "no-store",
+              "retry-after": String(error.retryAfterSeconds),
+            },
+          });
+        };
+        try {
+          // Check the existing source block before reading or parsing an attacker-controlled body.
+          // pairDevice checks again after the await and records only code-shaped authentication
+          // failures, so malformed JSON cannot allocate one limiter entry per request.
+          hub.assertPairingSourceAllowed(pairingSource);
+        } catch (error) {
+          const limited = rateLimitResponse(error);
+          if (limited) return limited;
+          throw error;
+        }
+        const declaredLength = Number(req.headers.get("content-length") ?? "0");
+        if (!Number.isFinite(declaredLength) || declaredLength > REMOTE_WORKSPACE_PAIRING_BODY_LIMIT) {
+          return Response.json({ error: "Remote Workspace pairing body is too large." }, { status: 413 });
+        }
+        const text = await readBoundedRequestText(req, REMOTE_WORKSPACE_PAIRING_BODY_LIMIT);
+        if (text === null) return Response.json({ error: "Remote Workspace pairing body is too large." }, { status: 413 });
+        if (remoteWorkspaceStopping) return Response.json({ error: "Remote Workspace is stopping." }, { status: 503 });
+        let body: unknown;
+        try { body = JSON.parse(text); }
+        catch { return Response.json({ error: "Invalid Remote Workspace pairing request." }, { status: 400 }); }
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+          return Response.json({ error: "Invalid Remote Workspace pairing request." }, { status: 400 });
+        }
+        const record = body as Record<string, unknown>;
+        const required = ["code", "name", "platform", "publicKey", "roots"];
+        const allowed = new Set([...required, "capabilities"]);
+        if (required.some(key => !Object.hasOwn(record, key))
+          || Object.keys(record).some(key => !allowed.has(key))) {
+          return Response.json({ error: "Invalid Remote Workspace pairing request." }, { status: 400 });
+        }
+        try {
+          const paired = hub.pairDevice(record, pairingSource);
+          return Response.json(paired, { status: 201, headers: { "cache-control": "no-store" } });
+        } catch (error) {
+          const limited = rateLimitResponse(error);
+          if (limited) return limited;
+          const message = error instanceof Error ? error.message : "Remote Workspace pairing failed.";
+          const conflict = /already in use|limit reached/i.test(message);
+          return Response.json({ error: message }, {
+            status: conflict ? 409 : 401,
+            headers: { "cache-control": "no-store" },
+          });
+        }
+      }
+
+      // Each executor holds one device-scoped bearer and opens one outbound WSS. The token is
+      // authenticated only at upgrade and never enters ws.data; subsequent frames are bound to
+      // the device identity and per-session signed E2EE handshake.
+      if (url.pathname === "/remote-workspace/agent" && req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+        if (!remoteWorkspaceEnabled(config) || req.headers.get("origin") !== null) {
+          return Response.json({ error: "Remote Workspace agent upgrade refused." }, { status: 403 });
+        }
+        const authorization = req.headers.get("authorization") ?? "";
+        const match = /^Bearer (ocxrw_[A-Za-z0-9_-]{43})$/.exec(authorization);
+        if (!match) return Response.json({ error: "Remote Workspace device authentication required." }, { status: 401 });
+        const { remoteWorkspaceHubForConfig } = await loadRemoteWorkspaceRuntime();
+        const { RemoteWorkspaceHubAgentConnection } = await import("../remote-control/workspace-agent-connection");
+        if (remoteWorkspaceStopping) return Response.json({ error: "Remote Workspace is stopping." }, { status: 503 });
+        const hub = deps.managementApi?.remoteWorkspaceHub ?? remoteWorkspaceHubForConfig(config);
+        const device = hub.authenticateDeviceToken(match[1]!);
+        if (!device) return Response.json({ error: "Remote Workspace device authentication failed." }, { status: 401 });
+        const upgraded = requestServer.upgrade(req, {
+          data: {
+            kind: "remote-workspace-agent",
+            remoteWorkspaceOpen: socket => {
+              const connection = new RemoteWorkspaceHubAgentConnection({
+                deviceId: device.id,
+                devicePublicKey: device.publicKey,
+                hubIdentity: hub.identity(),
+                capabilities: device.capabilities,
+                onCapabilities: capabilities => hub.updateDeviceCapabilities(device.id, capabilities),
+                socket: {
+                  send: value => {
+                    if (socket.send(value) === 0) throw new Error("remote workspace socket send dropped");
+                  },
+                  close: (code, reason) => socket.close(code, reason),
+                },
+              });
+              hub.attachConnection(device.id, connection);
+              socket.data.remoteWorkspaceClose = () => hub.detachConnection(device.id, connection);
+              return connection;
+            },
+          } satisfies WsData,
+        });
+        return upgraded
+          ? undefined as unknown as Response
+          : Response.json({ error: "Remote Workspace WebSocket upgrade failed." }, { status: 426 });
       }
 
       // Responses WebSocket (phase 120.2). Codex upgrades the same /v1/responses path; auth is
@@ -1237,104 +1709,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         })) return undefined as unknown as Response;
         websocketLease.release();
         return withCors(formatErrorResponse(426, "upgrade_required", "WebSocket upgrade failed"), req, policy);
-      }
-
-      if (url.pathname === "/v1/ws/aistudio" || url.pathname === "/aistudio/ws" || url.pathname === "/v1/ws/aistudio/status") {
-        return withCors(jsonResponse({
-          error: "gone",
-          message: "AI Studio browser relay endpoints are deprecated and return 410 Gone. Use native macOS login (ocx login) or the session exporter extension.",
-        }, 410), req, policy);
-      }
-
-      if (url.pathname === "/api/aistudio/session" && req.method === "POST") {
-        const peerAddress = requestServer.requestIP(req)?.address ?? null;
-        if (!isLoopbackPeerAddress(peerAddress)) {
-          return withAiStudioSessionCors(withCors(formatErrorResponse(403, "forbidden", "AI Studio session import is loopback-only"), req, policy), req, policy);
-        }
-        const dedicated = req.headers.get("x-opencodex-api-key")?.trim() ?? "";
-        const admission = dedicated
-          ? resolveDataPlaneAdmissionSecret(dedicated, config, "dedicated")
-          : null;
-        if (!admission) {
-          return withAiStudioSessionCors(withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy), req, policy);
-        }
-        const origin = req.headers.get("Origin");
-        if (!isAiStudioSessionOrigin(origin, policy)) {
-          return withAiStudioSessionCors(withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy), req, policy);
-        }
-        try {
-          const bodyJson = await readManagementJsonBody(req) as any;
-          const { saveAiStudioSession, saveAiStudioSessionFromToken } = await import("../oauth/aistudio-session-sync");
-          if (typeof bodyJson.token === "string" && bodyJson.token) {
-            saveAiStudioSessionFromToken(bodyJson.token);
-          } else if (Array.isArray(bodyJson.cookies)) {
-            saveAiStudioSession({
-              selectedProject: bodyJson.selectedProject || "",
-              windowId: bodyJson.windowId || "",
-              cookies: bodyJson.cookies,
-            });
-          } else {
-            return withAiStudioSessionCors(withCors(jsonResponse({ error: "invalid session payload" }, 400), req, policy), req, policy);
-          }
-          return withAiStudioSessionCors(withCors(jsonResponse({ ok: true, message: "AI Studio session updated successfully" }), req, policy), req, policy);
-        } catch (error) {
-          const tooLarge = managementBodyTooLargeResponse(error, req, config);
-          return withAiStudioSessionCors(
-            withCors(tooLarge ?? jsonResponse({ error: "invalid session payload" }, 400), req, policy),
-            req,
-            policy,
-          );
-        }
-      }
-
-      if (url.pathname === "/aistudio/bridge" && req.method === "GET") {
-        const bridgeHtml = `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Google AI Studio Relay Deprecated - OpenCodex</title></head>
-<body><h1>HTTP 410 Gone: AI Studio Browser Relay Deprecated</h1>
-<p>The browser relay has been retired. Use native macOS authentication or the session exporter extension.</p>
-<p>Run <code>ocx login</code> to connect.</p></body></html>`;
-        return new Response(bridgeHtml, { status: 410, headers: { "Content-Type": "text/html; charset=utf-8" } });
-      }
-
-      if (url.pathname === "/aistudio/bridge.user.js" && req.method === "GET") {
-        return new Response("// HTTP 410 Gone: OpenCodex AI Studio browser relay and userscripts are deprecated.\n", {
-          status: 410,
-          headers: { "Content-Type": "application/javascript; charset=utf-8" },
-        });
-      }
-
-      if (url.pathname === "/api/aistudio/login/native" && req.method === "POST") {
-        const peerAddress = requestServer.requestIP(req)?.address ?? null;
-        if (!isLoopbackPeerAddress(peerAddress)) {
-          return withManagementCors(jsonResponse({ ok: false, error: "Native AI Studio login is loopback-only" }, 403), req, config);
-        }
-        const localManagementAuth = {
-          attestationSecret: localAttestationSecret,
-          pid: process.pid,
-          port: boundPort ?? requestServer.port ?? listenPort,
-        };
-        const apiAuthError = requireManagementAuth(req, managementAuth, config, localManagementAuth);
-        if (apiAuthError) return withManagementCors(apiAuthError, req, config);
-        const principal = managementPrincipal(req, managementAuth, config, localManagementAuth);
-        if (principal !== "gui-session") {
-          return withManagementCors(jsonResponse({ ok: false, error: "GUI session required" }, 403), req, config);
-        }
-        try {
-          const login = await (deps.runAiStudioNativeLogin ?? runAiStudioNativeLogin)({ signal: req.signal });
-          if (login.kind === "unsupported") return jsonResponse({ ok: false, error: "Native login is only available on macOS" }, 400, req, policy);
-          if (login.kind === "cancelled") return jsonResponse({ ok: false, error: "Native AI Studio login cancelled" }, 499, req, policy);
-          if (login.kind === "failed") return jsonResponse({ ok: false, error: "Native AI Studio login failed" }, 500, req, policy);
-          const probeRequest = new Request(new URL("/api/providers/test?name=google-aistudio", req.url), {
-            method: "POST",
-            headers: { Host: req.headers.get("Host") ?? "127.0.0.1" },
-          });
-          const probeResponse = await handleManagementAPI(probeRequest, new URL(probeRequest.url), config, managementApi);
-          const probe = await probeResponse?.json().catch(() => null) as { ok?: boolean; error?: string } | null;
-          if (!probe?.ok) return jsonResponse({ ok: false, error: "AI Studio connection probe failed" }, 502, req, policy);
-          return jsonResponse({ ok: true }, 200, req, policy);
-        } catch {
-          return jsonResponse({ ok: false, error: "Native AI Studio login failed" }, 500, req, policy);
-        }
       }
 
       if (url.pathname === "/healthz" && req.method === "GET") {
@@ -1430,7 +1804,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             }), req, config);
           }
         }
-        const mgmtResponse = await handleManagementAPI(req, url, config, managementApi, principal, managementSessionControl);
+        const mgmtResponse = await handleManagementAPI(req, url, config, managementApiDeps, principal, managementSessionControl);
         if (mgmtResponse) return withManagementCors(mgmtResponse, req, config);
         return withManagementCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, config);
       }
@@ -1514,6 +1888,88 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             policy,
           ),
           admission,
+        );
+      }
+
+      if (url.pathname === "/v1/usage" && req.method === "GET") {
+        const { handleHubUsage } = await import("./hub-usage");
+        return handleHubUsage(req, config, policy);
+      }
+
+      if (url.pathname === "/v1/hub-state" && (req.method === "GET" || req.method === "HEAD")) {
+        // #4236: a connected client had no way to learn which providers this hub can actually
+        // serve, so `ocx status` on the client reported the CLIENT's empty credential store as
+        // if it were the truth — "xai ✗ not logged in" on a machine whose hub has xAI logged
+        // in. The fix is one least-privilege data-plane read, in the /v1/catalog (#809)
+        // tradition: same admission resolver, same origin check, no parameters, no caller
+        // credential forwarded upstream, and a body of booleans plus model ids. Widening
+        // `/api/*` or handing the client an admin token to read `GET /api/providers` would
+        // have traded a reporting defect for a credential one.
+        //
+        // What it discloses beyond /v1/catalog and /v1/models, exactly: `hasCredential`,
+        // `loggedIn`, `authMode`, the featured roster, and the NAME and adapter of an ENABLED
+        // provider those routes omit for want of a usable credential — which is the point of
+        // the route. A `disabled` provider is NOT exported (`buildHubState` drops it), because
+        // the catalog filters it out too and naming it here would be the only place a data key
+        // learns of it.
+        //
+        // Placed between /v1/catalog and /v1/models so all three least-privilege client reads
+        // stay in sight of each other.
+        const admission = resolveApiAuth(req, policy);
+        if (!admission) return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
+        if (!isAllowedRequestOrigin(req, policy)) {
+          return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin data-plane request blocked"), req, policy);
+        }
+        // Role gate AFTER admission, deliberately: answering an unauthenticated caller would
+        // turn this into a free "is that machine a hub?" probe. A standalone or client install
+        // gains no surface at all — the route simply does not exist there.
+        //
+        // Built, not formatErrorResponse'd, for the same reason /v1/catalog builds its 404: the
+        // code has to distinguish "this route exists and this host is not a hub" from "this
+        // build has no such route", which is the difference between admission proof and a
+        // vacuous pass in tests/server/api-key-attribution.test.ts.
+        if (config.runtimeRole !== "hub") {
+          return withCors(
+            new Response(JSON.stringify({
+              error: {
+                type: "invalid_request_error",
+                code: "hub_state_not_a_hub",
+                message: "hub state is served only by a host whose runtimeRole is hub",
+              },
+            }), { status: 404, headers: { "content-type": "application/json" } }),
+            req,
+            policy,
+          );
+        }
+        const { buildHubState } = await import("./hub-state");
+        const { MAX_HUB_STATE_BYTES } = await import("../remote/hub-state");
+        const { oauthLoginSummary } = await import("../oauth");
+        // `true` masks emails, but the projection drops the field entirely; passing the mask
+        // anyway means a future refactor that starts copying fields cannot leak a raw address.
+        const body = JSON.stringify(buildHubState(config, oauthLoginSummary(true), VERSION));
+        const bytes = Buffer.byteLength(body);
+        if (bytes > MAX_HUB_STATE_BYTES) {
+          return withCors(
+            new Response(JSON.stringify({
+              error: { type: "server_error", code: "hub_state_too_large", message: "hub state exceeds the maximum served size" },
+            }), { status: 507, headers: { "content-type": "application/json" } }),
+            req,
+            policy,
+          );
+        }
+        return withCors(
+          new Response(req.method === "HEAD" ? null : body, {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+              // Varies by credential-bearing identity and by live login state: never cached,
+              // and no validator to revalidate with (same rule as /v1/catalog).
+              "cache-control": "no-store",
+              "content-length": String(bytes),
+            },
+          }),
+          req,
+          policy,
         );
       }
 
@@ -1840,7 +2296,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           ? detectCursorInstalls().find(install => install.build === "private-inference")
           : undefined;
         const cursorEffortTable = effortRowsEnabled
-          ? (managementApi.loadCursorEffortTable ?? loadCursorEffortTable)(privateInference)
+          ? (deps.managementApi?.loadCursorEffortTable ?? loadCursorEffortTable)(privateInference)
           : null;
         const expandedNativeModelRow = (id: string, metadataId = id) => {
           const reasoningEfforts = nativeReasoningEfforts(metadataId);
@@ -1931,7 +2387,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
           inboundProtocol: "responses",
-          agentKind: classifyAgentKind(req.headers, "responses"),
         };
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
           let response: Response;
@@ -2006,6 +2461,34 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         }), req, policy);
       }
 
+      if (contextEndpoint(url.pathname) !== undefined && req.method === "POST" && contextRelayActivated()) {
+        // No timeout disable here. The relay is a bounded JSON round trip that owns one deadline
+        // from entry; removing the idle timeout first would let an unfinished body hold an
+        // admitted turn slot indefinitely, before that deadline ever starts.
+        if (isDraining()) {
+          return drainingResponse(req, policy);
+        }
+        const admission = resolveApiAuth(req, policy);
+        if (!admission) return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
+        if (!isAllowedRequestOrigin(req, policy)) {
+          return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin data-plane request blocked"), req, policy);
+        }
+        const start = Date.now();
+        const requestId = nextRequestLogId(start);
+        const logCtx: RequestLogContext = {
+          model: "context_history",
+          provider: "unknown",
+          ...admissionFields(admission),
+        };
+        return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
+          const response = await handleContextHistory(req, config, logCtx, contextEndpoint(url.pathname)!,
+            turnAdmissionLease, admission, () => resolveApiAuth(req, policy));
+          addFinalRequestLog(requestId, start, logCtx, response.status,
+            response.status === 499 ? { closeReason: "client_cancel" } : undefined);
+          return withCors(response, req, policy);
+        });
+      }
+
       if (url.pathname === "/v1/alpha/search" && req.method === "POST") {
         disableResponsesRequestTimeout(req, requestServer);
         if (isDraining()) {
@@ -2047,7 +2530,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
           inboundProtocol: "responses",
-          agentKind: classifyAgentKind(req.headers, "responses"),
         };
         if (req.headers.get("x-opencodex-grok") === "1") logCtx.surface = "grok";
         let logged = false;
@@ -2153,11 +2635,32 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           ...admissionFields(admission),
           inboundProtocol: "chat",
         };
+        // `policy`, not `config`: this route is now served on the unauthenticated loopback
+        // listener too (#4236), and only the receiving listener's view produces CORS headers
+        // that match the admission decision made above.
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => withCors(
           await handleChatCompletions(req, config, logCtx, { requestId, start, turnAdmissionLease, admission }),
           req,
-          config,
+          policy,
         ));
+      }
+
+      if (url.pathname === "/v1/audio/transcriptions" && req.method === "POST") {
+        disableResponsesRequestTimeout(req, requestServer);
+        if (isDraining()) return drainingResponse(req, policy);
+        const admission = resolveAudioAdmission(req.headers, config);
+        if (!admission) return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
+        if (!isAllowedRequestOrigin(req, policy)) {
+          return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin audio request blocked"), req, policy);
+        }
+        const start = Date.now();
+        const requestId = nextRequestLogId(start);
+        const logCtx: RequestLogContext = { model: TRANSCRIPTION_MODEL, provider: "unknown", ...admissionFields(admission) };
+        return runAdmittedHttpTurn(req, policy, async lease => {
+          const response = await handleAudioTranscriptions(req, config, logCtx, admission, lease);
+          addFinalRequestLog(requestId, start, logCtx, response.status);
+          return withCors(response, req, policy);
+        });
       }
 
       // ChatGPT / Codex App voice (GPT‑Live / Frameless Bidi) + OpenAI Realtime call-create.
@@ -2171,7 +2674,9 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         if (isDraining()) {
           return drainingResponse(req, policy);
         }
-        const admission = resolveApiAuth(req, policy);
+        const audioClient = resolveAudioClient(req, config);
+        if (audioClient instanceof Response) return withCors(audioClient, req, policy);
+        const admission = audioClient?.admission ?? resolveApiAuth(req, policy);
         if (!admission) return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
         if (!isAllowedRequestOrigin(req, policy)) {
           return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin data-plane request blocked"), req, policy);
@@ -2184,7 +2689,9 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           ...admissionFields(admission),
         };
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
-          const response = await handleLive(req, config, logCtx, turnAdmissionLease);
+          const response = audioClient
+            ? await handleExternalLive(req, config, logCtx, { client: audioClient, lease: turnAdmissionLease, bindings: liveCallBindings })
+            : await handleLive(req, config, logCtx, turnAdmissionLease);
           addFinalRequestLog(
             requestId,
             start,
@@ -2204,11 +2711,19 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       const liveSidebandTarget = req.headers.get("upgrade")?.toLowerCase() === "websocket"
         ? parseLiveSidebandTarget(url.pathname, url.searchParams, url.search.replace(/^\?/, ""))
         : null;
-      if (liveSidebandTarget) {
+      const dictationSocket = url.pathname === "/v1/audio/transcriptions/stream"
+        && req.headers.get("upgrade")?.toLowerCase() === "websocket";
+      if (liveSidebandTarget || dictationSocket) {
         if (isDraining()) {
           return drainingResponse(req, policy);
         }
-        const admission = resolveApiAuth(req, policy);
+        const audioClient = resolveAudioClient(req, config, dictationSocket);
+        if (audioClient instanceof Response) return withCors(audioClient, req, policy);
+        if (!audioClient && liveSidebandTarget && "callId" in liveSidebandTarget
+          && liveSidebandTarget.callId.startsWith(EXTERNAL_CALL_PREFIX)) {
+          return withCors(formatErrorResponse(401, "authentication_error", "Live call requires its creator API key"), req, policy);
+        }
+        const admission = audioClient?.admission ?? resolveApiAuth(req, policy);
         if (!admission) return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
         if (!isAllowedRequestOrigin(req, policy)) {
           return withCors(formatErrorResponse(403, "origin_rejected", "WebSocket upgrade blocked: non-local Origin"), req, policy);
@@ -2222,31 +2737,128 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         };
         const turnAdmissionLease = tryAdmitTurn(sessionLaneIdFromRequest(req.headers));
         if (!turnAdmissionLease) return serverBusyResponse(req, "active turns", policy);
+        const audioController = audioClient ? new AbortController() : undefined;
+        if (audioController) registerTurn(audioController, turnAdmissionLease);
+        const acquisition = audioController
+          ? clearableDeadline(120_000, AbortSignal.any([req.signal, audioController.signal])) : undefined;
+        const releaseAcquisition = () => {
+          acquisition?.clear();
+          if (audioController) unregisterTurn(audioController);
+          else turnAdmissionLease.release();
+        };
         let resolved;
         try {
-          resolved = await resolveLiveSidebandUpgrade(req, config, logCtx, liveSidebandTarget, turnAdmissionLease);
+          resolved = dictationSocket && audioClient
+            ? await resolveDictationSocket(audioClient, config, logCtx, turnAdmissionLease, acquisition?.signal)
+            : liveSidebandTarget && audioClient
+              ? await resolveExternalLiveSocket(audioClient, config, logCtx, liveSidebandTarget, { lease: turnAdmissionLease, bindings: liveCallBindings, signal: acquisition?.signal })
+              : liveSidebandTarget
+                ? await resolveLiveSidebandUpgrade(req, config, logCtx, liveSidebandTarget, turnAdmissionLease)
+                : formatErrorResponse(401, "authentication_error", "opencodex API key required");
         } catch (error) {
-          turnAdmissionLease.release();
+          releaseAcquisition();
           throw error;
         }
+        if (acquisition?.signal.aborted) {
+          try { if (!(resolved instanceof Response) && "finish" in resolved) resolved.finish(); }
+          finally { releaseAcquisition(); }
+          return withCors(formatErrorResponse(req.signal.aborted ? 499 : acquisition.didExpire() ? 504 : 503,
+            "upstream_error", acquisition.didExpire() ? "Audio connection timed out" : "Audio connection canceled"), req, policy);
+        }
         if (resolved instanceof Response) {
-          turnAdmissionLease.release();
+          releaseAcquisition();
           addFinalRequestLog(requestId, start, logCtx, resolved.status);
           return withCors(resolved, req, policy);
         }
-        addFinalRequestLog(requestId, start, logCtx, 101);
-        if (requestServer.upgrade(req, {
-          data: {
-            kind: "live-sideband",
-            liveUpstreamUrl: resolved.upstreamWsUrl,
-            liveUpstreamHeaders: resolved.headers,
-            livePending: [],
-            livePendingBytes: 0,
-            liveOpened: false,
-            liveTurnAdmissionLease: turnAdmissionLease,
-          } satisfies WsData,
-        })) return undefined as unknown as Response;
-        turnAdmissionLease.release();
+        const audio = "finish" in resolved ? resolved : undefined;
+        const finish = audio ? (outcome?: number | "timeout" | "connect_error") => {
+          try { audio.finish(outcome); }
+          finally { releaseAcquisition(); }
+        } : undefined;
+        const discardUpgrade = () => {
+          if (finish) finish();
+          else releaseAcquisition();
+        };
+        if (req.signal.aborted) {
+          discardUpgrade();
+          return withCors(formatErrorResponse(499, "client_closed_request", "Audio connection canceled"), req, policy);
+        }
+        const upstreamHandshake = await openLiveSidebandUpstream(
+          resolved.upstreamWsUrl,
+          resolved.headers,
+          (url, headers) => (deps.liveSidebandWebSocketFactory ?? ((socketUrl, socketHeaders, protocols) => (
+            new WebSocket(socketUrl, { headers: socketHeaders, protocols } as unknown as string[])
+          )))(url, headers, audio?.protocols),
+          LIVE_SIDEBAND_UPSTREAM_OPEN_TIMEOUT_MS,
+          req.signal,
+        );
+        if (!upstreamHandshake.ok) {
+          if (upstreamHandshake.socket) {
+            closeLiveSidebandBeforeUpgrade(upstreamHandshake.socket, () => discardUpgrade());
+          } else {
+            discardUpgrade();
+          }
+          addFinalRequestLog(requestId, start, logCtx, upstreamHandshake.status);
+          console.error("[live] sideband upstream handshake failed: " + upstreamHandshake.message);
+          return withCors(
+            formatErrorResponse(upstreamHandshake.status, upstreamHandshake.code, upstreamHandshake.message),
+            req,
+            policy,
+          );
+        }
+        const handoffFailure = upstreamHandshake.handoff.failure();
+        if (handoffFailure || upstreamHandshake.socket.readyState !== WebSocket.OPEN) {
+          closeLiveSidebandBeforeUpgrade(upstreamHandshake.socket, () => discardUpgrade());
+          const failure = handoffFailure ?? {
+            status: 502,
+            code: "upstream_error",
+            message: "voice upstream closed before client upgrade",
+          };
+          addFinalRequestLog(requestId, start, logCtx, failure.status);
+          return withCors(formatErrorResponse(failure.status, failure.code, failure.message), req, policy);
+        }
+        let upgraded = false;
+        try {
+          upgraded = requestServer.upgrade(req, {
+            ...(audioClient?.protocol ? { headers: { "sec-websocket-protocol": audioClient.protocol } } : {}),
+            data: {
+              kind: "live-sideband",
+              liveUpstream: upstreamHandshake.socket,
+              liveUpstreamUrl: resolved.upstreamWsUrl,
+              liveUpstreamHeaders: resolved.headers,
+              liveUpstreamHandoff: upstreamHandshake.handoff,
+              admission,
+              liveUpstreamProtocols: audio?.protocols,
+              liveValidateFrame: audio?.validateFrame,
+              liveMaxSessionMs: audio?.maxSessionMs,
+              liveFinish: finish,
+              liveAbortSignal: audioController?.signal,
+              livePending: [],
+              livePendingBytes: 0,
+              liveOpened: true,
+              liveTurnAdmissionLease: turnAdmissionLease,
+            } satisfies WsData,
+          });
+        } catch {
+          try {
+            upstreamHandshake.handoff.take();
+          } catch {
+            /* ignore */
+          }
+          closeLiveSidebandBeforeUpgrade(upstreamHandshake.socket, () => discardUpgrade());
+          return withCors(formatErrorResponse(502, "upstream_error", "Audio WebSocket upgrade failed"), req, policy);
+        }
+        if (upgraded) {
+          acquisition?.clear();
+          addFinalRequestLog(requestId, start, logCtx, 101);
+          return undefined as unknown as Response;
+        }
+        try {
+          upstreamHandshake.handoff.take();
+        } catch {
+          /* ignore */
+        }
+        closeLiveSidebandBeforeUpgrade(upstreamHandshake.socket, () => discardUpgrade());
         return withCors(formatErrorResponse(426, "upgrade_required", "WebSocket upgrade failed"), req, policy);
       }
 
@@ -2345,6 +2957,19 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       // Text frames. response.processed is a no-op ack. close() aborts the upstream (RC2 parity).
       // Live sideband sockets (kind=live-sideband) are a transparent bidirectional relay instead.
       open(ws: ServerWebSocket<WsData>) {
+        if (ws.data.kind === "remote-workspace-agent") {
+          const open = ws.data.remoteWorkspaceOpen;
+          if (!open) {
+            ws.close(1011, "remote workspace connection unavailable");
+            return;
+          }
+          try {
+            ws.data.remoteWorkspaceConnection = open(ws);
+          } catch {
+            ws.close(1011, "remote workspace connection failed");
+          }
+          return;
+        }
         if (ws.data.kind === "live-sideband") {
           if (!ws.data.liveTurnAdmissionLease) {
             closeLiveSideband(ws, 1013, "server busy");
@@ -2361,8 +2986,20 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         registerCodexWebSocket(ws);
       },
       message(ws: ServerWebSocket<WsData>, raw: string | Buffer) {
+        if (ws.data.kind === "remote-workspace-agent") {
+          try {
+            ws.data.remoteWorkspaceConnection?.receive(raw);
+          } catch {
+            ws.close(1008, "remote workspace protocol error");
+          }
+          return;
+        }
         if (ws.data.kind === "live-sideband") {
           if (ws.data.liveClosing) return;
+          if (ws.data.liveValidateFrame && !ws.data.liveValidateFrame(raw)) {
+            closeLiveSideband(ws, 1008, "invalid audio event");
+            return;
+          }
           const rawBytes = webSocketFrameBytes(raw);
           if (exceedsLiveSidebandFrameByteLimit(rawBytes)) {
             closeLiveSideband(ws, 1009, "message too large");
@@ -2388,6 +3025,9 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           }
           try {
             sendUpstreamFrame(upstream, raw);
+            if (ws.data.liveMaxSessionMs !== undefined && upstream.bufferedAmount > MAX_WS_FRAME_BYTES) {
+              closeLiveSideband(ws, 1013, "audio upstream backpressure");
+            }
           } catch {
             closeLiveSideband(ws, 1011, "upstream send failed");
           }
@@ -2539,6 +3179,10 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         })();
       },
       close(ws: ServerWebSocket<WsData>) {
+        if (ws.data.kind === "remote-workspace-agent") {
+          ws.data.remoteWorkspaceClose?.();
+          return;
+        }
         if (ws.data.kind === "live-sideband") {
           closeLiveSideband(ws);
           return;
@@ -2551,14 +3195,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     },
     } as const;
 
-    // TLS belongs only to the configured public listener. The two auxiliary sockets are
-    // intentionally plaintext loopback origins: local clients dial the unauthenticated data
-    // listener directly over HTTP, while Tailscale Serve or an operator proxy terminates TLS
-    // before forwarding to the hub-management listener.
-    const serveOptions = {
-      ...plaintextServeOptions,
-      ...(config.tls ? { tls: { cert: Bun.file(config.tls.certFile), key: Bun.file(config.tls.keyFile) } } : {}),
-    } as const;
     server = Bun.serve<WsData>({ ...serveOptions, port: listenPort, hostname: bindHost });
 
     // Both binds are one startup transaction (#1102). If the loopback bind fails after the
@@ -2568,7 +3204,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     if (loopbackListenerPort !== null) {
       try {
         loopbackServer = Bun.serve<WsData>({
-          ...plaintextServeOptions,
+          ...serveOptions,
           port: loopbackListenerPort,
           hostname: "127.0.0.1",
         });
@@ -2582,13 +3218,13 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         } catch {
           /* the original bind error is the one worth reporting */
         }
-        throw error;
+        throw new AuxiliaryListenerBindError("unauthenticatedLoopbackListener", loopbackListenerPort, "127.0.0.1", error);
       }
     }
     if (managementIngressPort !== null) {
       try {
         managementIngressServer = Bun.serve<WsData>({
-          ...plaintextServeOptions,
+          ...serveOptions,
           port: managementIngressPort,
           hostname: "127.0.0.1",
         });
@@ -2599,7 +3235,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           if (!bound) continue;
           try { void bound.stop(true); } catch { /* report the original bind error */ }
         }
-        throw error;
+        throw new AuxiliaryListenerBindError("hub.managementIngress", managementIngressPort, "127.0.0.1", error);
       }
     }
   } catch (error) {
@@ -2617,6 +3253,8 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   Object.defineProperty(server, "stop", {
     configurable: true,
     value: async (closeActiveConnections?: boolean): Promise<void> => {
+      remoteWorkspaceStopping = true;
+      liveCallBindings.clear();
       // The orchestration lives in `runListenerShutdown` so its two competing properties —
       // cleanup completes, failure propagates — are testable without a live socket.
       await runListenerShutdown(
@@ -2628,6 +3266,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           ...(managementIngressRef
             ? [() => managementIngressRef.stop(closeActiveConnections)]
             : []),
+          async () => { await remoteWorkspaceShutdown?.(); },
           async () => {
             try {
               userCostOverlayReconciler?.stop();
@@ -2654,15 +3293,9 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   setServerRef(server);
   const actualPort = server.port ?? listenPort;
   boundPort = actualPort;
-  managementApi.activeServerOrigin = canonicalServerOrigin(config, actualPort);
-  managementApi.activeServerConfig = {
-    hostname: config.hostname,
-    port: actualPort,
-    tls: config.tls ? { ...config.tls } : undefined,
-  };
   setCorsOrigin(actualPort);
 
-  console.log(`🚀 opencodex proxy running on ${managementApi.activeServerOrigin}`);
+  console.log(`🚀 opencodex proxy running on http://localhost:${actualPort}`);
   console.log(`   POST /v1/responses → provider translation`);
   console.log(`   POST /v1/chat/completions → OpenAI-compatible clients`);
   console.log(`   GET  /healthz      → health check`);
@@ -2674,16 +3307,23 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     // who forgot, has to be able to see that an unauthenticated surface is live without
     // reading the file.
     const loopbackPort = loopbackServer.port ?? loopbackListenerPort;
-    console.warn(`⚠️  Unauthenticated loopback listener active on http://127.0.0.1:${loopbackPort}`);
-    console.warn(`   Any local process can use it without a credential — it spends account`);
-    console.warn(`   quota and paid provider credentials, and can starve authenticated`);
-    console.warn(`   remote clients. Not for shared or multi-tenant hosts.`);
+    if (loopbackListener?.enabled === true && loopbackListener.port === undefined) {
+      // The companion form is the intended one-port hub topology, not a surprise surface: the
+      // public listener is already on a non-loopback address, so this line states where local
+      // processes go rather than warning about a second port nobody asked for.
+      console.log(`🔁 Loopback companion active on http://127.0.0.1:${loopbackPort} — same port as the public listener; local processes need no credential`);
+    } else {
+      console.warn(`⚠️  Unauthenticated loopback listener active on http://127.0.0.1:${loopbackPort}`);
+      console.warn(`   Any local process can use it without a credential — it spends account`);
+      console.warn(`   quota and paid provider credentials, and can starve authenticated`);
+      console.warn(`   remote clients. Not for shared or multi-tenant hosts.`);
+    }
   }
 
   if (managementIngressServer) {
     const managementPort = managementIngressServer.port ?? managementIngressPort;
     console.log(`🔒 Hub management ingress active on http://127.0.0.1:${managementPort}`);
-    console.log(`   GUI and /api/* only; data, health, readiness, and WebSockets are disabled.`);
+    console.log(`   GUI and /api/*; opted-in Remote Workspace pairing/agent only; data, health, and readiness are disabled.`);
   }
 
   // Prime pool-account quota in the background so the rotation engine has real
@@ -2721,13 +3361,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   const labConfigDir = getConfigDir();
   if (labActivationRequired(config, labConfigDir)) {
     activateLab(config, labConfigDir);
-  }
-
-  // Prime secure continuation storage without delaying listen or suspending the
-  // synchronous startup window above. A failed credential-store lookup degrades
-  // bridge turns to memory-only state at their admission boundary.
-  if (config.v2RoutedDelegationBridge === true) {
-    void prepareSensitiveResponsePersistence();
   }
 
   // Reset-credit auto-redemption (#822) is opt-in; a default install constructs nothing here.

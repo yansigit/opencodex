@@ -46,10 +46,35 @@ function contentToText(content: unknown): string {
 }
 
 function imageUrlFromPart(part: Rec): string | null {
-  if (part.type !== "image_url") return null;
-  const imageUrl = part.image_url;
-  if (typeof imageUrl === "string" && imageUrl.length > 0) return imageUrl;
-  if (isRec(imageUrl) && typeof imageUrl.url === "string" && imageUrl.url.length > 0) return imageUrl.url;
+  if (part.type === "image_url") {
+    const imageUrl = part.image_url;
+    if (typeof imageUrl === "string" && imageUrl.length > 0) return imageUrl;
+    if (isRec(imageUrl) && typeof imageUrl.url === "string" && imageUrl.url.length > 0) return imageUrl.url;
+    return null;
+  }
+  // Agent clients whose native wire shape is not OpenAI's still send images over
+  // Chat Completions: Pi/MCP-style parts carry {type:"image", data, mimeType}
+  // (Aside read_file tool results), Anthropic-shaped clients carry a source
+  // object. Dropping either silently blinds a vision model, so normalize both
+  // to the URL/data-URI form the Responses pipeline already understands.
+  if (part.type === "image") {
+    const data = part.data;
+    if (typeof data === "string" && data.length > 0) {
+      if (data.startsWith("data:")) return data;
+      const media = typeof part.mimeType === "string" && part.mimeType.length > 0 ? part.mimeType
+        : typeof part.mediaType === "string" && part.mediaType.length > 0 ? part.mediaType
+        : "image/png";
+      return "data:" + media + ";base64," + data;
+    }
+    const source = part.source;
+    if (isRec(source)) {
+      if (source.type === "base64" && typeof source.data === "string" && source.data.length > 0) {
+        const media = typeof source.media_type === "string" && source.media_type.length > 0 ? source.media_type : "image/png";
+        return "data:" + media + ";base64," + source.data;
+      }
+      if (source.type === "url" && typeof source.url === "string" && source.url.length > 0) return source.url;
+    }
+  }
   return null;
 }
 

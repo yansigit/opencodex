@@ -3,7 +3,11 @@ import { PROVIDER_REGISTRY } from "../../src/providers/registry";
 import {
   OPENCODE_ZEN_OBSERVED_RPM_HINT,
   OPENCODE_ZEN_SYNTHETIC_RETRY_AFTER_SEC,
+  enrichOpenCodeZenFreeTierMessage,
   enrichOpenCodeZenRateLimitMessage,
+  enrichOpenCodeZenUpstreamMessage,
+  isTransientConsoleGoUploadRejection,
+  isOpenCodeZenFreeTierLockIn,
   isOpenCodeZenRateLimitProvider,
 } from "../../src/providers/opencode-zen-rate-limit";
 import { resolveClientRetryAfter } from "../../src/lib/retry-after";
@@ -135,5 +139,171 @@ describe("opencode-zen rate-limit guidance (#1145)", () => {
       providerName: "opencode-zen",
       hasApiKey: true,
     })).toBe(once);
+  });
+});
+
+/**
+ * Zen closed the keyless tier to non-OpenCode clients. The gate is the mere presence of
+ * `x-opencode-session`, so opencodex could pass it by inventing a value; it does not, and the
+ * user-facing failure has to say that rather than leaking `MissingSessionID` through.
+ */
+describe("opencode-free keyless tier lock-in (#4121)", () => {
+  /** Verbatim upstream body from the issue, as the Responses wire forwards it. */
+  const RAW_UPSTREAM = String.raw`{"type":"error","error":{"type":"MissingSessionID","message":"Error from provider (Console): OpenCode's free tier can only be used in OpenCode"}}`;
+  const FREE_TIER_ROUTE = {
+    providerName: "opencode-free",
+    baseUrl: "https://opencode.ai/zen/v1",
+    adapter: "openai-chat",
+  };
+
+  test("registry note states the gate, the refusal to impersonate, and the keyed alternative", () => {
+    const note = PROVIDER_REGISTRY.find(e => e.id === "opencode-free")?.note?.toLowerCase();
+    expect(note).toBeDefined();
+    expect(note).toContain("x-opencode-session");
+    expect(note).toContain("missingsessionid");
+    expect(note).toContain("opencode-zen");
+    // The quota figures the preset already documented must survive the rewrite.
+    expect(note).toContain("200");
+    expect(note).toContain("15-20");
+  });
+
+  test("isOpenCodeZenFreeTierLockIn recognises both the raw body and the parsed error type", () => {
+    expect(isOpenCodeZenFreeTierLockIn(RAW_UPSTREAM)).toBe(true);
+    // Native Chat parses the envelope, so the marker survives only in `error.type`.
+    expect(isOpenCodeZenFreeTierLockIn(
+      "Provider error 400: Error from provider (Console)",
+      "MissingSessionID",
+    )).toBe(true);
+    expect(isOpenCodeZenFreeTierLockIn(
+      "Provider error 400: OpenCode's free tier can only be used in OpenCode",
+    )).toBe(true);
+    expect(isOpenCodeZenFreeTierLockIn("Provider error 500: boom")).toBe(false);
+    expect(isOpenCodeZenFreeTierLockIn("Provider error 500: boom", "server_error")).toBe(false);
+  });
+
+  test("the client error explains the gate and names the supported keyed route", () => {
+    const enriched = enrichOpenCodeZenFreeTierMessage(
+      `Provider error 400: ${RAW_UPSTREAM}`,
+      FREE_TIER_ROUTE,
+    );
+    expect(enriched).toContain("x-opencode-session");
+    expect(enriched).toContain("opencode-zen");
+    expect(enriched).toContain("https://opencode.ai/auth");
+    expect(enriched).toContain("https://opencode.ai/docs/zen/");
+    // The user is told opencodex declines to impersonate, not that the request merely failed.
+    expect(enriched).toContain("does not send a fabricated OpenCode session header");
+  });
+
+  test("enrichment is scoped to Zen destinations and to this error", () => {
+    expect(enrichOpenCodeZenFreeTierMessage(`Provider error 400: ${RAW_UPSTREAM}`, {
+      providerName: "openrouter",
+    })).toBe(`Provider error 400: ${RAW_UPSTREAM}`);
+    expect(enrichOpenCodeZenFreeTierMessage("Provider error 500: boom", FREE_TIER_ROUTE))
+      .toBe("Provider error 500: boom");
+    // Destination match, not just the preset id: a custom row pointed at the same gateway.
+    expect(enrichOpenCodeZenFreeTierMessage(
+      `Provider error 400: ${RAW_UPSTREAM}`,
+      { baseUrl: "https://opencode.ai/zen/v1", adapter: "openai-chat" },
+    )).toContain("opencode-zen");
+  });
+
+  test("enrichment does not double-append across layers", () => {
+    const once = enrichOpenCodeZenFreeTierMessage(
+      `Provider error 400: ${RAW_UPSTREAM}`,
+      FREE_TIER_ROUTE,
+    );
+    expect(enrichOpenCodeZenFreeTierMessage(once, FREE_TIER_ROUTE)).toBe(once);
+  });
+
+  test("enrichOpenCodeZenUpstreamMessage keeps the 429 guidance and adds the lock-in case", () => {
+    const rateLimited = enrichOpenCodeZenUpstreamMessage(
+      "Provider error 429: Rate limit exceeded.",
+      { status: 429, providerName: "opencode-zen", hasApiKey: true },
+    );
+    expect(rateLimited).toContain(OPENCODE_ZEN_OBSERVED_RPM_HINT);
+    expect(rateLimited).not.toContain("x-opencode-session");
+
+    const lockedOut = enrichOpenCodeZenUpstreamMessage(
+      `Provider error 400: ${RAW_UPSTREAM}`,
+      { status: 400, ...FREE_TIER_ROUTE },
+    );
+    expect(lockedOut).toContain("x-opencode-session");
+    expect(lockedOut).not.toContain(OPENCODE_ZEN_OBSERVED_RPM_HINT);
+  });
+});
+
+describe("Console Go transient upload refusal", () => {
+  // The observed Go-route refusal, byte-for-byte as Console serves it.
+  const GO_MESSAGE = "Error from provider (Console Go): Upstream request failed: [invalid_request_error] Invalid upload request.";
+  // The Zen key route names the same gateway without the Go suffix.
+  const ZEN_MESSAGE = "Error from provider (Console): Upstream request failed: [invalid_request_error] Invalid upload request.";
+  const envelope = (message: string) => JSON.stringify({ model: "muse-spark-1.3-contributor", error: { param: null, type: "invalid_request_error", message } });
+  const GO_ROUTE = { outboundUrl: "https://opencode.ai/zen/go/v1/responses" };
+  const ZEN_ROUTE = { outboundUrl: "https://opencode.ai/zen/v1/responses" };
+
+  test("accepts the canonical refusal on both canonical Console routes", () => {
+    expect(isTransientConsoleGoUploadRejection({ status: 400, errorBody: envelope(GO_MESSAGE), ...GO_ROUTE })).toBe(true);
+    expect(isTransientConsoleGoUploadRejection({ status: 400, errorBody: envelope(ZEN_MESSAGE), ...ZEN_ROUTE })).toBe(true);
+    // A custom row pointed at the same destination is still Console: the base URL decides.
+    expect(isTransientConsoleGoUploadRejection({ status: 400, errorBody: envelope(GO_MESSAGE), outboundUrl: "https://opencode.ai/zen/go/v1/responses" })).toBe(true);
+  });
+
+  test("rejects the refusal text from a non-Console route", () => {
+    expect(isTransientConsoleGoUploadRejection({ status: 400, errorBody: envelope(GO_MESSAGE), outboundUrl: "https://api.deepseek.com/v1/responses" })).toBe(false);
+    // opencode.ai without the /zen segment is not the Console gateway.
+    expect(isTransientConsoleGoUploadRejection({ status: 400, errorBody: envelope(GO_MESSAGE), outboundUrl: "https://opencode.ai/v1/responses" })).toBe(false);
+    expect(isTransientConsoleGoUploadRejection({ status: 400, errorBody: envelope(GO_MESSAGE) })).toBe(false);
+  });
+
+  test("requires the effective canonical HTTPS endpoint", () => {
+    const userInfoUrl = new URL("https://opencode.ai/zen/go/v1/responses");
+    userInfoUrl.username = "fixture-user";
+    userInfoUrl.password = "fixture-password";
+    expect(isTransientConsoleGoUploadRejection({ status: 400, errorBody: envelope(GO_MESSAGE), outboundUrl: userInfoUrl.href })).toBe(false);
+    for (const outboundUrl of [
+      "http://opencode.ai/zen/go/v1/responses",
+      "https://opencode.ai:8443/zen/go/v1/responses",
+      "https://opencode.ai/zen/go/v1/responses?tenant=fixture",
+      "https://opencode.ai/zen/go/v1/responses#fragment",
+      "https://opencode.ai.evil.test/zen/go/v1/responses",
+      "https://opencode.ai/zen-other/v1/responses",
+      "https://opencode.ai/zen/go/v1/models",
+    ]) expect(isTransientConsoleGoUploadRejection({ status: 400, errorBody: envelope(GO_MESSAGE), outboundUrl })).toBe(false);
+  });
+
+  test("rejects noncanonical envelopes, suffixes, and other statuses", () => {
+    // A bare string is not the structured envelope.
+    expect(isTransientConsoleGoUploadRejection({ status: 400, errorBody: JSON.stringify({ error: "Invalid upload request." }), ...GO_ROUTE })).toBe(false);
+    // A suffix means the gateway said something else; do not guess.
+    expect(isTransientConsoleGoUploadRejection({ status: 400, errorBody: envelope(GO_MESSAGE + " Please retry."), ...GO_ROUTE })).toBe(false);
+    // Different status: only the gateway 400 is the flap.
+    expect(isTransientConsoleGoUploadRejection({ status: 500, errorBody: envelope(GO_MESSAGE), ...GO_ROUTE })).toBe(false);
+    expect(isTransientConsoleGoUploadRejection({ status: 400, errorBody: undefined, ...GO_ROUTE })).toBe(false);
+    // Other 400s on the same wire are verdicts on the request, not flaps.
+    expect(isTransientConsoleGoUploadRejection({
+      status: 400,
+      errorBody: envelope("Error from provider (Console Go): Upstream request failed: [invalid_request_error] reasoning_effort max requires an active Muse Code subscription for model muse-spark-1.3-contributor."),
+      ...GO_ROUTE,
+    })).toBe(false);
+    expect(isTransientConsoleGoUploadRejection({
+      status: 400,
+      errorBody: JSON.stringify({ type: "error", error: { type: "MissingSessionID", message: "Request is missing x-opencode-session" } }),
+      ...GO_ROUTE,
+    })).toBe(false);
+  });
+
+  test("rejects partial envelopes and padded messages", () => {
+    const withError = (error: unknown) => JSON.stringify({ model: "muse-spark-1.3-contributor", error });
+    // type carries the refusal identity; a partial envelope is a different error.
+    expect(isTransientConsoleGoUploadRejection({ status: 400, errorBody: withError({ param: null, message: GO_MESSAGE }), ...GO_ROUTE })).toBe(false);
+    expect(isTransientConsoleGoUploadRejection({ status: 400, errorBody: withError({ param: null, type: "server_error", message: GO_MESSAGE }), ...GO_ROUTE })).toBe(false);
+    // param must be present and null.
+    expect(isTransientConsoleGoUploadRejection({ status: 400, errorBody: withError({ type: "invalid_request_error", message: GO_MESSAGE }), ...GO_ROUTE })).toBe(false);
+    expect(isTransientConsoleGoUploadRejection({ status: 400, errorBody: withError({ param: "input", type: "invalid_request_error", message: GO_MESSAGE }), ...GO_ROUTE })).toBe(false);
+    // Padding means the gateway wrapped or appended something.
+    expect(isTransientConsoleGoUploadRejection({ status: 400, errorBody: withError({ param: null, type: "invalid_request_error", message: " " + GO_MESSAGE }), ...GO_ROUTE })).toBe(false);
+    expect(isTransientConsoleGoUploadRejection({ status: 400, errorBody: withError({ param: null, type: "invalid_request_error", message: GO_MESSAGE + "\n" }), ...GO_ROUTE })).toBe(false);
+    // The exact canonical envelope still matches.
+    expect(isTransientConsoleGoUploadRejection({ status: 400, errorBody: envelope(GO_MESSAGE), ...GO_ROUTE })).toBe(true);
   });
 });

@@ -13,11 +13,29 @@ import { handleProviderRuntimeCommand } from "../../src/cli/provider-runtime";
 import { providerQuotaLine } from "../../src/cli/account-extended";
 import { formatAccountTable } from "../../src/cli/account";
 import { handleConnectCommand } from "../../src/cli/connect";
+import { handleSystemCommand } from "../../src/cli/system-command";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoPath } from "../helpers/repo-root";
 
 type Recorded = { path: string; method: string; body: unknown };
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
+
+describe("ocx system settings client compaction", () => {
+  test("persists the explicit boolean through the shared settings endpoint", async () => {
+    const { requests, deps } = fakeRuntime((_req, body) => ({ ok: true, ...body }));
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(await handleSystemCommand(["settings", "--client-compaction", "on"], deps)).toBe(0);
+      expect(requests).toEqual([{
+        path: "/api/settings",
+        method: "PUT",
+        body: { codexClientCompaction: true },
+      }]);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+});
 
 describe("ocx agent sidecar --list (#2188)", () => {
   test("web --list prints the server's webSearchModels — the GUI's exact list", async () => {
@@ -233,6 +251,11 @@ describe("headless GUI parity CLI", () => {
       // skipping the endpoint.
       ["/api/github/star", "(none — GUI-only)"],
       ["/api/oauth", "ocx account"],
+      // The unified pool-settings route (#695 wp5c). One path answers for every pool
+      // kind, and `ocx account strategy` / `ocx account sticky` / `ocx account auto-switch`
+      // are what drive it headlessly — they declare it in src/cli/capabilities.ts rather
+      // than the retired per-namespace paths.
+      ["/api/pool/settings", "ocx account strategy/sticky/auto-switch"],
       ["/api/accounts/events", "(none — dashboard invalidation; ocx account reads current selection)"],
       ["/api/providers/keys", "ocx account"],
       ["/api/providers", "ocx provider"],
@@ -285,6 +308,12 @@ describe("headless GUI parity CLI", () => {
       // history remains available through observe/index tooling.
       ["/api/routing-profiles", "ocx route policy"],
       ["/api/routing-analytics", "(none — GUI analytics surface; history via ocx observe/logs)"],
+      // Remote Workspace is one product family in both surfaces. The current CLI owns
+      // executor pairing, presence, and local status; Hub/device/session inspection is
+      // intentionally dashboard-only until the deferred Hub-status verbs documented in
+      // the management route registry land. Naming the family here does not claim those
+      // local and Hub status payloads are equivalent.
+      ["/api/remote-workspace", "ocx remote-workspace"],
       ["/api/shadow", "ocx models"],
       ["/api/sidecar", "ocx agent"],
       ["/api/startup", "ocx system"],
@@ -1090,4 +1119,26 @@ describe("Aside CLI recovery metadata", () => {
       error.mockRestore();
     }
   });
+});
+
+
+test("provider edit sends a model-scoped text-only capability patch", async () => {
+  const { requests, deps } = fakeRuntime();
+  const log = spyOn(console, "log").mockImplementation(() => {});
+  try {
+    expect(await handleProviderRuntimeCommand("edit", ["mine", "--model", "ModelA", "--text-only", "--json"], deps)).toBe(0);
+    expect(requests).toEqual([{ path: "/api/providers?name=mine", method: "PATCH", body: { modelCapabilities: { ModelA: { inputModalities: ["text"] } } } }]);
+  } finally { log.mockRestore(); }
+});
+
+
+test("provider edit rejects incomplete text-only targeting before contacting the server", async () => {
+  const { requests, deps } = fakeRuntime();
+  const error = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    for (const flags of [["--text-only"], ["--model", "ModelA"], ["--model", " ModelA ", "--text-only"]]) {
+      expect(await handleProviderRuntimeCommand("edit", ["mine", ...flags], deps)).toBe(2);
+    }
+    expect(requests).toHaveLength(0);
+  } finally { error.mockRestore(); }
 });

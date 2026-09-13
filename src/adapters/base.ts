@@ -16,8 +16,8 @@ export interface IncomingMeta {
   providerFetch?: typeof globalThis.fetch;
   /**
    * Image-normalization ladder bias for upstream-413 tightened retries: every image
-   * starts one tier lower (devlog/260714_image_normalization_pipeline/030). Only the
-   * anthropic adapter consumes it; others ignore it.
+   * starts one tier lower (devlog/260714_image_normalization_pipeline/030). Consumed by
+   * the anthropic and openai-chat adapters; others ignore it.
    */
   imageTierBias?: number;
   /** Provider-scoped structured error observation; never receives ordinary model payloads. */
@@ -106,6 +106,12 @@ export interface AdapterRequest {
     convertedRoutedToolSearchNames?: ReadonlySet<string>;
     /** Upstream-only aliases for namespace tools flattened in this request. */
     convertedRoutedNamespaceToolAliases?: ReadonlyMap<string, { namespace: string; name: string; kind: "function" | "custom" }>;
+    /** Request-declared collaboration child names eligible for plaintext-v2 alias restoration. */
+    plaintextV2AgentMessageToolNames?: ReadonlySet<string>;
+    /** Collaboration message-tool names actually rewritten to fixed aliases in this request. */
+    plaintextV2AgentMessageAliasedToolNames?: ReadonlySet<string>;
+    /** Upstream-only <=64-char aliases for Meta Muse tool names rewritten in this request. */
+    convertedMuseToolNameAliases?: ReadonlyMap<string, string>;
     /** Releases observation of a serialized request body after its final fetch attempt settles. */
     releaseBodyObservation?: () => void;
     /** Exact reasoning parameter emitted by the adapter, for request-log diagnostics only. */

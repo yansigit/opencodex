@@ -1,3 +1,4 @@
+import { codexCompatibleUrl } from "../codex/context-compat";
 /**
  * /v1/live and /v1/realtime/calls relay (issue #371).
  *
@@ -34,6 +35,7 @@ import {
   cooldownErrorResponse,
   CodexAuthContextError,
   CodexMainProfileDrainingError,
+  CodexModelAvailabilityError,
   CodexPoolAuthenticationError,
   CodexThreadAffinityExpiredError,
 } from "../codex/auth-context";
@@ -47,6 +49,7 @@ import type { RequestLogContext } from "./request-log";
 import { codexLogAccountId } from "./responses";
 import type { AdmissionLease } from "../lib/admission";
 import { codexAccountSelectionForTurn } from "./lifecycle";
+import { codexModelAvailabilityErrorResponse } from "./responses/codex-auth-error";
 
 /** Voice call create can wait on SDP negotiation; bound a hung upstream. */
 const LIVE_UPSTREAM_TIMEOUT_MS = 120_000;
@@ -86,39 +89,29 @@ export const LIVE_CLIENT_PROTOCOL_HEADERS = [
  *
  * When `OCX_LIVE_FRAME_LOG` is set to a file path, every relayed sideband frame appends one
  * JSONL record: direction, frame kind, byte length, and whether the payload contains U+FFFD.
- * Privacy: full frame payloads are never written — only when U+FFFD is present, a short
- * excerpt around the first replacement character is included so the corruption point can be
- * attributed (upstream vs relay vs client). Disabled entirely when the env var is unset.
+ * Privacy: no frame content is written, including excerpts around replacement characters.
+ * For binary frames, U+FFFD may also be introduced by UTF-8 decoding; the flag alone does not
+ * identify the source of corruption. Disabled entirely when the env var is unset.
  */
 export const LIVE_FRAME_LOG_ENV = "OCX_LIVE_FRAME_LOG";
-const LIVE_FRAME_LOG_CONTEXT_CHARS = 24;
-
-function fffdContext(text: string): string | undefined {
-  const idx = text.indexOf("\uFFFD");
-  if (idx < 0) return undefined;
-  const start = Math.max(0, idx - LIVE_FRAME_LOG_CONTEXT_CHARS);
-  const end = Math.min(text.length, idx + LIVE_FRAME_LOG_CONTEXT_CHARS);
-  return text.slice(start, end);
-}
-
 export function logLiveSidebandFrame(dir: "c2u" | "u2c", data: unknown): void {
   const logPath = process.env[LIVE_FRAME_LOG_ENV];
   if (!logPath) return;
   try {
     let kind: "text" | "binary" = "binary";
     let bytes = 0;
-    let context: string | undefined;
+    let fffd = false;
     if (typeof data === "string") {
       kind = "text";
       bytes = Buffer.byteLength(data);
-      context = fffdContext(data);
+      fffd = data.includes("\uFFFD");
     } else if (data instanceof ArrayBuffer) {
       bytes = data.byteLength;
-      context = fffdContext(new TextDecoder().decode(new Uint8Array(data)));
+      fffd = new TextDecoder().decode(new Uint8Array(data)).includes("\uFFFD");
     } else if (ArrayBuffer.isView(data)) {
       const view = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
       bytes = data.byteLength;
-      context = fffdContext(new TextDecoder().decode(view));
+      fffd = new TextDecoder().decode(view).includes("\uFFFD");
     } else {
       return;
     }
@@ -127,8 +120,7 @@ export function logLiveSidebandFrame(dir: "c2u" | "u2c", data: unknown): void {
       dir,
       kind,
       bytes,
-      fffd: context !== undefined,
-      ...(context !== undefined ? { context } : {}),
+      fffd,
     };
     appendFileSync(logPath, `${JSON.stringify(record)}\n`);
   } catch {
@@ -381,7 +373,7 @@ export function buildLiveSidebandUpstreamWsUrl(
   );
 }
 
-async function backendJsonBodyFromApiMultipart(
+export async function backendJsonBodyFromApiMultipart(
   body: ArrayBuffer,
   contentType: string,
 ): Promise<{ body: Uint8Array; contentType: string } | Response> {
@@ -434,14 +426,20 @@ export async function readBodyCapped(
   stream: ReadableStream<Uint8Array> | null,
   maxBytes: number,
   tooLargeMessage: (total: number) => string,
+  signal?: AbortSignal,
 ): Promise<ArrayBuffer | Response> {
   if (!stream) return new ArrayBuffer(0);
   const reader = stream.getReader();
+  const abortRead = () => { void reader.cancel(signal?.reason).catch(() => {}); };
+  signal?.addEventListener("abort", abortRead, { once: true });
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {
+    if (signal?.aborted) abortRead();
+    signal?.throwIfAborted();
     for (;;) {
       const { done, value } = await reader.read();
+      signal?.throwIfAborted();
       if (done) break;
       if (!value || value.byteLength === 0) continue;
       total += value.byteLength;
@@ -460,6 +458,7 @@ export async function readBodyCapped(
     await reader.cancel(err).catch(() => {});
     throw err;
   } finally {
+    signal?.removeEventListener("abort", abortRead);
     try {
       // Always release: `reader.cancel()` does NOT drop the lock, and holding it would leave
       // the stream permanently locked for any later consumer (audit R-WP5-2).
@@ -568,6 +567,8 @@ export async function resolveLiveRelay(
           "authentication_error",
           "Selected Codex account needs reauthentication",
         );
+      } else if (err instanceof CodexModelAvailabilityError) {
+        forwardAuthError = codexModelAvailabilityErrorResponse(err);
       } else if (err instanceof CodexPoolAuthenticationError) {
         forwardAuthError = formatErrorResponse(401, "authentication_error", err.message);
       } else {
@@ -646,7 +647,7 @@ export async function handleLive(
     // Frameless API-shape call-create posts to `{base}/live` without the AVAS
     // query (openai/codex RealtimeCallClient, realtime_call.rs); only the
     // realtime/calls inbound shape keeps the legacy keyed AVAS endpoint.
-    url = new URL(req.url).pathname === "/v1/live"
+    url = codexCompatibleUrl(req.url).pathname === "/v1/live"
       ? forwardLiveUrl(relay.providerBaseUrl, /* usesBackendShape */ false)
       : keyedLiveUrl(relay.providerBaseUrl);
   }

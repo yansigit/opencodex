@@ -1,6 +1,5 @@
 import type { OAuthController, OAuthCredentials } from "./types";
 import { CHATGPT_CLIENT_ID, CHATGPT_TOKEN_URL, credsFromToken } from "./chatgpt";
-import { oauthFetch } from "./transport";
 
 /**
  * OpenAI deviceauth (device-code) grant for the ChatGPT/Codex provider.
@@ -24,6 +23,19 @@ export const DEVICE_VERIFICATION_URL = "https://auth.openai.com/codex/device";
 
 /** The grant's own lifetime. Polling past this only produces a worse error message. */
 const DEVICE_FLOW_TTL_MS = 15 * 60 * 1000;
+/**
+ * Per-fetch deadline for every device-flow HTTP call (#3898). Until this
+ * existed the only bounds were the 15-minute grant TTL and the caller's
+ * abort, so one stuck TCP connection could hold the login slot for the whole
+ * grant. A FRESH timeout per fetch attempt is required — a single timeout
+ * shared across the poll loop would kill the 15-minute grant.
+ */
+export const DEVICE_FETCH_TIMEOUT_MS = 30_000;
+
+function deviceFetchSignal(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(DEVICE_FETCH_TIMEOUT_MS);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 const MIN_POLL_INTERVAL_MS = 1_000;
 /**
@@ -83,11 +95,11 @@ interface DeviceUserCode {
 }
 
 async function requestUserCode(signal?: AbortSignal): Promise<DeviceUserCode> {
-  const response = await oauthFetch(USERCODE_URL, {
+  const response = await fetch(USERCODE_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ client_id: CHATGPT_CLIENT_ID }),
-    signal,
+    signal: deviceFetchSignal(signal),
   });
   if (!response.ok) throw deviceError("request", response.status);
   const payload = (await response.json()) as Record<string, unknown>;
@@ -120,11 +132,11 @@ async function pollForGrant(
   const deadline = Date.now() + DEVICE_FLOW_TTL_MS;
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new Error("Login cancelled");
-    const response = await oauthFetch(DEVICE_TOKEN_URL, {
+    const response = await fetch(DEVICE_TOKEN_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ device_auth_id: device.deviceAuthId, user_code: device.userCode }),
-      signal,
+      signal: deviceFetchSignal(signal),
     });
     if (response.status === 403 || response.status === 404) {
       // Cap the wait at the time actually left. Sleeping a full interval past
@@ -150,8 +162,8 @@ async function pollForGrant(
   throw new Error("ChatGPT device authorization expired");
 }
 
-async function exchangeGrant(grant: DeviceGrant, signal?: AbortSignal): Promise<OAuthCredentials> {
-  const response = await oauthFetch(CHATGPT_TOKEN_URL, {
+async function exchangeGrantRaw(grant: DeviceGrant, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  const response = await fetch(CHATGPT_TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -161,10 +173,54 @@ async function exchangeGrant(grant: DeviceGrant, signal?: AbortSignal): Promise<
       code_verifier: grant.codeVerifier,
       redirect_uri: DEVICE_REDIRECT_URI,
     }).toString(),
-    signal,
+    signal: deviceFetchSignal(signal),
   });
   if (!response.ok) throw deviceError("token exchange", response.status);
-  return credsFromToken((await response.json()) as Record<string, unknown>);
+  return (await response.json()) as Record<string, unknown>;
+}
+
+async function exchangeGrant(grant: DeviceGrant, signal?: AbortSignal): Promise<OAuthCredentials> {
+  return credsFromToken(await exchangeGrantRaw(grant, signal));
+}
+
+/**
+ * The native-main reauth result (#3898): the projected credential PLUS the
+ * id_token the pool projection deliberately drops. The id_token is the
+ * identity document the native auth.json requires
+ * (native-profile-store.ts), and it never leaves this process — it is
+ * written to the native main slot by the caller, never serialized into a
+ * DTO, log, or error.
+ */
+export interface NativeDeviceLogin {
+  credential: OAuthCredentials;
+  idToken: string;
+}
+
+async function exchangeGrantNative(grant: DeviceGrant, signal?: AbortSignal): Promise<NativeDeviceLogin> {
+  const payload = await exchangeGrantRaw(grant, signal);
+  const credential = credsFromToken(payload);
+  const idToken = nonEmptyString(payload.id_token);
+  if (!idToken) throw new Error("ChatGPT device token response missing id_token");
+  if (!credential.refresh) throw new Error("ChatGPT device token response missing refresh token");
+  if (!credential.accountId) throw new Error("ChatGPT device token response missing account identity");
+  return { credential, idToken };
+}
+
+/**
+ * Device flow for the native __main__ slot. Same grant as the pool flow, but
+ * nothing is persisted here and no OAuth store is touched: the caller
+ * (main-device-reauth service) owns the fenced commit into CODEX_HOME
+ * auth.json.
+ */
+export async function loginChatGPTNativeDevice(ctrl: OAuthController): Promise<NativeDeviceLogin> {
+  const device = await requestUserCode(ctrl.signal);
+  ctrl.onAuth?.({
+    url: DEVICE_VERIFICATION_URL,
+    instructions: `Enter code: ${device.userCode}`,
+    deviceCode: device.userCode,
+  });
+  const grant = await pollForGrant(device, ctrl.signal);
+  return exchangeGrantNative(grant, ctrl.signal);
 }
 
 /**

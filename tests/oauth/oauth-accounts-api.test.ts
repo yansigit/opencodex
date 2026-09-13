@@ -156,7 +156,9 @@ describe("multiauth accounts API", () => {
       expect(requireManagementAuth(ctx.req, state, ctx.config)).toBeNull(); // Deliberately memoized.
       const pending = reader.read();
       publishAccountSelection("private-provider", "oauth");
-      await expect(pending).rejects.toMatchObject({ name: "NotAllowedError" });
+      // Nothing was queued before revocation, so the stream closes quietly instead of
+      // erroring; the pending read resolves done and the post-revocation frame is never sent.
+      await expect(pending).resolves.toMatchObject({ done: true });
     } finally { await reader.cancel().catch(() => undefined); }
   });
 
@@ -179,7 +181,31 @@ describe("multiauth accounts API", () => {
       session.expiresAt = Date.now() - 1;
       const pending = reader.read();
       tick();
-      await expect(pending).rejects.toMatchObject({ name: "NotAllowedError" });
+      await expect(pending).resolves.toMatchObject({ done: true });
+    } finally {
+      await reader?.cancel().catch(() => undefined);
+      interval.mockRestore();
+    }
+  });
+
+  test("selection stream discards frames queued before revocation instead of draining them", async () => {
+    const { ctx, state, token } = selectionSessionFixture();
+    const interval = spyOn(globalThis, "setInterval");
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      const response = await handleOauthAccountRoutes(ctx);
+      expect(response?.status).toBe(200);
+      reader = response!.body!.getReader();
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain("event: ready");
+      // No pending read: this event stays queued in the controller when the session expires.
+      publishAccountSelection("queued-provider", "oauth");
+      state.sessions.get(token)!.expiresAt = Date.now() - 1;
+      const tick = interval.mock.calls.find(call => call[1] === 15_000)?.[0];
+      if (typeof tick !== "function") throw new Error("selection heartbeat not registered");
+      tick();
+      // A non-empty queue still takes the error path: the queued frame is discarded and the
+      // revoked consumer rejects instead of ever draining it.
+      await expect(reader.read()).rejects.toMatchObject({ name: "NotAllowedError" });
     } finally {
       await reader?.cancel().catch(() => undefined);
       interval.mockRestore();
@@ -321,6 +347,44 @@ describe("multiauth accounts API", () => {
       expect(account.healthSummary).not.toContain("aaaa1111");
       expect(account.healthSummary).not.toContain("first@example.com");
       expect(account.healthAction).toContain("ocx login anthropic");
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("GET reports an explicit null plan for an Anthropic account", async () => {
+    writeFileSync(join(testDir, "auth.json"), JSON.stringify({
+      anthropic: {
+        activeAccountId: "aaaa1111",
+        accounts: [
+          {
+            id: "aaaa1111",
+            credential: {
+              access: "t1",
+              refresh: "r1",
+              expires: 9999999999999,
+              email: "first@example.com",
+              accountId: "acct-1",
+            },
+          },
+        ],
+      },
+    }), { mode: 0o600 });
+
+    const server = startServer(0);
+    try {
+      const res = await fetch(new URL("/api/oauth/accounts?provider=anthropic", server.url));
+      expect(res.status).toBe(200);
+      const body = await res.json() as { accounts: Array<{ id: string; plan?: string | null }> };
+      const account = body.accounts[0]!;
+
+      // The key must be PRESENT and null, not omitted. A consumer weighting a pool by seat size
+      // has to tell "this version looked and upstream did not say" apart from "this proxy is too
+      // old to report a tier"; omitting the key collapses those and invites assuming a tier
+      // (#3777). Anthropic's usage endpoint carries no subscription field, so null is the only
+      // truthful answer available today.
+      expect("plan" in account).toBe(true);
+      expect(account.plan).toBeNull();
     } finally {
       await server.stop(true);
     }
@@ -762,6 +826,48 @@ describe("multiauth accounts API", () => {
       expect(after.activeAccountId).toBe("bbbb2222");
     } finally {
       await server.stop(true);
+    }
+  });
+});
+
+
+describe("Antigravity quota diagnosis projection", () => {
+  let savedProxyEnv: Record<string, string | undefined>;
+  const proxyKeys = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"];
+  beforeEach(() => {
+    savedProxyEnv = Object.fromEntries(proxyKeys.map(key => [key, process.env[key]]));
+    for (const key of proxyKeys) delete process.env[key];
+  });
+  afterEach(() => {
+    for (const key of proxyKeys) {
+      if (savedProxyEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedProxyEnv[key];
+    }
+  });
+  test("authenticated account reads expose only the current safe failure category", async () => {
+    const { saveCredential } = await import("../../src/oauth/store");
+    const { clearAccountQuotaCache, setAntigravityAccountQuotaTransportForTests } = await import("../../src/providers/quota");
+    const cfg = baseConfig();
+    cfg.providers["google-antigravity"] = { adapter: "google", baseUrl: "https://daily-cloudcode-pa.googleapis.com", authMode: "oauth" };
+    saveConfig(cfg);
+    await saveCredential("google-antigravity", { access: "private-diagnostic-access", refresh: "private-diagnostic-refresh", expires: Date.now() + 3600_000, projectId: "private-diagnostic-project", accountId: "diag-account" });
+    clearAccountQuotaCache();
+    setAntigravityAccountQuotaTransportForTests({
+      resolveAddresses: async () => ({ hostname: "daily-cloudcode-pa.googleapis.com", addresses: [{ address: "142.250.0.1", family: 4 }], privateNetwork: false }),
+      pinnedPost: async () => new Response(null, { status: 403 }),
+    });
+    const server = startServer(0);
+    try {
+      const response = await fetch(new URL("/api/oauth/accounts?provider=google-antigravity&quota=1&refresh=1", server.url));
+      expect(response.status).toBe(200);
+      const body = await response.json() as { accounts: Array<{ quotaFailure?: string; quotaUnavailable?: boolean }> };
+      expect(body.accounts[0]).toMatchObject({ quotaFailure: "access_denied", quotaUnavailable: true });
+      const text = JSON.stringify(body);
+      for (const secret of ["private-diagnostic-access", "private-diagnostic-refresh", "private-diagnostic-project", "quotaFailureIsCurrent"]) expect(text).not.toContain(secret);
+    } finally {
+      await server.stop(true);
+      clearAccountQuotaCache();
+      setAntigravityAccountQuotaTransportForTests(null);
     }
   });
 });

@@ -18,20 +18,25 @@ function selectDashboardTab(next: DashboardSection) {
   navigateHash(dashboardHashForSection(next));
 }
 
-export default function Dashboard({ apiBase }: { apiBase: string }) {
-  const d = useDashboardData(apiBase);
+export default function Dashboard({ apiBase, connected = false, authenticationPending = false, refreshEpoch = 0 }: {
+  apiBase: string; connected?: boolean; authenticationPending?: boolean; refreshEpoch?: number;
+}) {
+  const d = useDashboardData(apiBase, refreshEpoch);
   const {
-    t, error, overviewReconnecting, retryOverview, selectedSection,
+    t, error, selectedSection,
     providers, models, modelsLoading, modelQuery, setModelQuery,
     filteredGroups, expandedProviders, setExpandedProviders,
   } = d;
 
-  if (error) {
+  if (authenticationPending) return null;
+  const accessFailure = d.connectionFailure === "auth" || d.connectionFailure === "denied";
+  if (error && (accessFailure || !d.health)) {
     return (
       <EmptyState style={{ marginTop: 40 }} icon={<IconAlert />}
-        title={<span style={{ color: "var(--red)" }}>{t("dash.cannotConnect")}</span>}>
-        <Trans k="dash.runStart" cmd="ocx start" />
-        <button type="button" className="btn btn-ghost btn-sm" onClick={() => retryOverview()}>{t("common.retry")}</button>
+        title={<span style={{ color: "var(--red)" }}>{t(d.connectionFailure === "denied"
+          ? "dash.permissionDenied" : d.connectionFailure === "auth" ? "dash.authRequired" : "dash.dataUnavailable")}</span>}>
+        {!connected && d.connectionFailure === "unavailable" && <Trans k="dash.runStart" cmd="ocx start" />}
+        <button className="btn btn-ghost" type="button" onClick={() => d.refreshDashboard()}>{t("common.retry")}</button>
       </EmptyState>
     );
   }
@@ -75,15 +80,12 @@ export default function Dashboard({ apiBase }: { apiBase: string }) {
 
   return (
     <div className="dashboard-workspace-shell">
+      {error && <Notice tone="warn">{t("dash.staleData")} <button className="btn btn-ghost" type="button"
+        onClick={() => d.refreshDashboard()}>{t("common.retry")}</button></Notice>}
       <div className="page-head">
         <h2>{t("nav.dashboard")}</h2>
       </div>
       <p className="page-sub">{t("dash.subtitle")}</p>
-      {overviewReconnecting && (
-        <Notice tone="warn">
-          {t("dash.connectionReconnecting")} <button type="button" className="btn btn-ghost btn-sm" onClick={() => retryOverview()}>{t("common.retry")}</button>
-        </Notice>
-      )}
       <div className="page-tabs" role="tablist" aria-label={t("dash.workspace.sections")}>
         {sections.map(s => (
           <button

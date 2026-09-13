@@ -14,15 +14,7 @@ import { EmptyState, Notice } from "../ui";
 import Debug from "./Debug";
 import { LogsFilterBar } from "./logs-filter-bar";
 import { logsClockAnchor, logsClockNow, type LogsClockAnchor } from "./logs-clock";
-import {
-  DEFAULT_LOG_FILTER_STATE,
-  extractLogFilterOptions,
-  filterLogs,
-  hasActiveLogFilters,
-  normalizedAgentKind,
-  type LogFilterState,
-  type PersistedAgentKind,
-} from "./logs-filter";
+import { DEFAULT_LOG_FILTER_STATE, extractLogFilterOptions, filterLogs, hasActiveLogFilters, type LogFilterState } from "./logs-filter";
 
 import type { LogsTab } from "./logs-tab-keydown";
 import { logsTabKeyDown, readTabFromHash, selectLogsTab } from "./logs-tab-keydown";
@@ -61,7 +53,8 @@ type LogUsageStatus = "reported" | "unreported" | "unsupported" | "estimated";
 type MetricUnavailableReason =
   | "usage_missing" | "usage_unsupported" | "output_missing" | "invalid_duration"
   | "price_unmatched" | "invalid_cache_breakdown"
-  | "invalid_usage" | "combo_attempt_unavailable";
+  | "invalid_usage" | "combo_attempt_unavailable"
+  | "ttft_missing" | "decode_window_too_short";
 
 type CostEstimateReason =
   | "usage_estimated"
@@ -100,6 +93,11 @@ type CostResult =
 
 interface LogDisplayMetrics {
   tokPerSecond: TokPerSecondResult;
+  /**
+   * Estimated decode throughput (#4038). Optional because a row cached by an older build has no
+   * such field; absent renders nothing rather than an empty slot.
+   */
+  decodeTokPerSecond?: TokPerSecondResult;
   cost: CostResult;
 }
 
@@ -115,12 +113,8 @@ type AttemptRecoveryKind =
   | "rate-limit-429"
   | "anthropic-oauth-429"
   | "image-413"
-  | "cursor-envelope-echo"
-  | "cursor-routing-commentary"
-  | "cursor-duplicate-tool-call"
-  | "cursor-overflow-remint"
-  | "cursor-invalid-argument"
-  | "empty-completion";
+  | "empty-completion"
+  | "console-go-upload-retry";
 
 interface LogAttempt {
   ordinal: number;
@@ -149,7 +143,6 @@ export interface LogEntry {
   timestamp: number;
   model: string;
   provider: string;
-  agentKind?: PersistedAgentKind | string;
   surface?: LogSurface;
   conversationId?: string;
   /**
@@ -192,20 +185,6 @@ export interface LogEntry {
     selected?: { provider?: string; model?: string; reason?: string };
     candidates?: Array<{ provider?: string; model?: string; eligible?: boolean; exclusions?: Array<{ code?: string }> }>;
   };
-}
-
-function agentKindLabelKey(kind: LogEntry["agentKind"]): "logs.agent.main" | "logs.agent.subagent" | "logs.agent.internal" | "logs.agent.unknown" {
-  const keys = {
-    main: "logs.agent.main",
-    subagent: "logs.agent.subagent",
-    internal: "logs.agent.internal",
-    unknown: "logs.agent.unknown",
-  } as const;
-  return keys[normalizedAgentKind(kind)];
-}
-
-function AgentKindBadge({ kind, t }: { kind: LogEntry["agentKind"]; t: TFn }) {
-  return <span className="badge badge-muted" title={t("logs.agent.badgeTitle")}>{t(agentKindLabelKey(kind))}</span>;
 }
 
 function validCachedLogs(cached: LogEntry[] | null): LogEntry[] | null {
@@ -304,6 +283,8 @@ const METRIC_REASON_KEYS = {
   invalid_cache_breakdown: "logs.detail.reason.invalid_cache_breakdown",
   invalid_usage: "logs.detail.reason.invalid_usage",
   combo_attempt_unavailable: "logs.detail.reason.combo_attempt_unavailable",
+  ttft_missing: "logs.detail.reason.ttft_missing",
+  decode_window_too_short: "logs.detail.reason.decode_window_too_short",
 } as const satisfies Record<MetricUnavailableReason, string>;
 
 const ESTIMATE_REASON_KEYS = {
@@ -326,12 +307,8 @@ const RECOVERY_KIND_KEYS = {
   "rate-limit-429": "logs.detail.attempt.recovery.rateLimit429",
   "anthropic-oauth-429": "logs.detail.attempt.recovery.anthropicOauth429",
   "image-413": "logs.detail.attempt.recovery.image413",
-  "cursor-envelope-echo": "logs.detail.attempt.recovery.cursorEnvelopeEcho",
-  "cursor-routing-commentary": "logs.detail.attempt.recovery.cursorRoutingCommentary",
-  "cursor-duplicate-tool-call": "logs.detail.attempt.recovery.cursorDuplicateToolCall",
-  "cursor-overflow-remint": "logs.detail.attempt.recovery.cursorOverflowRemint",
-  "cursor-invalid-argument": "logs.detail.attempt.recovery.cursorInvalidArgument",
   "empty-completion": "logs.detail.attempt.recovery.emptyCompletion",
+  "console-go-upload-retry": "logs.detail.attempt.recovery.consoleGoUpload",
 } as const satisfies Record<AttemptRecoveryKind, string>;
 
 /** Map a metric-unavailable reason to its i18n key. */
@@ -517,18 +494,21 @@ export default function Logs({ apiBase }: { apiBase: string }) {
       // Guard these local side effects here as fetch/body readers may ignore abort.
       if (!isCurrent()) throw signal.reason ?? new DOMException("Obsolete log request", "AbortError");
       logPollRef.current = { key: resourceKey, cursor: parsed.cursor, rows: next };
-      // Reconcile the selected provider when the accepted snapshot changes, using the
-      // latest user state rather than filters captured when the request started. The model
-      // value is an intentional free-text query and must survive ring rollover. Persist
-      // provider disappearance as All so a later ring cannot resurrect a cleared selection.
+      // Reconcile when the accepted snapshot changes, using the latest user state
+      // rather than filters captured when the request started. Persist disappearance
+      // as All so a later ring cannot resurrect a cleared selection.
       const options = extractLogFilterOptions(next);
       setFilters(previous => {
+        const model = previous.model.trim().toLowerCase();
         const provider = previous.provider.trim().toLowerCase();
+        const nextModel = model
+          ? options.models.find(option => option.trim().toLowerCase() === model) ?? ""
+          : "";
         const nextProvider = provider
           ? options.providers.find(option => option.trim().toLowerCase() === provider) ?? ""
           : "";
-        if (previous.provider === nextProvider) return previous;
-        return { ...previous, provider: nextProvider };
+        if (previous.model === nextModel && previous.provider === nextProvider) return previous;
+        return { ...previous, model: nextModel, provider: nextProvider };
       });
       const sample = logsClockAnchor(parsed.generatedAt, receivedAt);
       if (sample) clock.anchor = sample;
@@ -844,6 +824,14 @@ export default function Logs({ apiBase }: { apiBase: string }) {
                   </td>
                   <td className="num mono log-col-rate">
                     {formatTokPerSecond(log.displayMetrics?.tokPerSecond, localeTag)}
+                    {/* #4038: decode rate stacked under the end-to-end rate it is easy to mistake
+                        for delivery speed. Only rendered when it actually resolved — a row whose
+                        decode window was too short shows the e2e rate alone rather than a blank. */}
+                    {log.displayMetrics?.decodeTokPerSecond?.kind === "value" && (
+                      <span className="logs-stack-end muted" title={t("logs.detail.decodeTokPerSec")}>
+                        {formatTokPerSecond(log.displayMetrics.decodeTokPerSecond, localeTag)}
+                      </span>
+                    )}
                   </td>
                   <td className="num mono log-col-cost">
                     {formatEstimatedUsd(log.displayMetrics?.cost, t, localeTag)}
@@ -851,7 +839,6 @@ export default function Logs({ apiBase }: { apiBase: string }) {
                  <td className="mono log-col-model" title={modelTitle(log, t)}>
                   <span className="logs-model-cell">
                    <span>{modelLabel(log.resolvedModel ?? log.model)}</span>
-                      <AgentKindBadge kind={log.agentKind} t={t} />
                       {log.shadowCallRewrittenFrom && (
                         <span
                           className="badge badge-muted"
@@ -1012,7 +999,6 @@ function LogDetailDialog({
             )}
             <span className="muted">{t("logs.col.model")}</span><span className="mono">{modelLabel(detail.resolvedModel ?? detail.model)}</span>
             <span className="muted">{t("logs.col.provider")}</span><span>{formatProviderDisplayName(detail.provider, t)}</span>
-            <span className="muted">{t("logs.filter.agent.label")}</span><AgentKindBadge kind={detail.agentKind} t={t} />
             {(detail.requestedEffort || detail.effectiveEffort) && (
               <><span className="muted">{t("logs.col.effort")}</span><span className="mono">{effortLabel(detail)}{reasoningWire ? ` (${reasoningWire})` : ""}</span></>
             )}
@@ -1065,12 +1051,20 @@ function LogDetailDialog({
           <div className="log-detail-grid">
             <span className="muted">{t("logs.col.duration")}</span><span className="mono">{detail.durationMs}ms</span>
             <span className="muted">{t("logs.col.tokPerSec")}</span><span className="mono">{formatTokPerSecond(detail.displayMetrics?.tokPerSecond, localeTag)}</span>
+            {detail.displayMetrics?.decodeTokPerSecond?.kind === "value" && (
+              <><span className="muted">{t("logs.detail.decodeTokPerSec")}</span><span className="mono">{formatTokPerSecond(detail.displayMetrics.decodeTokPerSecond, localeTag)}</span></>
+            )}
             {detail.firstOutputMs !== undefined && (
               <><span className="muted">{t("logs.detail.ttft")}</span><span className="mono">{detail.firstOutputMs}ms</span></>
             )}
           </div>
           {detail.displayMetrics?.tokPerSecond.kind === "unavailable" && (
             <p className="log-detail-notes-line muted">{t(metricReasonKey(detail.displayMetrics.tokPerSecond.reason))}</p>
+          )}
+          {detail.displayMetrics?.decodeTokPerSecond?.kind === "unavailable" && (
+            <p className="log-detail-notes-line muted">
+              {t("logs.detail.decodeTokPerSec")}: {t(metricReasonKey(detail.displayMetrics.decodeTokPerSecond.reason))}
+            </p>
           )}
         </section>
 
@@ -1156,7 +1150,17 @@ function LogDetailDialog({
                         )}
                       </td>
                       <td className="num mono">{attempt.durationMs}ms</td>
-                      <td className="num mono">{formatTokPerSecond(attempt.displayMetrics?.tokPerSecond, localeTag)}</td>
+                      <td className="num mono">
+                        {formatTokPerSecond(attempt.displayMetrics?.tokPerSecond, localeTag)}
+                        {/* #4038: the DTO already carries a per-attempt decode rate measured on
+                            that attempt's own TTFT, so the attempt table stacks it the same way
+                            the parent row and the list do. */}
+                        {attempt.displayMetrics?.decodeTokPerSecond?.kind === "value" && (
+                          <span className="logs-stack-end muted" title={t("logs.detail.decodeTokPerSec")}>
+                            {formatTokPerSecond(attempt.displayMetrics.decodeTokPerSecond, localeTag)}
+                          </span>
+                        )}
+                      </td>
                       <td className="num mono">{formatEstimatedUsd(attemptCost, t, localeTag)}</td>
                       <td className="log-detail-break">{reason}</td>
                     </tr>

@@ -16,8 +16,8 @@ Choose the mode for **new sessions**. Existing sessions keep the surface they st
 
 | Mode | What Codex gets | Who should pick it |
 | --- | --- | --- |
-| **v1** | Classic namespaced `spawn_agent`, `send_input`, `resume_agent`, and `close_agent` tools. A spawn can select another model directly. | Beginners who need reliable delegation across different providers, especially native-to-routed children. |
-| **base** (default) | Upstream model pins: GPT-5.6 Sol/Terra use v2, Luna uses v1, and unpinned models follow Codex's `multi_agent_v2` feature flag. | Most users. It follows Codex's intended surface for each model without forcing one globally. |
+| **v1** (default) | Classic namespaced `spawn_agent`, `send_input`, `resume_agent`, and `close_agent` tools. A spawn can select another model directly. | Anyone who delegates across providers, especially native-to-routed children. This is what a fresh install ships with. |
+| **base** | Upstream model pins: GPT-5.6 Sol/Terra use v2, Luna uses v1, and unpinned models follow Codex's `multi_agent_v2` feature flag. | Operators who want Codex's per-model pins and whose parent and child models sit on the same side of the provider boundary. Note that its pins put Sol and Terra on v2. |
 | **v2** | Flat `spawn_agent`, `send_message`, `followup_task`, `interrupt_agent`, and agent-list tools, with concurrent sessions. | Users who want the newer concurrent workflow and understand model inheritance and the encrypted-task limitation below. |
 
 On **v2**, an optional **Keep ChatGPT on v1** switch (`keepNativeChatGptOnV1`) leaves Sol/Terra
@@ -82,8 +82,10 @@ the assignment as plaintext, the routed provider receives that text under its ow
 terms; enable the experiment only for providers you trust with it.
 
 :::tip[Not sure?]
-Start with **base**. Choose **v1** when cross-provider delegation must work predictably. Force **v2**
-only when you specifically want its newer session model across every catalog entry.
+Stay on **v1**, the shipped default. Choose **base** or **v2** only when your parent and child models
+sit on the same side of the provider boundary — on both, a task handed from a ChatGPT model to a
+routed one arrives encrypted and fails. The dashboard asks before either, and links to
+[Why v1 is the default](/guides/subagent-v1-default/).
 :::
 
 ## External task input
@@ -155,8 +157,10 @@ when a preferred model, eligible roster, or fallback chain resolves. A configure
 is sufficient to render a custom prompt; if a bare value cannot resolve uniquely, `{{model}}`
 expands to an empty string.
 
-On v1, opencodex injects only the upstream-style proactive delegation guidance at `max` or `ultra`
-effort. It does not add a preferred model, roster, fallback list, or custom prompt on v1.
+On v1, opencodex injects the same proactive delegation guidance as the v2 recommended preset only
+at `max` or `ultra` effort. Only the delegation trigger changes: no separate delegation request is
+needed; user instructions, authority, task scope, and collaboration-tool rules still apply.
+It does not add a preferred model, roster, fallback list, or custom prompt on v1.
 
 The default-off `syncCodexSubagentDefaults` option is separate from guidance. When opencodex owns
 active Codex routing, sync or restart can write the selected values as marker-owned
@@ -238,6 +242,13 @@ byte-for-byte fidelity is not guaranteed. It rejects generic/API-key proxy calle
 `unreadable_encrypted_agent_task`; after native attempts have failed, their last error is retained. See
 [Agent configuration: Encrypted v2 task recovery](/reference/configuration/agents/#encrypted-v2-task-recovery)
 for the full trust boundary and configuration.
+
+The same recovery also covers a live thread switched from a native ChatGPT model to a routed one.
+Such a thread replays a backend-minted encrypted agent message on every later turn, so before
+[#4089](https://github.com/lidge-jun/opencodex/issues/4089) it failed closed on every turn and the
+only workaround was to start a new thread. That switch turn is not a spawn, so the direct routed
+path no longer restricts recovery to spawned child turns; combo recovery still does.
+
 Combo routing prefers a selectable canonical native ChatGPT target for encrypted tasks. If none
 is usable, or native authorization attempts are exhausted, an explicitly enabled recovery may
 make the task readable for one available routed target. All recovery trust and no-persistence
@@ -289,7 +300,7 @@ Use `ocx agent` for delegation, roster, effort-cap, and fallback settings:
 ocx agent status
 ocx agent injection set --model anthropic/claude-sonnet-5 --effort xhigh
 ocx agent subagents set gpt-5.6-sol,anthropic/claude-sonnet-5
-ocx agent fallback set gpt-5.4-mini,xai/grok-4.5 --poll-ms 60000
+ocx agent fallback set gpt-5.6-luna,xai/grok-4.5 --poll-ms 60000
 ocx effort set --subagent max
 ```
 
@@ -409,3 +420,17 @@ tier that Codex converts to `max`; opencodex then maps or clamps the value for t
 
 The model context cap is independent of sub-agent mode. Configure it on the Models page; native
 OpenAI models retain their real context windows.
+
+The experimental `plaintextV2AgentMessages` field is unset in a fresh config and runs only when set
+to `true`. The caller must use the Responses wire, and the final destination must use
+`adapter: "openai-responses"`, `authMode: "forward"`, and the exact base URL
+`https://chatgpt.com/backend-api/codex`. OpenAI API-key providers, custom compatible gateways,
+routes to other providers, and non-Responses callers are excluded. For an eligible new native
+ChatGPT v2 tool call, the option assigns request-scoped aliases to the namespace and three reserved
+message-tool names, removes the message marker, and restores the original identities in the
+response. It handles
+`spawn_agent`, `send_message`, and `followup_task` and adds no recovery request. HTTPS remains
+encrypted, but task text can be retained in Codex history, routed-provider requests, and local
+response/debug state. Existing ciphertext is unchanged, and the option depends on undocumented
+ChatGPT and Codex behavior. See
+[Agent configuration: Plaintext v2 agent messages](/reference/configuration/agents/#plaintext-v2-agent-messages).

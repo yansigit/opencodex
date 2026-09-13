@@ -168,17 +168,22 @@ function compileGenerationConfig(value: unknown): JsonObject | undefined {
     if (stopSequences.length > 0) out.stopSequences = stopSequences;
   }
   if (isObject(value.thinkingConfig)) {
-    const config: JsonObject = {};
+    const thinking: JsonObject = {};
     if (typeof value.thinkingConfig.thinkingBudget === "number"
       && Number.isSafeInteger(value.thinkingConfig.thinkingBudget)
-      && value.thinkingConfig.thinkingBudget >= -1) config.thinkingBudget = value.thinkingConfig.thinkingBudget;
-    if (typeof value.thinkingConfig.includeThoughts === "boolean") config.includeThoughts = value.thinkingConfig.includeThoughts;
+      && value.thinkingConfig.thinkingBudget >= -1) thinking.thinkingBudget = value.thinkingConfig.thinkingBudget;
     if (typeof value.thinkingConfig.thinkingLevel === "string") {
       const raw = value.thinkingConfig.thinkingLevel.toLowerCase();
-      const thinkingLevel = GOOGLE_THINKING_LEVELS.has(raw) ? raw : (["xhigh", "max", "ultra"].includes(raw) ? "high" : undefined);
-      if (thinkingLevel && config.thinkingBudget === undefined) config.thinkingLevel = thinkingLevel;
+      const thinkingLevel = GOOGLE_THINKING_LEVELS.has(raw)
+        ? raw
+        : (["xhigh", "max", "ultra"].includes(raw) ? "high" : undefined);
+      if (thinkingLevel && thinking.thinkingBudget === undefined) thinking.thinkingLevel = thinkingLevel;
     }
-    if (Object.keys(config).length > 0) out.thinkingConfig = config;
+    // The one key that makes Google return `thought: true` text. Cloud Code Assist serves
+    // thinking either way (thoughtsTokenCount stays non-zero) but withholds the text unless the
+    // request opts in, so dropping it here silently reinstates the missing-thinking behavior.
+    if (value.thinkingConfig.includeThoughts === true) thinking.includeThoughts = true;
+    if (Object.keys(thinking).length > 0) out.thinkingConfig = thinking;
   }
   if (Array.isArray(value.responseModalities)) {
     const valid = value.responseModalities.filter((m): m is string => typeof m === "string" && ["TEXT", "IMAGE", "AUDIO"].includes(m));

@@ -146,6 +146,48 @@ describe("management route registry reconciliation", () => {
     }
   });
 
+  test("a pure delegation guard is not a route, but a guard that works is still read", () => {
+    // `/api/codex-auth/main/reauth-device` (#3898) is matched in management-api.ts only to
+    // hand the request to its own module, which owns the POST/GET/DELETE dispatch and
+    // answers 405 for anything else. The dispatch site names no verb, and the registry
+    // declares all three against the handler module. Reporting it unresolved would claim a
+    // scanner gap that is not there. The second probe is the guard rail: the same shape
+    // plus one line of its own work stays unresolved and still fails loudly.
+    const tempDir = mkdtempSync(join(tmpdir(), "ocx-route-delegation-"));
+    const delegating = join(tempDir, "delegating-probe.ts");
+    const working = join(tempDir, "working-probe.ts");
+    try {
+      writeFileSync(delegating, [
+        "export async function handleProbe(ctx: any): Promise<Response | null> {",
+        "  const { url, req, config } = ctx;",
+        '  if (url.pathname === "/api/probe/delegated") {',
+        '    const { handleDelegated } = await import("./delegated");',
+        "    return handleDelegated(req, url, config);",
+        "  }",
+        "  return null;",
+        "}",
+      ].join("\n"));
+      expect(distinctRoutes(scanRoutes(delegating)).unresolved).toEqual([]);
+      expect(distinctRoutes(scanRoutes(delegating)).pairs).toEqual([]);
+
+      writeFileSync(working, [
+        "export async function handleProbe(ctx: any): Promise<Response | null> {",
+        "  const { url, req, config } = ctx;",
+        '  if (url.pathname === "/api/probe/not-delegated") {',
+        "    const decided = decide(req);",
+        '    const { handleDelegated } = await import("./delegated");',
+        "    return handleDelegated(decided, url, config);",
+        "  }",
+        "  return null;",
+        "}",
+      ].join("\n"));
+      expect(distinctRoutes(scanRoutes(working)).unresolved.map(r => r.path))
+        .toEqual(["/api/probe/not-delegated"]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test("a multi-method disjunction expands into one route per method", () => {
     // `PUT || PATCH` on one guard is two routes. A count keyed on line hits saw one.
     const poolStrategy = MANAGEMENT_ROUTES.filter(r => r.path === "/api/codex-auth/pool-strategy");

@@ -200,6 +200,45 @@ export const AGENT_MESSAGE_ROUTING_ENVELOPE = /(?:^|\n)Message Type\s*:\s*(?:NEW
 // envelope stripper below.
 export const AGENT_MESSAGE_CONTROL_PREAMBLE = /(?:^|\n)\[CXC-[A-Z0-9-]+\][^\n]*(?:\n(?!\n|Message Type\s*:)[^\n]*)*(?=\n{2,}|\nMessage Type\s*:|$)/gi;
 
+export const MAX_AGENT_TASK_ENCRYPTED_PARTS = 32;
+export const MAX_AGENT_TASK_CIPHERTEXT_BYTES = 2 * 1024 * 1024;
+
+/** Detection only: joining fragments never authorizes recovery or proves authenticity. */
+function splitFernetParts(content: unknown[]): Set<object> {
+  const protectedParts = new Set<object>();
+  let run: Array<{ part: object; text: string }> = [];
+  let bytes = 0;
+  let overLimit = false;
+  const finish = (): void => {
+    if (!overLimit && run.length > 1
+      && run.every(({ text }) => !isStructurallyValidFernetToken(text))
+      && isStructurallyValidFernetToken(run.map(({ text }) => text).join(""))) {
+      for (const { part } of run) protectedParts.add(part);
+    }
+    run = [];
+    bytes = 0;
+    overLimit = false;
+  };
+  for (const part of content) {
+    if (!part || typeof part !== "object" || (part as { type?: unknown }).type !== "encrypted_content"
+      || typeof (part as { encrypted_content?: unknown }).encrypted_content !== "string") {
+      finish();
+      continue;
+    }
+    if (overLimit) continue;
+    const text = (part as { encrypted_content: string }).encrypted_content;
+    bytes += Buffer.byteLength(text);
+    if (run.length >= MAX_AGENT_TASK_ENCRYPTED_PARTS || bytes > MAX_AGENT_TASK_CIPHERTEXT_BYTES) {
+      overLimit = true;
+      run = [];
+      continue;
+    }
+    run.push({ part, text });
+  }
+  finish();
+  return protectedParts;
+}
+
 export function hasUnreadableEncryptedAgentTask(input: unknown): boolean {
   if (!Array.isArray(input)) return false;
 
@@ -222,7 +261,8 @@ export function hasUnreadableEncryptedAgentTask(input: unknown): boolean {
   const content = (item as { content?: unknown }).content;
   if (!Array.isArray(content)) return false;
 
-  let hasFernetTask = false;
+  const fragmentParts = splitFernetParts(content);
+  let hasFernetTask = fragmentParts.size > 0;
   const readableParts: string[] = [];
   for (const part of content) {
     if (!part || typeof part !== "object") continue;
@@ -238,6 +278,7 @@ export function hasUnreadableEncryptedAgentTask(input: unknown): boolean {
       continue;
     }
 
+    if (fragmentParts.has(part)) continue;
     const runs = fernetTokenRuns(record.encrypted_content);
     if (runs.length > 0) hasFernetTask = true;
     readableParts.push(textWithoutFernetRuns(record.encrypted_content, runs));
@@ -282,6 +323,7 @@ export function hasEncryptedContentPart(content: unknown): boolean {
 export function sanitizeEncryptedContentInPlace(input: unknown): number {
   if (!Array.isArray(input)) return 0;
   let rewritten = 0;
+  const protectedFragments = new WeakSet<object>();
   type VisitFrame =
     | { kind: "visit"; node: unknown }
     | { kind: "array"; node: unknown[]; index: number }
@@ -293,6 +335,7 @@ export function sanitizeEncryptedContentInPlace(input: unknown): number {
     const frame = stack.pop()!;
     if (frame.kind === "visit") {
       if (Array.isArray(frame.node)) {
+        for (const part of splitFernetParts(frame.node)) protectedFragments.add(part);
         stack.push({ kind: "array", node: frame.node, index: 0 });
       } else if (frame.node && typeof frame.node === "object") {
         stack.push({ kind: "object", values: Object.values(frame.node), index: 0 });
@@ -309,7 +352,7 @@ export function sanitizeEncryptedContentInPlace(input: unknown): number {
         && typeof (child as { encrypted_content?: unknown }).encrypted_content === "string"
       ) {
         const payload = (child as { encrypted_content: string }).encrypted_content;
-        if (!looksLikeBackendCiphertext(payload)) {
+        if (!protectedFragments.has(child) && !looksLikeBackendCiphertext(payload)) {
           const parts = encryptedSlotParts(payload);
           frame.node.splice(frame.index, 1, ...parts);
           rewritten += 1;

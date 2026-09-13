@@ -542,6 +542,30 @@ describe("bounded parallel first pass (WP170)", () => {
     expect(droppedForOverflow).toEqual([0]);
   });
 
+  test("terminal overflow keeps counting a target whose drop leaves the bytes on the wire", async () => {
+    // A wire whose drop cannot remove bytes (openai-chat) must not have them subtracted
+    // from the total here either. Subtracting would let the loop believe it reached the
+    // budget after a drop that changed nothing, and stop before a removable target.
+    const encode: EncodeFn = (_input, spec) => {
+      const px = fakePngBase64(Math.min(64, spec.maxEdge), Math.min(64, spec.maxEdge), 3 * 1024);
+      return Promise.resolve({ data: px.slice(0, 4 * 1024), mediaType: "image/webp" });
+    };
+    const images = distinctImages(4);
+    const droppedForOverflow: number[] = [];
+    const targets: NormalizeTarget[] = images.map((b64, i) => ({
+      base64: b64,
+      mediaType: "image/png",
+      replace: () => {},
+      drop: note => { if (note.includes("provider request budget")) droppedForOverflow.push(i); },
+      // Only the oldest target keeps its bytes when dropped.
+      retainsBytesOnDrop: i === 0,
+    }));
+    // Budget fits 3 of the 4 terminal outputs. Dropping the oldest frees nothing, so the
+    // loop must continue and drop the next one to actually get under budget.
+    await normalizeImageTargets(targets, { encode, budget: 3 * 4 * 1024, overflowAction: "drop" });
+    expect(droppedForOverflow).toEqual([0, 1]);
+  });
+
   test("skip paths free the worker slot: URL sources and over-limit images never reach the encoder", async () => {
     const g = gatedEncoder();
     const real = distinctImages(3);
@@ -579,4 +603,31 @@ test("image codec seam preserves hook identity and owns normalization state", as
   const source = readFileSync(repoPath("src/adapters/anthropic-image-normalize.ts"), "utf8");
   expect(source).not.toMatch(/^(?:const|let|var)\b[^\n]*\bnew Map</m);
   expect(source).not.toMatch(/^let encodeCalls\b/m);
+});
+
+
+test("failed demotion keeps retained bytes in the aggregate budget", async () => {
+  const images = [fakePngBase64(3000, 2000, 32), fakePngBase64(3001, 2000, 33)];
+  const firstKey = Bun.hash(Uint8Array.from(Buffer.from(images[0]!, "base64"))).toString();
+  let firstCalls = 0;
+  let secondCalls = 0;
+  const retained: string[] = [];
+  const dropped: number[] = [];
+  const targets: NormalizeTarget[] = images.map((base64, i) => ({
+    base64, mediaType: "image/png", retainsBytesOnDrop: i === 0,
+    replace: data => { retained[i] = data; },
+    drop: () => { dropped.push(i); },
+  }));
+  const encode: EncodeFn = async input => {
+    if (Bun.hash(input).toString() === firstKey) {
+      if (++firstCalls > 1) throw new Error("demotion failed");
+      return { data: "A".repeat(4000), mediaType: "image/jpeg" };
+    }
+    secondCalls++;
+    return { data: "B".repeat(secondCalls === 1 ? 4000 : 2000), mediaType: "image/jpeg" };
+  };
+  await normalizeImageTargets(targets, { encode, validate: async () => {}, budget: 6000, overflowAction: "none" });
+  expect(dropped).toContain(0);
+  expect(secondCalls).toBeGreaterThan(1);
+  expect(retained.map(value => value.length)).toEqual([4000, 2000]);
 });

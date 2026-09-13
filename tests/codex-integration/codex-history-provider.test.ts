@@ -1,10 +1,12 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { classifyRecoverableHistoryError, countPendingOpencodexHistory, historyBackupPathFor, isRecoverableHistoryError, migrateHistoryToOpenai, restoreLegacyOpenaiHistory, restoredUserEventFor, setAfterNoopPendingCountForTests, setAfterStrictHistoryRolloutAppendForTests, setBeforeHistoryApplyTransactionForTests, setBeforeHistoryBackupConsumeForTests, setBeforeStrictHistoryRolloutAppendForTests, setHistoryDbBusyTimeoutForTests, snapshotCodexHistoryNoop, syncCodexHistoryProvider, withHistoryRetry } from "../../src/codex/history-provider";
+import { classifyRecoverableHistoryError, countPendingOpencodexHistory, historyBackupPathFor, isRecoverableHistoryError, legacyHistoryBackupPathFor, migrateHistoryToOpenai, resolveExistingHistoryBackupPath, restoreLegacyOpenaiHistory, restoredUserEventFor, setAfterNoopPendingCountForTests, setAfterStrictHistoryRolloutAppendForTests, setBeforeHistoryApplyTransactionForTests, setBeforeHistoryBackupConsumeForTests, setBeforeStrictHistoryRolloutAppendForTests, setHistoryDbBusyTimeoutForTests, snapshotCodexHistoryNoop, syncCodexHistoryProvider, withHistoryRetry } from "../../src/codex/history-provider";
+import { codexHistoryBackupId, legacyCodexHistoryBackupId, sameCodexHistoryPath } from "../../src/codex/history-manifest";
 import { INVALID_HISTORY_BACKUP_FIXTURES, validHistoryBackupFixture } from "../helpers/codex-history-manifest-fixtures";
+import { preflightCodexHistoryInjection, setHistoryAppendHooksForTests } from "../../src/codex/history-provider";
 
 // Windows CI: a transient file lock can consume the full production 5s busy timeout, tripping
 // bun's 5s default per-test timeout by itself. Fail fast into withHistoryRetry instead.
@@ -15,6 +17,7 @@ setDefaultTimeout(30_000);
 
 const noopSnapshotArtifacts = new Set<string>();
 afterEach(() => {
+  setHistoryAppendHooksForTests(undefined);
   setBeforeHistoryBackupConsumeForTests(undefined);
   setBeforeStrictHistoryRolloutAppendForTests(undefined);
   setAfterStrictHistoryRolloutAppendForTests(undefined);
@@ -101,6 +104,135 @@ function makeFixture({ includeExec = false, includeLegacy = false } = {}) {
 }
 
 describe("Codex history provider sync", () => {
+  test.each(["{broken", "null", "[]", "42", '"text"'])("invalid first record %s is a structured integrity failure", (first) => {
+    const fixture = makeFixture();
+    noopSnapshotArtifacts.add(join(fixture.dbPath,".."));
+    writeFileSync(fixture.rollout, first + "\n");
+    expect(syncCodexHistoryProvider("opencodex",fixture.dbPath,fixture.backupPath)).toMatchObject({failed:true,rows:0,files:0,integrityCode:"history_rollout_record_invalid"});
+    const db = new Database(fixture.dbPath);
+    db.run("UPDATE threads SET model_provider='opencodex'");
+    db.close();
+    expect(restoreLegacyOpenaiHistory(fixture.dbPath)).toMatchObject({failed:true,rows:0,files:0,integrityCode:"history_rollout_record_invalid"});
+    expect(readFileSync(fixture.rollout,"utf8")).toBe(first+"\n");
+  });
+
+  test.each(["beforeWrite", "afterWrite"] as const)("descriptor-bound append refuses path replacement %s", (stage) => {
+    const fixture = makeFixture();
+    noopSnapshotArtifacts.add(join(fixture.dbPath,".."));
+    const replacement=JSON.stringify({ordinal:0,type:"session_meta",payload:{id:"thread-1",history_mode:"paginated",model_provider:"openai"}})+"\n";
+    setHistoryAppendHooksForTests({[stage]:(path:string)=>{
+      if(path!==fixture.rollout)return;
+      renameSync(path,path+".old");
+      writeFileSync(path,replacement);
+    }});
+    expect(syncCodexHistoryProvider("opencodex",fixture.dbPath,fixture.backupPath)).toMatchObject({failed:true,rows:0,integrityCode:"history_rollout_identity_changed"});
+    expect(readFileSync(fixture.rollout,"utf8")).toBe(replacement);
+    const db=new Database(fixture.dbPath,{readonly:true});
+    expect(db.query("SELECT model_provider FROM threads WHERE id='thread-1'").get()).toEqual({model_provider:"openai"});
+    db.close();
+  });
+
+  for (const stage of ["beforeFirstLineOpen", "beforeFirstLineWrite", "afterFirstLineWrite"] as const) {
+    test.each([false, true])(`first-line identity guard preserves replacement (${stage}, strict=%s)`, (strict) => {
+      const fixture = makeFixture();
+      noopSnapshotArtifacts.add(join(fixture.dbPath, ".."));
+      // Leave enough first-line padding for forward provider replacement in place.
+      const raw = readFileSync(fixture.rollout, "utf8");
+      writeFileSync(fixture.rollout, raw.replace('"model_provider":"openai"', '"model_provider":"openai"                '));
+      if (strict) expect(syncCodexHistoryProvider("opencodex", fixture.dbPath, fixture.backupPath).rows).toBe(1);
+      const provider = strict ? "opencodex" : "openai";
+      const replacement = JSON.stringify({ordinal:0,type:"session_meta",payload:{id:"thread-1",history_mode:"paginated",model_provider:provider}}) + "\n";
+      let fired = false;
+      setHistoryAppendHooksForTests({[stage]:(path:string)=>{
+        if(path!==fixture.rollout || fired)return;
+        fired=true;
+        renameSync(path,path+".old");
+        writeFileSync(path,replacement);
+      }});
+      const result=syncCodexHistoryProvider(strict?"openai":"opencodex",fixture.dbPath,fixture.backupPath);
+      expect(fired).toBe(true);
+      expect(result).toMatchObject({failed:true,rows:0,integrityCode:strict?"history_backup_partial_restore":"history_rollout_identity_changed"});
+      expect(readFileSync(fixture.rollout,"utf8")).toBe(replacement);
+      const db=new Database(fixture.dbPath,{readonly:true});
+      expect(db.query("SELECT model_provider FROM threads WHERE id='thread-1'").get()).toEqual({model_provider:provider});
+      db.close();
+      if(strict) expect(existsSync(fixture.backupPath)).toBe(true);
+    });
+  }
+
+  test("late paginated conversion rolls back routing instead of swallowing integrity failure",()=>{
+    const fixture=makeFixture();
+    noopSnapshotArtifacts.add(join(fixture.dbPath,".."));
+    const replacement=JSON.stringify({ordinal:0,type:"session_meta",payload:{id:"thread-1",history_mode:"paginated",model_provider:"openai"}})+"\n";
+    setBeforeHistoryApplyTransactionForTests(()=>writeFileSync(fixture.rollout,replacement));
+    expect(syncCodexHistoryProvider("opencodex",fixture.dbPath,fixture.backupPath)).toMatchObject({failed:true,rows:0,integrityCode:"history_paginated_requires_native_writer"});
+    expect(readFileSync(fixture.rollout,"utf8")).toBe(replacement);
+    const db=new Database(fixture.dbPath,{readonly:true});
+    expect(db.query("SELECT model_provider FROM threads WHERE id='thread-1'").get()).toEqual({model_provider:"openai"});
+    db.close();
+  });
+  test("refuses legacy rows in a migration-capable store before external writes", () => {
+    const fixture = makeFixture();
+    noopSnapshotArtifacts.add(join(fixture.dbPath, ".."));
+    const before = readFileSync(fixture.rollout, "utf8");
+    const db = new Database(fixture.dbPath);
+    db.run("ALTER TABLE threads ADD COLUMN history_mode TEXT DEFAULT 'legacy'");
+    db.close();
+    expect(syncCodexHistoryProvider("opencodex", fixture.dbPath, fixture.backupPath)).toMatchObject({failed:true,rows:0,files:0,integrityCode:"history_paginated_requires_native_writer"});
+    expect(readFileSync(fixture.rollout,"utf8")).toBe(before);
+    expect(existsSync(fixture.backupPath)).toBe(false);
+  });
+  test("injection preflight preserves provider definitions needed by paginated threads", () => {
+    const fixture = makeFixture({ includeLegacy: true });
+    noopSnapshotArtifacts.add(join(fixture.dbPath, ".."));
+    const db = new Database(fixture.dbPath);
+    db.run("ALTER TABLE threads ADD COLUMN history_mode TEXT DEFAULT 'legacy'");
+    db.run("UPDATE threads SET history_mode='paginated' WHERE id='thread-3'");
+    db.close();
+    expect(preflightCodexHistoryInjection(false, false, fixture.dbPath)).toBe("history_paginated_requires_native_writer");
+    expect(preflightCodexHistoryInjection(true, true, fixture.dbPath)).toBe("history_paginated_requires_native_writer");
+    expect(preflightCodexHistoryInjection(true, false, fixture.dbPath)).toBeNull();
+    expect(existsSync(fixture.backupPath)).toBe(false);
+  });
+
+  for (const marker of ["ordinal", "history_mode"] as const) {
+    test(`refuses paginated ${marker} before routing any row or writing a manifest`, () => {
+      const fixture = makeFixture();
+      noopSnapshotArtifacts.add(join(fixture.dbPath, ".."));
+      const records = readFileSync(fixture.rollout, "utf8").trim().split("\n").map(line => JSON.parse(line));
+      if (marker === "ordinal") records.forEach((record, ordinal) => { record.ordinal = ordinal; });
+      else records[0].payload.history_mode = "paginated";
+      const before = records.map(record => JSON.stringify(record)).join("\n") + "\n";
+      writeFileSync(fixture.rollout, before);
+      const result = syncCodexHistoryProvider("opencodex", fixture.dbPath, fixture.backupPath);
+      expect(result).toMatchObject({ rows: 0, files: 0, failed: true, integrityCode: "history_paginated_requires_native_writer" });
+      expect(readFileSync(fixture.rollout, "utf8")).toBe(before);
+      expect(existsSync(fixture.backupPath)).toBe(false);
+      const db = new Database(fixture.dbPath, { readonly: true });
+      expect(db.query("SELECT model_provider FROM threads WHERE id = 'thread-1'").get()).toEqual({ model_provider: "openai" });
+      db.close();
+    });
+  }
+
+  test("preserves a routed paginated rollout and its restore manifest", () => {
+    const fixture = makeFixture();
+    noopSnapshotArtifacts.add(join(fixture.dbPath, ".."));
+    expect(syncCodexHistoryProvider("opencodex", fixture.dbPath, fixture.backupPath).failed).toBeUndefined();
+    const records = readFileSync(fixture.rollout, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    records.forEach((record, ordinal) => { record.ordinal = ordinal; });
+    const before = records.map(record => JSON.stringify(record)).join("\n") + "\n";
+    writeFileSync(fixture.rollout, before);
+    const manifest = readFileSync(fixture.backupPath, "utf8");
+    for (const result of [syncCodexHistoryProvider("openai", fixture.dbPath, fixture.backupPath), restoreLegacyOpenaiHistory(fixture.dbPath)]) {
+      expect(result).toMatchObject({ rows: 0, files: 0, failed: true, integrityCode: "history_paginated_requires_native_writer" });
+    }
+    expect(readFileSync(fixture.rollout, "utf8")).toBe(before);
+    expect(readFileSync(fixture.backupPath, "utf8")).toBe(manifest);
+    const db = new Database(fixture.dbPath, { readonly: true });
+    expect(db.query("SELECT model_provider FROM threads WHERE id = 'thread-1'").get()).toEqual({ model_provider: "opencodex" });
+    db.close();
+  });
+
   test("maps resumable Codex threads to opencodex via the latest session_meta", () => {
     const { dbPath, backupPath, rollout } = makeFixture();
 
@@ -1381,5 +1513,87 @@ describe("Design B migration helpers", () => {
     const db = new Database(pending.dbPath, { readonly: true });
     expect(db.query("SELECT model_provider FROM threads WHERE id = 'thread-1'").get()).toEqual({ model_provider: "openai" });
     db.close();
+  });
+});
+
+/**
+ * #4442: Codex records some rollout paths with the Win32 extended-length prefix
+ * (`\\?\C:\...`) and others without. Both spellings name the same file, but the
+ * integrity check compared them literally and failed intact sessions. The identity
+ * leaf strips the prefix before resolving, and the manifest filename keeps a
+ * legacy-name fallback so a backup written under the pre-fix identity is still
+ * discovered. These tests fake win32 to pin the path shapes directly; the real
+ * platform is restored after each one.
+ */
+describe("Windows history path identity (#4442)", () => {
+  const originalPlatform = process.platform;
+  afterEach(() => {
+    Object.defineProperty(process, "platform", { configurable: true, value: originalPlatform });
+  });
+  const fakeWin32 = () => {
+    Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+  };
+
+  test("treats extended-length-prefixed spellings as the same file", () => {
+    fakeWin32();
+    expect(sameCodexHistoryPath(
+      "\\\\?\\C:\\Users\\a\\.codex\\sessions\\r.jsonl",
+      "C:\\Users\\a\\.codex\\sessions\\r.jsonl",
+    )).toBe(true);
+    // The case-insensitive contract still holds across the prefix boundary.
+    expect(sameCodexHistoryPath(
+      "c:\\users\\a\\r.jsonl",
+      "\\\\?\\C:\\Users\\A\\r.jsonl",
+    )).toBe(true);
+    // The UNC form maps to its bare-share spelling.
+    expect(sameCodexHistoryPath(
+      "\\\\?\\UNC\\server\\share\\r.jsonl",
+      "\\\\server\\share\\r.jsonl",
+    )).toBe(true);
+    // Prefix normalization must not collapse genuinely different files.
+    expect(sameCodexHistoryPath(
+      "\\\\?\\C:\\Users\\a\\r.jsonl",
+      "C:\\Users\\a\\other.jsonl",
+    )).toBe(false);
+    // An archived_sessions move is a real path change, not a spelling alias (#4442
+    // keeps those cases out of this fix by design).
+    expect(sameCodexHistoryPath(
+      "\\\\?\\C:\\Users\\a\\.codex\\archived_sessions\\r.jsonl",
+      "C:\\Users\\a\\.codex\\sessions\\r.jsonl",
+    )).toBe(false);
+  });
+
+  test("hashes both spellings to one backup id while keeping the pre-fix id reachable", () => {
+    fakeWin32();
+    const plain = "C:\\Users\\a\\.codex\\state_5.sqlite";
+    const prefixed = "\\\\?\\C:\\Users\\a\\.codex\\state_5.sqlite";
+    expect(codexHistoryBackupId(prefixed)).toBe(codexHistoryBackupId(plain));
+    // The prefixed spelling hashed to a DIFFERENT manifest name before #4442; that is
+    // the file a machine that recorded the prefix already has on disk, so the legacy
+    // id must stay computable. Plain spellings are untouched by the whole change.
+    expect(legacyCodexHistoryBackupId(prefixed)).not.toBe(codexHistoryBackupId(prefixed));
+    expect(legacyCodexHistoryBackupId(plain)).toBe(codexHistoryBackupId(plain));
+  });
+
+  test("discovers a manifest named under the pre-#4442 identity and never replaces it silently", () => {
+    fakeWin32();
+    const stateDb = "\\\\?\\C:\\Users\\a\\.codex\\state_5.sqlite";
+    const canonical = historyBackupPathFor(stateDb);
+    const legacy = legacyHistoryBackupPathFor(stateDb);
+    expect(legacy).not.toBe(canonical);
+
+    const present = new Set<string>([legacy]);
+    const exists = (path: string) => present.has(path);
+    // Only the legacy name exists: it still shadows the database, so restore and
+    // no-op probes keep finding its provenance instead of reading it as absent.
+    expect(resolveExistingHistoryBackupPath(stateDb, exists)).toBe(legacy);
+    // Both names exist (conflicting old/new manifests): the canonical manifest wins
+    // and the legacy file is left in place — kept, never silently replaced.
+    present.add(canonical);
+    expect(resolveExistingHistoryBackupPath(stateDb, exists)).toBe(canonical);
+    expect(present.has(legacy)).toBe(true);
+    // Neither exists: a new manifest is written under the canonical name.
+    present.clear();
+    expect(resolveExistingHistoryBackupPath(stateDb, exists)).toBe(canonical);
   });
 });

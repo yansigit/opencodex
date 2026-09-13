@@ -2,14 +2,9 @@ import type { KiroOAuthMetadata, OAuthController, OAuthCredentials } from "./typ
 import { initializeProviderModelSelection } from "../providers/initial-model-selection";
 import { parseCallbackInput } from "./callback-server";
 import type { OcxConfig, OcxProviderConfig, RefreshPolicy } from "../types";
-import {
-  ConfigMutationLockError,
-  initializePersistedConfigIfMissing,
-  loadConfig,
-  mutatePersistedConfig,
-} from "../config";
+import { ConfigMutationLockError, loadConfig, mutatePersistedConfig, saveConfig } from "../config";
 import { resolveProviderApiKey } from "../providers/key-store";
-import { maskEmail } from "../lib/privacy";
+import { projectEmail } from "../lib/privacy";
 import { KiroTokenRefreshError, environmentKiroRoutingMetadata, loginKiro, refreshKiroToken, settleKiroLoginTransaction } from "./kiro";
 import {
   OAuthMutationBusyError,
@@ -41,8 +36,9 @@ import { ANTHROPIC_OAUTH_BETA, AnthropicTokenError, loginAnthropic, refreshAnthr
 import { loginKimi, refreshKimiToken } from "./kimi";
 import { loginNous, NousTokenError, refreshNousToken, clearNousRefreshIntent, RefreshIntentIOError } from "./nous";
 import { loginChatGPT, refreshChatGPTToken, type ChatGPTLoginFlow } from "./chatgpt";
-import { AntigravityTokenRequestError, loginAntigravity, refreshAntigravityToken } from "./google-antigravity";
+import { loginAntigravity, refreshAntigravityToken } from "./google-antigravity";
 import { loginCursor, refreshCursorToken } from "./cursor";
+import { loginDevin, refreshDevinToken } from "./devin";
 import { loginGithubCopilot, refreshGithubCopilotToken, validateCopilotApiBaseUrl } from "./github-copilot";
 import { loginCommandCode, refreshCommandCodeToken } from "./command-code";
 import { loginMetaMuse, refreshMetaMuseToken } from "./meta-muse";
@@ -270,7 +266,9 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderDef> = {
     defaultModel: oauthDefaultModel("kimi"),
   },
   "meta-muse": {
-    login: ctrl => loginMetaMuse(ctrl),
+    // Add-account/reauth must not reimport the credential already on disk; it starts the
+    // device grant instead, the same mapping command-code uses above.
+    login: (ctrl, opts) => loginMetaMuse(ctrl, {}, { importLocal: opts?.forceLogin ? "off" : "fallback" }),
     refresh: refreshMetaMuseToken,
     providerConfig: oauthConfig("meta-muse"),
     defaultModel: oauthDefaultModel("meta-muse"),
@@ -313,6 +311,16 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderDef> = {
     providerConfig: oauthConfig("cursor"),
     defaultModel: oauthDefaultModel("cursor"),
   },
+  devin: {
+    // Import-first: adopts a signed-in Devin CLI credential when one exists and
+    // only then falls back to the Auth0 browser flow. forceLogin skips the
+    // import so reauth/add-account can reach a different account than the CLI's.
+    login: (ctrl, opts) => loginDevin(ctrl, opts),
+    refresh: refreshDevinToken,
+    providerConfig: oauthConfig("devin"),
+    defaultModel: oauthDefaultModel("devin"),
+    defaultRefreshPolicy: "disabled",
+  },
   "github-copilot": {
     login: (ctrl) => loginGithubCopilot(ctrl),
     refresh: (rt, signal) => refreshGithubCopilotToken(rt, signal),
@@ -325,8 +333,25 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderDef> = {
     login: (ctrl, opts) => loginChatGPT(ctrl, { forceLogin: opts?.forceLogin, flow: opts?.flow }),
     refresh: (rt) => refreshChatGPTToken(rt),
     providerConfig: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward" as const },
-    defaultModel: "gpt-5.4",
+    defaultModel: "gpt-5.6-luna",
   },
+};
+
+/**
+ * Removed provider ids that still name a live successor.
+ *
+ * `devin-cli` was merged into `devin` (import-first login absorbed the CLI
+ * credential import; devlog/_plan/260913_devin_provider_merge). The id can
+ * still arrive here from a saved config row or a stored credential slot that
+ * the startup migration has not rekeyed yet, and from a user typing the old
+ * name at `ocx login`. It is deliberately NOT an OAUTH_PROVIDERS entry:
+ * keeping one would re-expose it as a separate dashboard/login row, and its
+ * `oauthConfig("devin-cli")` would throw at module load once the registry row
+ * is gone. The alias map covers the paths that must keep working — refresh
+ * policy resolution below, and the login-cli dispatch that warns and reroutes.
+ */
+export const DEPRECATED_OAUTH_PROVIDER_ALIASES: Record<string, string> = {
+  "devin-cli": "devin",
 };
 
 export function isOAuthProvider(name: string): boolean {
@@ -349,7 +374,11 @@ function isRefreshPolicy(value: unknown): value is RefreshPolicy {
 export function resolveRefreshPolicy(provider: string, config: OcxConfig): RefreshPolicy {
   const override = config.providers[provider]?.refreshPolicy;
   if (isRefreshPolicy(override)) return override;
-  const def = OAUTH_PROVIDERS[provider];
+  // Resolve through the alias map so a lingering `devin-cli` row inherits
+  // devin's "disabled" policy. Without it the row would fall to "lazy-only"
+  // and the guardian would attempt refreshes Cognition has no endpoint for,
+  // marking the account needsReauth on a durable key that cannot refresh.
+  const def = OAUTH_PROVIDERS[DEPRECATED_OAUTH_PROVIDER_ALIASES[provider] ?? provider];
   return def?.defaultRefreshPolicy ?? "lazy-only";
 }
 
@@ -385,19 +414,6 @@ export class OAuthLoginRequiredError extends Error {
   }
 }
 
-/**
- * A terminal provider refresh rejection that also made the stored account unusable.
- *
- * Keep the login-required subtype for internal recovery/account-health semantics, but retain
- * enough provenance for the public projection boundary to avoid presenting a provider failure
- * as a locally missing credential. The provider response itself is deliberately not retained.
- */
-class OAuthRefreshRejectedError extends OAuthLoginRequiredError {
-  constructor(provider: string) {
-    super(provider);
-  }
-}
-
 export class OAuthProviderPublicationError extends Error {
   constructor() {
     super("OAuth credential was saved, but the provider entry was not written. Resolve the account namespace collision, then retry login.");
@@ -428,9 +444,6 @@ class OAuthLoginSupersededError extends Error {
 
 /** Project arbitrary OAuth failures onto the small, stable public error vocabulary. */
 export function publicOAuthAuthenticationErrorMessage(error: unknown): string {
-  if (error instanceof OAuthRefreshRejectedError) {
-    return "OAuth authentication failed. Check the OpenCodex account status and retry.";
-  }
   if (error instanceof OAuthMutationBusyError) {
     return error.message === "OAuth mutation queue wait timed out"
       ? "OAuth mutation queue wait timed out"
@@ -598,7 +611,6 @@ const FORCE_REFRESH_PROVIDERS = new Set([
   "github-copilot",
   "kiro",
   "google-antigravity",
-  "cursor",
   "orcarouter-oauth",
 ]);
 
@@ -651,9 +663,6 @@ function isTerminalRefreshError(err: unknown): boolean {
     || msg.includes("expired_token");
 }
 function terminal(error:unknown):boolean{
-  if (error instanceof AntigravityTokenRequestError) {
-    return (error.httpStatus === 400 || error.httpStatus === 401) && error.oauthError !== undefined;
-  }
   if(error instanceof XaiTokenRequestError)return ["invalid_grant","refresh_token_reused","revoked_token"].includes(error.oauthError??"");
   if(error instanceof AnthropicTokenError)return (error.httpStatus===400||error.httpStatus===401)&&["invalid_grant","refresh_token_reused","revoked","revoked_token","refresh_token_revoked"].includes(error.oauthError??"");
   if(error instanceof KiroTokenRefreshError)return (error.httpStatus===400||error.httpStatus===401)&&error.oauthError!==undefined;
@@ -1086,7 +1095,7 @@ export async function refreshGenericAccountWithLock(
         }
       }
       await markAccountNeedsReauthIfGeneration(provider, accountId, generation, writerGeneration);
-      throw new OAuthRefreshRejectedError(provider);
+      throw new OAuthLoginRequiredError(provider);
     }
   } finally {
     guard.release();
@@ -1536,9 +1545,7 @@ export function upsertOAuthProvider(config: OcxConfig, provider: string): void {
       // Keep routing and listProviderApiKeys in sync: never leave a hidden active key that
       // is absent from the pool (listing would fall back to pool[0] as "active").
       if (!pool.some(entry => entry.key === storedApiKey)) {
-        const id = apiKeyPoolEntryId(storedApiKey);
-        if (pool.some(entry => entry.id === id)) throw new Error("API-key pool ID collision");
-        pool.push({ id, key: storedApiKey });
+        pool.push({ id: apiKeyPoolEntryId(storedApiKey), key: storedApiKey });
       }
       next.apiKey = storedApiKey;
       next.apiKeyPool = pool;
@@ -1554,8 +1561,7 @@ interface RunLoginDeps {
   saveCredential?: typeof saveCredential;
   saveAccountCredential?: typeof saveAccountCredential;
   loadConfig?: typeof loadConfig;
-  mutatePersistedConfig?: typeof mutatePersistedConfig;
-  initializePersistedConfigIfMissing?: typeof initializePersistedConfigIfMissing;
+  saveConfig?: typeof saveConfig;
   settleKiroLoginTransaction?: typeof settleKiroLoginTransaction;
   removeAccount?: typeof removeAccount;
   setActiveAccount?: typeof setActiveAccount;
@@ -1590,8 +1596,7 @@ export async function runLogin(
   const def = OAUTH_PROVIDERS[provider];
   if (!def) throw new UnsupportedOAuthProviderError(provider);
   const loadLatestConfig = deps.loadConfig ?? loadConfig;
-  const mutateLatestConfig = deps.mutatePersistedConfig ?? mutatePersistedConfig;
-  const initializeLatestConfig = deps.initializePersistedConfigIfMissing ?? initializePersistedConfigIfMissing;
+  const saveLatestConfig = deps.saveConfig ?? saveConfig;
   const preflightConfig = provider !== "chatgpt" ? loadLatestConfig() : undefined;
   if (preflightConfig) {
     const namespaceCollision = codexAccountNamespaceProviderCollisionError(
@@ -1646,32 +1651,16 @@ export async function runLogin(
     if (provider !== "chatgpt") {
       // Re-run against post-credential state so same-provider API-key additions, removals,
       // and active-key switches survive. A late namespace claim wins over provider creation.
-      const publish = () => mutateLatestConfig<{ error: string } | { config: OcxConfig }>(fresh => {
-        const lateCollision = codexAccountNamespaceProviderCollisionError(
-          fresh.codexAccountNamespaces,
-          provider,
-        );
-        if (lateCollision) return { changed: false, value: { error: lateCollision } };
-        upsertOAuthProvider(fresh, provider);
-        return { changed: true, value: { config: structuredClone(fresh) } };
-      });
-      let outcome = publish();
-      let published = false;
-      if (outcome.status === "unavailable" && outcome.reason === "missing") {
-        const initial = loadLatestConfig();
-        const lateCollision = codexAccountNamespaceProviderCollisionError(
-          initial.codexAccountNamespaces,
-          provider,
-        );
-        if (lateCollision) throw new OAuthProviderPublicationError();
-        upsertOAuthProvider(initial, provider);
-        const initialized = initializeLatestConfig(initial);
-        published = initialized === "created";
-        if (initialized === "exists") outcome = publish();
-      }
-      if (!published && (outcome.status === "unavailable" || "error" in outcome.value)) {
+      const latestConfig = loadLatestConfig();
+      const lateCollision = codexAccountNamespaceProviderCollisionError(
+        latestConfig.codexAccountNamespaces,
+        provider,
+      );
+      if (lateCollision) {
         throw new OAuthProviderPublicationError();
       }
+      upsertOAuthProvider(latestConfig, provider);
+      saveLatestConfig(latestConfig);
     }
   } catch (error) {
     const errors: unknown[] = [error];
@@ -1826,19 +1815,54 @@ export function submitManualLoginCode(provider: string, input: string): { ok: tr
   return { ok: true };
 }
 
-export interface OAuthAccountSummary { id: string; alias?: string; email?: string; active: boolean; needsReauth?: boolean; expiresAt?: number }
+export interface OAuthAccountSummary {
+  id: string;
+  alias?: string;
+  email?: string;
+  active: boolean;
+  needsReauth?: boolean;
+  expiresAt?: number;
+  /**
+   * Subscription tier, mirroring the field the OpenAI/Codex provider reports, so a consumer
+   * weighting a multi-account pool by seat size needs no per-provider branching (#3777).
+   *
+   * Always present and explicitly `null` when the tier is unknown. The distinction matters:
+   * an ABSENT key means the proxy is too old to report a tier at all, while `null` means this
+   * version looked and upstream did not say. Omitting it would make those indistinguishable and
+   * invite a consumer to assume a tier.
+   *
+   * Every OAuth provider reports `null` today. Anthropic's `/api/oauth/usage` returns quota
+   * buckets only — `five_hour`, `seven_day`, the model-scoped weekly windows and `limits[]` —
+   * and carries no subscription/tier field, and its token response carries none either. See
+   * `fetchAnthropicUsageQuota` in `src/providers/quota.ts`.
+   */
+  plan: string | null;
+}
 
-export function getLoginStatus(provider: string): { loggedIn: boolean; email?: string; source?: OAuthCredentials["source"]; error?: string; done: boolean; activeAccountId?: string; accounts?: OAuthAccountSummary[] } {
+/**
+ * Token-safe login state for one provider.
+ *
+ * `maskEmails` is an explicit boolean rather than a config read (#3859). This module must not
+ * acquire a dependency on config I/O to answer a redaction question: the caller already holds
+ * the config at its request boundary and resolves the policy there with `emailMaskingEnabled`.
+ * The default masks, so every existing caller keeps today's behaviour.
+ */
+export function getLoginStatus(provider: string, maskEmails = true): { loggedIn: boolean; email?: string; source?: OAuthCredentials["source"]; error?: string; done: boolean; activeAccountId?: string; accounts?: OAuthAccountSummary[] } {
   const cred = getCredential(provider);
   const st = loginState.get(provider);
   const set = getAccountSet(provider);
   const accounts: OAuthAccountSummary[] | undefined = set?.accounts.map(a => ({
     id: a.id,
     ...(a.alias ? { alias: a.alias } : {}),
-    email: maskEmail(a.credential.email) ?? undefined,
+    email: projectEmail(a.credential.email, maskEmails) ?? undefined,
     active: a.id === set.activeAccountId,
     ...(a.needsReauth ? { needsReauth: true } : {}),
     expiresAt: a.credential.expires,
+    // Explicitly null rather than omitted — see OAuthAccountSummary.plan. No OAuth provider
+    // exposes a subscription tier today, so there is nothing truthful to put here; deriving one
+    // from quota percentages is not possible, because they are normalized per account and a
+    // half-consumed small seat is indistinguishable from a half-consumed large one.
+    plan: null,
   }));
 
   // A stored credential counts as "logged in" when it exists and is not marked for
@@ -1850,7 +1874,7 @@ export function getLoginStatus(provider: string): { loggedIn: boolean; email?: s
     .find(a => a.id === set.activeAccountId)?.needsReauth === true;
   return {
     loggedIn: !!cred && !activeNeedsReauth,
-    email: maskEmail(cred?.email) ?? undefined,
+    email: projectEmail(cred?.email, maskEmails) ?? undefined,
     source: cred?.source,
     error: st?.error,
     done: st?.done ?? false,
@@ -1858,10 +1882,13 @@ export function getLoginStatus(provider: string): { loggedIn: boolean; email?: s
   };
 }
 
-/** Token-safe per-provider login state for the CLI `ocx status` logins section (no tokens, masked email). */
-export function oauthLoginSummary(): Array<{ provider: string; loggedIn: boolean; email?: string }> {
+/**
+ * Token-safe per-provider login state for the CLI `ocx status` logins section. Never tokens; the
+ * email follows the operator's `privacy.maskEmails` policy, masked by default (#3859).
+ */
+export function oauthLoginSummary(maskEmails = true): Array<{ provider: string; loggedIn: boolean; email?: string }> {
   return listOAuthProviders().map(provider => {
-    const status = getLoginStatus(provider);
+    const status = getLoginStatus(provider, maskEmails);
     return { provider, loggedIn: status.loggedIn, ...(status.email ? { email: status.email } : {}) };
   });
 }

@@ -14,12 +14,34 @@ import {
 import { handleConnectCommand } from "../../src/cli/connect";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoRoot as findRepoRoot } from "../helpers/repo-root";
-import { INTERNAL_DEADLINE_MS } from "../helpers/test-budget";
+import { INTERNAL_DEADLINE_MS, SPAWN_BUDGET_MS } from "../helpers/test-budget";
 
 const repoRoot = findRepoRoot();
 
 const CLIENT_FIXTURE_FAILURE_CATEGORIES = ["module_load", "config_setup", "desktop_setup", "scenario", "child_failed"] as const;
 type ClientFixtureFailureCategory = typeof CLIENT_FIXTURE_FAILURE_CATEGORIES[number];
+
+const TRANSACTION_PHASES = ["module_load", "module_ready", "connect_entered", "connect_resolved", "connect_rejected", "state_read", "result_published"] as const;
+type TransactionProgress = { phase: typeof TRANSACTION_PHASES[number]; elapsedMs: number };
+
+/** Only this fixed diagnostic envelope may reach a parent-side failure message. */
+function transactionProgress(stderr: unknown): TransactionProgress | undefined {
+  if (typeof stderr !== "string") return undefined;
+  const tail = stderr.slice(-8192);
+  for (const line of tail.split("\n").reverse()) {
+    if (!line.startsWith('{"clientTransactionPhase":')) continue;
+    try {
+      const row: unknown = JSON.parse(line);
+      if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+      const { clientTransactionPhase, elapsedMs } = row as Record<string, unknown>;
+      const phase = TRANSACTION_PHASES.find(value => value === clientTransactionPhase);
+      if (phase && typeof elapsedMs === "number" && Number.isSafeInteger(elapsedMs) && elapsedMs >= 0 && elapsedMs <= 600_000) {
+        return { phase, elapsedMs };
+      }
+    } catch { /* Ignore raw child output and malformed markers. */ }
+  }
+  return undefined;
+}
 
 class ClientStateProbeError extends Error {
   constructor(
@@ -28,9 +50,10 @@ class ClientStateProbeError extends Error {
     readonly signal: NodeJS.Signals | null,
     readonly timedOut: boolean,
     readonly failureCategory?: ClientFixtureFailureCategory,
+    readonly progress?: TransactionProgress,
   ) {
     // Do not include the child script, environment, stdout or stderr in failure output.
-    super(`Client state probe ${timedOut ? "timed out" : "failed"} (status=${status}, signal=${signal}${failureCategory ? `, category=${failureCategory}` : ""})`);
+    super(`Client state probe ${timedOut ? "timed out" : "failed"} (status=${status}, signal=${signal}${failureCategory ? `, category=${failureCategory}` : ""}${progress ? `, phase=${progress.phase}, elapsedMs=${progress.elapsedMs}` : ""})`);
     this.name = "ClientStateProbeError";
   }
 }
@@ -316,7 +339,10 @@ describe("remote hub client boundary", () => {
 /** A catalog the user already had before ever connecting. */
 const PRIOR_CATALOG_BYTES = '{"models":[{"slug":"local/only-model"}]}';
 
-function runTransactionScenario(stage: "success" | "catalog" | "preflight" | "commit" | "prior-catalog" | "coordinator") {
+function runTransactionScenario(
+  stage: "success" | "catalog" | "preflight" | "commit" | "prior-catalog" | "coordinator",
+  options: { script?: string; timeoutMs?: number } = {},
+) {
   const opencodexHome = mkdtempSync(join(tmpdir(), "ocx-client-connect-home-"));
   const codexHome = mkdtempSync(join(tmpdir(), "ocx-client-connect-codex-"));
   const configPath = join(opencodexHome, "config.json");
@@ -335,15 +361,22 @@ function runTransactionScenario(stage: "success" | "catalog" | "preflight" | "co
     const { mkdirSync } = require("node:fs") as typeof import("node:fs");
     mkdirSync(join(opencodexHome, "config-mutation.sqlite"));
   }
-  const script = `
-    const { existsSync, readFileSync } = require("node:fs");
+  const script = options.script ?? `
+    const { existsSync, readFileSync, writeSync } = require("node:fs");
+    const transactionStarted = Date.now();
+    const markTransaction = phase => writeSync(2, JSON.stringify({
+      clientTransactionPhase: phase, elapsedMs: Math.max(0, Date.now() - transactionStarted),
+    }) + "\\n");
+    markTransaction("module_load");
     const { createHash } = require("node:crypto");
     const { connectClient, disconnectClient } = require("./src/client/connect");
     const { readClientConnectionState } = require("./src/client/state");
     const { serviceApiTokenFilePath } = require("./src/lib/service-secrets");
+    const { hubStateCachePath, writeCachedHubState } = require("./src/client/hub-state");
     const { DEFAULT_CATALOG_PATH } = require("./src/codex/paths");
     const stage = ${JSON.stringify(stage)};
     const { setPersistedConfigMutationBeforeCommitForTests } = require("./src/config");
+    markTransaction("module_ready");
     let commitFaultTriggered = false;
     const catalog = '{"models":[]}';
     const etag = '"sha256-' + createHash("sha256").update(catalog).digest("base64url") + '"';
@@ -369,7 +402,9 @@ function runTransactionScenario(stage: "success" | "catalog" | "preflight" | "co
     (async () => {
       let connected = null;
       let error = null;
+      let coordinatorUnavailable = false;
       try {
+        markTransaction("connect_entered");
         connected = await connectClient({
           serverUrl: "https://hub.example.test",
           credential: { kind: "admin", value: credential },
@@ -383,8 +418,27 @@ function runTransactionScenario(stage: "success" | "catalog" | "preflight" | "co
           });
           return new Date("2026-08-28T00:00:00.000Z");
         }, lifecycleLockDeps: { lockPath: process.env.OPENCODEX_HOME + "/lifecycle.sqlite" } });
-      } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
+        markTransaction("connect_resolved");
+      } catch (cause) {
+        markTransaction("connect_rejected");
+        error = cause instanceof Error ? cause.message : String(cause);
+        const seen = new Set();
+        for (let current = cause, depth = 0; current && typeof current === "object" && depth < 32 && !seen.has(current); current = current.cause, depth++) {
+          seen.add(current);
+          if (current.code === "CONFIG_MUTATION_LOCK_UNAVAILABLE") coordinatorUnavailable = true;
+        }
+      }
+      markTransaction("state_read");
       const beforeDisconnect = readClientConnectionState();
+      // The hub-state cache is derived from THIS connection; disconnect has to take it with it.
+      let hubStateCacheBefore = false;
+      if (beforeDisconnect.kind === "connected") {
+        writeCachedHubState(beforeDisconnect.value, {
+          schemaVersion: 1, runtimeRole: "hub", hubVersion: "9.9.9", origin: null,
+          providers: [], oauth: [], subagentModels: [], truncated: false, claudeCode: { enabled: true },
+        }, "2026-08-28T00:00:00.000Z");
+        hubStateCacheBefore = existsSync(hubStateCachePath());
+      }
       const artifacts = {
         token: existsSync(serviceApiTokenFilePath()),
         catalog: existsSync(DEFAULT_CATALOG_PATH),
@@ -393,34 +447,149 @@ function runTransactionScenario(stage: "success" | "catalog" | "preflight" | "co
       let disconnected = null;
       if ((stage === "success" || stage === "prior-catalog") && connected) disconnected = await disconnectClient({}, { lifecycleLockDeps: { lockPath: process.env.OPENCODEX_HOME + "/lifecycle.sqlite" } });
       const catalogAfter = existsSync(DEFAULT_CATALOG_PATH) ? readFileSync(DEFAULT_CATALOG_PATH, "utf8") : null;
-      console.log(JSON.stringify({ connected, error, beforeDisconnect, artifacts, disconnected, catalogAfter, after: readClientConnectionState(), calls, commitFaultTriggered }));
+      const hubStateCacheAfter = existsSync(hubStateCachePath());
+      writeSync(1, JSON.stringify({ connected, error, coordinatorUnavailable, beforeDisconnect, artifacts, disconnected, catalogAfter, hubStateCacheBefore, hubStateCacheAfter, after: readClientConnectionState(), calls, commitFaultTriggered }) + "\\n");
+      markTransaction("result_published");
     })();
   `;
-  const result = spawnSync(process.execPath, ["--eval", script], {
-    cwd: repoRoot,
-    env: { ...process.env, OPENCODEX_HOME: opencodexHome, CODEX_HOME: codexHome, OPENCODEX_CLAUDE_DESKTOP_CONFIG_DIR: join(opencodexHome, "desktop") },
-    encoding: "utf8",
-  });
-  const output = result.stdout.trim().split("\n").at(-1) ?? "{}";
-  const parsed = JSON.parse(output) as Record<string, any>;
-  return {
-    status: result.status,
-    stderr: result.stderr,
-    parsed,
-    configBytes: readFileSync(configPath, "utf8"),
-    cleanup: () => {
-      removeTreeWithRetry(opencodexHome);
-      removeTreeWithRetry(codexHome);
-    },
+  const cleanup = () => {
+    const failures: unknown[] = [];
+    for (const home of [opencodexHome, codexHome]) {
+      try { removeTreeWithRetry(home); }
+      catch (error) { failures.push(error); }
+    }
+    if (failures.length) throw new AggregateError(failures, "Could not clean client transaction homes");
   };
+  try {
+    const result = spawnSync(process.execPath, ["--eval", script], {
+      cwd: repoRoot,
+      env: { ...process.env, OPENCODEX_HOME: opencodexHome, CODEX_HOME: codexHome, OPENCODEX_CLAUDE_DESKTOP_CONFIG_DIR: join(opencodexHome, "desktop") },
+      encoding: "utf8",
+      timeout: options.timeoutMs ?? INTERNAL_DEADLINE_MS,
+      killSignal: "SIGKILL",
+    });
+    const progress = transactionProgress(result.stderr);
+    if (result.error || result.status !== 0 || result.signal !== null) {
+      throw new ClientStateProbeError(result.pid, result.status, result.signal, (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT", undefined, progress);
+    }
+    let parsed: Record<string, any>;
+    try { parsed = JSON.parse(result.stdout.trim().split("\n").at(-1) ?? "{}"); }
+    catch { throw new ClientStateProbeError(result.pid, result.status, result.signal, false, undefined, progress); }
+    return { status: result.status, stderr: result.stderr, parsed, configBytes: readFileSync(configPath, "utf8"), cleanup };
+  } catch (error) {
+    try { cleanup(); }
+    catch (cleanupError) { throw new AggregateError([error, cleanupError], "Client transaction failed and fixture cleanup failed"); }
+    throw error;
+  }
 }
 
 describe("connect transaction and offline disconnect", () => {
+  test("transaction diagnostics retain only allowlisted phase and bounded elapsed evidence", () => {
+    for (const missing of [undefined, null, { secret: "private-marker-value" }]) {
+      expect(transactionProgress(missing)).toBeUndefined();
+    }
+    const valid = '{"clientTransactionPhase":"connect_entered","elapsedMs":12,"secret":"private-marker-value"}';
+    for (const invalid of [
+      '{"clientTransactionPhase":"private-marker-value","elapsedMs":1}',
+      '{"clientTransactionPhase":"connect_entered","elapsedMs":"private-marker-value"}',
+      '{"clientTransactionPhase":"connect_entered","elapsedMs":-1}',
+      '{"clientTransactionPhase":"connect_entered","elapsedMs":600001}',
+      '{"clientTransactionPhase":"connect_entered","elapsedMs":1.5}',
+      '{"clientTransactionPhase":"connect_entered",',
+    ]) {
+      expect(transactionProgress(invalid)).toBeUndefined();
+      const progress = transactionProgress(`${valid}\n${invalid}`);
+      expect(progress).toEqual({ phase: "connect_entered", elapsedMs: 12 });
+      const failure = new ClientStateProbeError(123, null, "SIGKILL", true, undefined, progress);
+      expect(failure.message).toContain("phase=connect_entered, elapsedMs=12");
+      expect(failure.message).not.toContain("private-marker-value");
+    }
+    expect(transactionProgress(valid + "\n" + "x".repeat(8192))).toBeUndefined();
+  });
+
+  test("transaction fixture stops a child retained after valid output", async () => {
+    const proofHome = mkdtempSync(join(tmpdir(), "ocx-transaction-child-proof-"));
+    const markerPath = join(proofHome, "child-started.json");
+    const naturalExitPath = join(proofHome, "natural-exit");
+    const script = `
+      const fs = require("node:fs");
+      fs.writeFileSync(${JSON.stringify(markerPath)}, JSON.stringify({
+        pid: process.pid, home: process.env.OPENCODEX_HOME, codexHome: process.env.CODEX_HOME,
+      }));
+      fs.writeSync(1, '{"ok":true}\\n');
+      fs.writeSync(2, '{"clientTransactionPhase":"result_published","elapsedMs":1}\\n');
+      fs.writeSync(2, '{"clientTransactionPhase":"private-child-secret","elapsedMs":2}\\n');
+      setTimeout(() => { fs.writeFileSync(${JSON.stringify(naturalExitPath)}, "exited"); }, 5_000);
+    `;
+    let run: Awaited<ReturnType<typeof runTransactionScenario>> | undefined;
+    try {
+      let failure: unknown;
+      const startedAt = performance.now();
+      try { run = await runTransactionScenario("coordinator", { script, timeoutMs: 2_000 }); }
+      catch (error) { failure = error; }
+      expect(performance.now() - startedAt).toBeLessThan(10_000);
+      expect(failure).toBeInstanceOf(ClientStateProbeError);
+      if (!(failure instanceof ClientStateProbeError)) throw new Error("Expected bounded transaction child failure");
+      expect(failure.timedOut).toBe(true);
+      expect(failure.progress).toEqual({ phase: "result_published", elapsedMs: 1 });
+      expect(failure.message).not.toContain("private-child-secret");
+      expect(existsSync(naturalExitPath)).toBe(false);
+      const proof = JSON.parse(readFileSync(markerPath, "utf8")) as { pid: number; home: string; codexHome: string };
+      expect(proof.pid).toBe(failure.pid);
+      expect(existsSync(proof.home)).toBe(false);
+      expect(existsSync(proof.codexHome)).toBe(false);
+      let exitCode: string | undefined;
+      try { process.kill(proof.pid, 0); }
+      catch (error) { exitCode = (error as NodeJS.ErrnoException).code; }
+      expect(exitCode).toBe("ESRCH");
+    } finally {
+      run?.cleanup();
+      removeTreeWithRetry(proofHome);
+    }
+  }, SPAWN_BUDGET_MS);
+
+  for (const [mode, output, status] of [
+    ["nonzero exit", '{"ok":true}', 7],
+    ["invalid JSON", "private-child-output", 0],
+  ] as const) {
+    test(`transaction fixture cleans homes after ${mode}`, () => {
+      const proofHome = mkdtempSync(join(tmpdir(), "ocx-transaction-child-proof-"));
+      const markerPath = join(proofHome, "child-started.json");
+      const script = `
+        const fs = require("node:fs");
+        fs.writeFileSync(${JSON.stringify(markerPath)}, JSON.stringify({
+          pid: process.pid, home: process.env.OPENCODEX_HOME, codexHome: process.env.CODEX_HOME,
+        }));
+        fs.writeSync(1, ${JSON.stringify(output)});
+        process.exit(${status});
+      `;
+      let run: ReturnType<typeof runTransactionScenario> | undefined;
+      try {
+        let failure: unknown;
+        try { run = runTransactionScenario("coordinator", { script }); }
+        catch (error) { failure = error; }
+        expect(failure).toBeInstanceOf(ClientStateProbeError);
+        if (!(failure instanceof ClientStateProbeError)) throw new Error("Expected transaction child failure");
+        expect(failure.status).toBe(status);
+        expect(failure.timedOut).toBe(false);
+        expect(failure.message).not.toContain(output);
+        const proof = JSON.parse(readFileSync(markerPath, "utf8")) as { pid: number; home: string; codexHome: string };
+        expect(failure.pid).toBe(proof.pid);
+        expect(existsSync(proof.home)).toBe(false);
+        expect(existsSync(proof.codexHome)).toBe(false);
+      } finally {
+        try { run?.cleanup(); }
+        finally { removeTreeWithRetry(proofHome); }
+      }
+    }, SPAWN_BUDGET_MS);
+  }
+
   test("an unavailable config coordinator refuses before issuing any hub key", () => {
     const run = runTransactionScenario("coordinator");
     try {
       expect(run.status).toBe(0);
       expect(run.parsed.connected).toBeNull();
+      expect(run.parsed.coordinatorUnavailable).toBe(true);
       expect(run.parsed.calls).toEqual([]);
       expect(run.parsed.artifacts).toEqual({ token: false, catalog: false, credentialZeroed: true });
     } finally { run.cleanup(); }
@@ -434,6 +603,11 @@ describe("connect transaction and offline disconnect", () => {
       expect(run.parsed.beforeDisconnect).toMatchObject({ kind: "connected", value: { apiKeyId: "issued-id" } });
       expect(run.parsed.artifacts).toEqual({ token: true, catalog: true, credentialZeroed: true });
       expect(run.parsed.disconnected).toMatchObject({ apiKeyId: "issued-id", tokenRemoved: true, catalogRemoved: true });
+      // The cached hub state goes with the connection (#4236). It is owner-stamped, so a reader
+      // would reject it anyway — but leaving it behind means `hub-state.json` keeps naming the
+      // former hub's providers and logins on a machine connected to nothing.
+      expect(run.parsed.hubStateCacheBefore).toBe(true);
+      expect(run.parsed.hubStateCacheAfter).toBe(false);
       expect(run.parsed.after).toEqual({ kind: "disconnected" });
       expect(run.parsed.calls.filter((call: any) => call.method === "DELETE")).toEqual([]);
     } finally { run.cleanup(); }
@@ -493,6 +667,7 @@ function runConnectedStateScenario(mode: "sync-401" | "sync-503" | "disconnect-c
   const fingerprint = createHash("sha256").update(token).digest("hex");
   const catalog = '{"models":[]}';
   const catalogFingerprint = createHash("sha256").update(catalog).digest("base64url");
+  const injected = 'model_provider = "opencodex"\n';
   const isDisconnect = mode === "disconnect-conflict" || mode === "disconnect-process-journal";
   const selectedClients = isDisconnect ? ["codex"] : ["claude"];
   writeFileSync(join(opencodexHome, "config.json"), JSON.stringify({
@@ -517,13 +692,15 @@ function runConnectedStateScenario(mode: "sync-401" | "sync-503" | "disconnect-c
   writeFileSync(join(opencodexHome, "service-api-token"), `${token}\n`, { mode: 0o600 });
   writeFileSync(join(codexHome, "opencodex-catalog.json"), catalog, "utf8");
   writeFileSync(join(codexHome, "config.toml"), isDisconnect
-    ? 'model_provider = "opencodex"\n'
+    ? injected
     : 'model_provider = "openai"\n', "utf8");
   if (mode === "disconnect-conflict") {
     writeFileSync(join(codexHome, "opencodex-journal.json"), JSON.stringify({
       version: 1,
       originalConfig: Buffer.from('model_provider = "openai"\n').toString("base64"),
       originalProfile: null,
+      injectedConfigHash: createHash("sha256").update(injected).digest("hex"),
+      injectedProfileHash: null,
       owner: { kind: "client", apiKeyId: "different-key" },
       pid: 999_999,
       timestamp: "2026-08-28T00:00:00.000Z",
@@ -538,6 +715,8 @@ function runConnectedStateScenario(mode: "sync-401" | "sync-503" | "disconnect-c
       version: 1,
       originalConfig: Buffer.from('model_provider = "openai"\n').toString("base64"),
       originalProfile: null,
+      injectedConfigHash: createHash("sha256").update(injected).digest("hex"),
+      injectedProfileHash: null,
       owner: { kind: "process", pid: 999_999 },
       pid: 999_999,
       timestamp: "2026-08-28T00:00:00.000Z",
@@ -890,6 +1069,8 @@ function runDesktopLifecycleScenario(mode: string) {
             fs.writeFileSync(path.join(process.env.CODEX_HOME, "config.toml"), 'model_provider = "opencodex"');
             fs.writeFileSync(journal.JOURNAL_PATH, JSON.stringify({ version: 1,
               originalConfig: Buffer.from('model_provider = "openai"').toString("base64"), originalProfile: null,
+              injectedConfigHash: hash(fs.readFileSync(path.join(process.env.CODEX_HOME, "config.toml"), "utf8")),
+              injectedProfileHash: null,
               owner: { kind: "client", apiKeyId: owner.apiKeyId },
             }));
             const actualRestore = journal.restoreJournalState;

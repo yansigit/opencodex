@@ -699,12 +699,31 @@ describe("ownership is scoped to recorded fragments", () => {
     expect(result).toEqual({ state: "stale" });
   });
 
+  test("Hermes also ignores whole-file edits outside its registry-declared fragment", () => {
+    // Hermes declares sourcePreservingYaml: { path: ["providers", "opencodex"] }.
+    const contribution = { ...ownedContribution, clientId: "hermes" as const };
+    const clientRecord: OwnershipRecord = {
+      ...record,
+      clientId: "hermes",
+      configPath: "/tmp/hermes-config.yaml",
+      blockFingerprint: fingerprint(canonicalContribution(contribution)),
+    };
+    const result = classifyIntegration({
+      fileText: textWithExtra,
+      fileIsRegular: true,
+      parsed: documentWithExtra,
+      record: clientRecord,
+      contribution,
+    });
+    expect(result).toEqual({ state: "current" });
+  });
+
   // Re-serializing a whole document in these formats would drop any comments
   // the user keeps next to our block, so file-level drift stays a hard
   // conflict for every one of them — a regression that narrowed the condition
   // (say, to yaml only) must fail here, not in a user's config.
   for (const { clientId, configPath } of [
-    { clientId: "hermes" as const, configPath: "/tmp/hermes-config.yaml" },
+    { clientId: "gajae" as const, configPath: "/tmp/gajae-models.yaml" },
     { clientId: "openclaw" as const, configPath: "/tmp/openclaw.json5" },
     { clientId: "kimi" as const, configPath: "/tmp/kimi-config.toml" },
   ]) {
@@ -775,9 +794,9 @@ describe("installation detection is independent of config state", () => {
  * from. Rationale and the per-client table: 020 §1 amendment.
  */
 describe("the loopback-only set is one fact, read through one seam", () => {
-  test("omp, pi, kimi, gajae, dsh, mcode, zcode, prime, aside and raycast are loopback-only and nobody else is", () => {
+  test("omp, pi, kimi, gajae, dsh, mcode, zcode, prime, aside, raycast and omo are loopback-only and nobody else is", () => {
     const loopbackOnly = INTEGRATION_CLIENT_IDS.filter(id => isLoopbackOnly(id));
-    expect(loopbackOnly).toEqual(["pi", "omp", "kimi", "gajae", "dsh", "mcode", "zcode", "prime", "aside", "raycast"]);
+    expect(loopbackOnly).toEqual(["pi", "omp", "kimi", "gajae", "dsh", "mcode", "zcode", "prime", "aside", "raycast", "omo", "cline"]);
   });
 
   test("the registry restates nothing — it reads the export spec", () => {

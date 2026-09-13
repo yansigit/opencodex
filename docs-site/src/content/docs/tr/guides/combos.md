@@ -218,6 +218,8 @@ kullanılır. Güncel kota verisi bulunmayan hedeflerde ve eşitliklerde
 yapılandırma sırası korunur. `weight` değerleri ve `stickyLimit` bu stratejiyi
 etkilemez.
 
+Bu sıralama ve gönderim öncesi sağlayıcı elemesi, mevcut tek API anahtarının model çıkarımı kullanımının tamamına uygulanan güncel sınırlara dayanır. OAuth veya geçerli hesap özetleri, çağıranın kimlik bilgilerini ileten rotalar, birden fazla anahtar ve kimlik bilgileri ya da hedefi değişmiş anlık görüntüler, bu ön kararda yalnızca görüntüleme amaçlıdır. `Authorization`, `x-api-key` veya `x-goog-api-key` başlıkları kimlik bilgilerini geçersiz kıldığında da aynı kural uygulanır; yalnızca arama veya MCP için olan pencereler hariç tutulur. Uygun hedeflerin hiçbirinde geçerli sıfırlama bilgisi yoksa yapılandırma sırası kullanılır. Hesap seçimi ve yeniden denemelerde normal sınırlar uygulanmaya devam eder.
+
 ## Bir hedef başarısız olduğunda ne olur?
 
 Kombo hataları **atlama (hop)** hataları ve **uç (terminal)** hatalar olarak
@@ -247,22 +249,16 @@ veya politika retlerini gizlemez.
 
 ## Varsayılan akıl yürütme çabası
 
-`defaultEffort`, yalnızca bunların tümü doğru olduğunda `reasoning.effort`
-sağlar:
+`defaultEffort`, combo varsayılanı null değilse ve hedefin desteklenen seviye listesi bilinen ve boş olmayan bir listeyse eksik `reasoning.effort` değerini doldurur. Yapılandırılmış değer destekleniyorsa korunur; değilse bu değeri aşmayan en yüksek desteklenen seviye, böyle bir seviye yoksa en düşük desteklenen seviye kullanılır. Liste bilinmiyor veya boşsa varsayılan eklenmez.
 
-1. kombonun boş olmayan (non-null) bir varsayılanı vardır;
-2. arayan bir çaba ayarlamamıştır; ve
-3. seçilen hedefin kataloğu tam olarak bu çabayı bildirmektedir.
+Varsayılan ekleme mevcut effort ve diğer reasoning alanlarını korur. Aşağıdaki yetenek normalizasyonu desteklenmeyen effort/thinking denetimlerini ayrıca kaldırabilir. Desteklenen varsayılanlar: `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; alanı atlamak veya `null` kullanmak eklemeyi kapatır.
 
-İstekte bir `reasoning` nesnesi yoksa opencodex bir tane oluşturur. Bir `effort`
-özelliği olmadan `reasoning` varsa diğer alanları korur ve varsayılanı ekler.
-Arayan tarafından sağlanan bir çabanın üzerine asla yazılmaz.
 
-Hedef yeteneği bilinmediğinde veya yapılandırılan çabayı içermediğinde opencodex
-varsayılanı atlar ve hedefin kendi davranışını değiştirmeden bırakır.
-Desteklenen değerler `low`, `medium`, `high`, `xhigh`, `max` ve `ultra`'dır;
-çabayı tamamen arayana ve hedefe bırakmak için alanı atlayın veya `null` olarak
-ayarlayın.
+## Farklı reasoning yetenekleri
+
+`reasoningEffortMode` varsayılan olarak `"strict"` kullanır: açıkça boş listeler dahil tüm hedeflerin effort listelerinin kesişimi yayımlanır. `"adaptive"`, karma kombolarda seçiciyi korumak için boş listeleri kesişimden çıkarır. Bilinmeyen listeler her iki modda da katalog kesişimini sınırlamaz.
+
+Gönderim sırasında açıkça boş liste her iki modda effort ve thinking denetimlerini kaldırır; bilinmeyen liste bunları yalnızca adaptive modunda kaldırır. `reasoning.summary` ve effort dışındaki alanlar korunur. Bilinen, boş olmayan hedeflerin effort çözümü değişmez. strict modundaki bilinmeyen hedefler ve normal native Chat bilinmeyen bildirimleri çağıranın denetimlerini korur. Varsayılan değer ekleme mevcut effort değerini değiştirmez; yetenek normalizasyonu desteklenmeyen denetimleri kaldırabilir.
 
 ## Şifrelenmiş v2 alt ajan görevleri
 
@@ -310,9 +306,7 @@ hedef seçicisi ise devre dışı bırakılmış modelleri ve iç içe geçmiş 
 hariç tutar.
 
 Her hedef ayrıca canlı bir kota rozeti gösterir: **Kullanılabilir**, **Kota tükendi** veya **Kota bilinmiyor**.
-Kaydet ve Oluştur yalnızca etkin hedeflerin tamamı için kotanın tükendiğini gösteren güncel ve eksiksiz kanıt varsa
-devre dışı bırakılır. Eksik, eski, bozuk veya tamamlanmamış toplu kanıt bilinmiyor olarak kalır ve denetimleri asla
-kilitlemez. Kota yenilendiğinde işlem otomatik olarak yeniden etkinleşir.
+Düzenleyici, kota nedeniyle Kaydet ve Oluştur işlemlerini yalnızca kullanılabilir hedeflerin tümü için yapılandırılmış kimlik bilgisine ait çıkarım sınırının tükendiğini doğrulayan geçerli sunucu bilgisi varsa engeller. Yalnızca görüntüleme amaçlı hesap, model, arama ve MCP kotaları ya da eksik veya süresi dolmuş yönlendirme kanıtları bu engellemeye neden olmaz. Engelleme, ilgili sıfırlama zamanında veya verinin güncellik süresi dolduğunda sona erer ve sayfa etkin ya da görünür olduğunda yeniden kontrol edilir; Yenile, hem kombo verilerini hem de kotaları yeniden yükler.
 
 ### CLI
 
@@ -373,6 +367,7 @@ saklanır:
 | `strategy` | Hayır | `"failover"` | İzin verilen değerler: `"failover"`, `"round-robin"`, `"random"`, `"least-used"`, `"reset-window"`. |
 | `stickyLimit` | Hayır | `1` | Yalnızca `round-robin` için geçerlidir; seçim başına 1 ile 100 arasında başarılı istek tam sayısı. |
 | `defaultEffort` | Hayır | `null` | `low`, `medium`, `high`, `xhigh`, `max` veya `ultra`; yalnızca arayan çabayı atladığında ve hedef desteği bildirdiğinde uygulanır. |
+| `reasoningEffortMode` | Hayır | `"strict"` | `strict` veya `adaptive`; karma yetenek kesişimini ve hedefe özel normalizasyonu seçer. |
 | `alias` | Hayır | yok | İsteğe bağlı kırpılmış genel model kimliği; yukarıdaki takma ad kurallarını kullanın. Boş bir değer takma ad yok olarak saklanır. |
 | `nativeAlias` | Hayır | `false` | Şu anda desteklenen yalın bir yerel `alias`'ın yönlendirme ve katalog önceliği almasına açıkça izin verin. Asla takma addan çıkarılmaz. |
 | `displayName` | Hayır | yok | Sınırlı salt görüntüleme katalog etiketi. `nativeAlias` true olduğunda gerekli ve boş değildir. |
@@ -408,5 +403,4 @@ tam doğrulama mesajını görüntüler.
 Hata hedefe özgü olmaktan ziyade uç (terminal) bir hataydı. Geçersiz girdiyi
 düzeltin, aşırı büyük bir bağlamı azaltın, bir politika reddini işleyin veya
 reddedilen istek kaynağını düzeltin. Kombolar bu durumlar için atlama yapmaz.
-
 

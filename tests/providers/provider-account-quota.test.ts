@@ -1,3 +1,5 @@
+import { PinnedHttpError } from "../../src/lib/pinned-http";
+import { DestinationDnsResolutionError } from "../../src/lib/destination-policy";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
@@ -810,6 +812,80 @@ describe("google-antigravity per-account quota (#1082)", () => {
     });
   }
 
+  test.each([
+    [429, "rate_limited"], [503, "upstream_error"], [200, "response_unusable"],
+  ] as const)("final models HTTP %s has a safe diagnosis", async (status, failure) => {
+    await saveCredential("google-antigravity", { access: "diagnostic-access", refresh: "diagnostic-refresh", expires: Date.now() + 3600_000, projectId: "private-project", accountId: "agy-a", email: "a@example.com" });
+    setAntigravityAccountQuotaTransportForTests({
+      resolveAddresses: async () => ({ hostname: "daily-cloudcode-pa.googleapis.com", addresses: [{ address: "142.250.0.1", family: 4 }], privateNetwork: false }),
+      pinnedPost: async url => new Response("{}", { status: url === summaryUrl ? 500 : status }),
+    });
+    const rows = await fetchProviderAccountQuotas("google-antigravity");
+    expect(rows[0]).toMatchObject({ unavailable: true, quotaFailure: failure });
+    const serialized = JSON.stringify(rows);
+    for (const secret of ["diagnostic-access", "diagnostic-refresh", "private-project", "quotaFailureIsCurrent", "identity"]) expect(serialized).not.toContain(secret);
+  });
+
+  test.each([
+    [new PinnedHttpError("connect_timeout", "private-error"), "timeout"],
+    [new PinnedHttpError("output_byte_limit", "private-error"), "response_unusable"],
+    [new DOMException("private-error", "TimeoutError"), "timeout"],
+    [new Error("private-error"), "transport_error"],
+  ] as const)("typed fallback failure maps to %s", async (error, failure) => {
+    await saveCredential("google-antigravity", { access: "agy-first", refresh: "r1", expires: Date.now() + 3600_000, projectId: "proj-first", accountId: "agy-a", email: "a@example.com" });
+    setAntigravityAccountQuotaTransportForTests({
+      resolveAddresses: async () => ({ hostname: "daily-cloudcode-pa.googleapis.com", addresses: [{ address: "142.250.0.1", family: 4 }], privateNetwork: false }),
+      pinnedPost: async () => { throw error; },
+    });
+    const rows = await fetchProviderAccountQuotas("google-antigravity");
+    expect(rows[0]?.quotaFailure).toBe(failure);
+    expect(JSON.stringify(rows)).not.toContain("private-error");
+    const { fetchAntigravityUsageQuota } = await import("../../src/providers/quota");
+    await expect(fetchAntigravityUsageQuota("agy-first", "proj-first")).rejects.toBe(error);
+  });
+
+  test("DNS diagnosis and recovery preserve last-good bars and clear the error", async () => {
+    await saveCredential("google-antigravity", { access: "agy-first", refresh: "r1", expires: Date.now() + 3600_000, projectId: "proj-first", accountId: "agy-a", email: "a@example.com" });
+    const goodTransport = {
+      resolveAddresses: async () => ({ hostname: "daily-cloudcode-pa.googleapis.com", addresses: [{ address: "142.250.0.1", family: 4 }], privateNetwork: false }),
+      pinnedPost: async (url: string) => url === summaryUrl ? new Response(null, { status: 500 }) : new Response(antigravityBody(0.5, 0.4)),
+    };
+    setAntigravityAccountQuotaTransportForTests(goodTransport);
+    const good = (await fetchProviderAccountQuotas("google-antigravity", true))[0];
+    expect(good.quota).not.toBeNull();
+    setAntigravityAccountQuotaTransportForTests({ resolveAddresses: async () => { throw new DestinationDnsResolutionError("private-host"); } });
+    const failed = (await fetchProviderAccountQuotas("google-antigravity", true))[0];
+    expect(failed).toMatchObject({ unavailable: true, quotaFailure: "dns_failed", quota: good.quota });
+    setAntigravityAccountQuotaTransportForTests(goodTransport);
+    const recovered = (await fetchProviderAccountQuotas("google-antigravity", true))[0];
+    expect(recovered).not.toHaveProperty("quotaFailure");
+    expect(recovered).not.toHaveProperty("unavailable");
+    expect(recovered.quota).not.toBeNull();
+  });
+
+  test("same-id replacement retires pending and cached failure diagnoses", async () => {
+    const credential = { access: "agy-first", refresh: "r1", expires: Date.now() + 3600_000, projectId: "proj-first", accountId: "agy-a", email: "a@example.com" };
+    await saveCredential("google-antigravity", credential);
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    setAntigravityAccountQuotaTransportForTests({
+      resolveAddresses: async () => ({ hostname: "daily-cloudcode-pa.googleapis.com", addresses: [{ address: "142.250.0.1", family: 4 }], privateNetwork: false }),
+      pinnedPost: async () => { entered.resolve(); await release.promise; return new Response(null, { status: 403 }); },
+    });
+    const pending = fetchProviderAccountQuotas("google-antigravity", true);
+    await entered.promise;
+    const id = idFor("a@example.com");
+    try { await saveCredential("google-antigravity", { ...credential, access: "agy-second" }); }
+    finally { release.resolve(); }
+    expect(idFor("a@example.com")).toBe(id);
+    expect((await pending)[0]).not.toHaveProperty("quotaFailure");
+    const cached = (await fetchProviderAccountQuotas("google-antigravity", true))[0];
+    expect(cached.quotaFailure).toBe("access_denied");
+    await saveCredential("google-antigravity", { ...credential, access: "agy-third" });
+    expect(cached.quotaFailureIsCurrent?.()).toBe(false);
+    expect((await fetchProviderAccountQuotas("google-antigravity"))[0]).not.toHaveProperty("quotaFailure");
+  });
+
   test("NO_PROXY denial preserves an unavailable account row without sending its bearer", async () => {
     await saveCredential("google-antigravity", { access: "agy-first", refresh: "r1", expires: Date.now() + 3600_000, projectId: "proj-first", accountId: "agy-a", email: "a@example.com" });
     process.env.no_proxy = "daily-cloudcode-pa.googleapis.com";
@@ -826,7 +902,7 @@ describe("google-antigravity per-account quota (#1082)", () => {
       },
       pinnedPost: async () => { posted += 1; return new Response(antigravitySummaryBody(0.5, 0.5)); },
     });
-    expect(await fetchProviderAccountQuotas("google-antigravity")).toEqual([{ accountId: idFor("a@example.com"), quota: null, unavailable: true }]);
+    expect(await fetchProviderAccountQuotas("google-antigravity")).toEqual([{ accountId: idFor("a@example.com"), quota: null, unavailable: true, quotaFailure: "destination_blocked" }]);
     expect(admitted).toEqual([false, false]);
     expect(posted).toBe(0);
     expect(plainFetchCalls).toBe(0);
@@ -847,7 +923,7 @@ describe("google-antigravity per-account quota (#1082)", () => {
             return new Response(null, { status, headers: { location: "https://daily-cloudcode-pa.googleapis.com/redirect-target" } });
           },
         });
-        expect(await fetchProviderAccountQuotas("google-antigravity")).toEqual([{ accountId: idFor("a@example.com"), quota: null, unavailable: true }]);
+        expect(await fetchProviderAccountQuotas("google-antigravity")).toEqual([{ accountId: idFor("a@example.com"), quota: null, unavailable: true, quotaFailure: status < 400 ? "redirect_blocked" : "access_denied" }]);
         expect(posted).toEqual(fallback ? [summaryUrl, modelsUrl] : [summaryUrl]);
         expect(plainFetchCalls).toBe(0);
       });
@@ -864,7 +940,7 @@ describe("google-antigravity per-account quota (#1082)", () => {
     });
     const rows = await fetchProviderAccountQuotas("google-antigravity");
     expect(posted).toBe(0);
-    expect(rows).toEqual([{ accountId: idFor("a@example.com"), quota: null, unavailable: true }]);
+    expect(rows).toEqual([{ accountId: idFor("a@example.com"), quota: null, unavailable: true, quotaFailure: "destination_blocked" }]);
   });
 
   test("a redirecting upstream yields unavailable and the credential-less account is skipped without a request", async () => {

@@ -19,12 +19,12 @@ import {
 import { claimOwnedServiceHome, withOwnedServiceHomePreload } from "../helpers/owned-service-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoRoot as resolveRepoRoot } from "../helpers/repo-root";
-import { INTERNAL_DEADLINE_MS, SPAWN_BUDGET_MS } from "../helpers/test-budget";
+import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
+import { INTERNAL_DEADLINE_MS } from "../helpers/test-budget";
+import { watchdogMs } from "../helpers/ci-watchdog";
 
 const repoRoot = resolveRepoRoot();
 const sandboxes: Sandbox[] = [];
-const CHILD_MARKER_BUDGET_MS = SPAWN_BUDGET_MS - 5_000;
-const TWO_CHILD_TEST_BUDGET_MS = 2 * SPAWN_BUDGET_MS + 10_000;
 
 interface Sandbox {
   readonly root: string;
@@ -112,7 +112,7 @@ function makeSandbox(prefix: string): Sandbox {
  */
 async function teardownSandbox(sandbox: Sandbox): Promise<void> {
   for (const marker of sandbox.releaseMarkers) {
-    writeReleaseMarker(marker);
+    try { writeFileSync(marker, "release"); } catch { /* root may already be gone */ }
   }
   for (const child of sandbox.children) {
     if (child.exitCode === null) child.kill();
@@ -121,16 +121,23 @@ async function teardownSandbox(sandbox: Sandbox): Promise<void> {
   sandbox.children.clear();
 }
 
-function writeReleaseMarker(marker: string): void {
-  try {
-    writeFileSync(marker, "release");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-}
-
 function sandboxChildEnv(sandbox: Sandbox): Record<string, string> {
   return { ...sandbox.env, ...sandbox.serviceManagerEnv };
+}
+
+interface ChildResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+/** One consumer per pipe; barrier diagnostics and final assertions share the result. */
+function captureChildResult(child: ReturnType<typeof Bun.spawn>): Promise<ChildResult> {
+  return Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]).then(([exitCode, stdout, stderr]) => ({ exitCode, stdout, stderr }));
 }
 
 /**
@@ -144,15 +151,29 @@ function sandboxChildEnv(sandbox: Sandbox): Record<string, string> {
  * no-op catch attached up front marks that late rejection handled without
  * changing what the race sees.
  */
-async function raceBarrier(child: ReturnType<typeof Bun.spawn>, barrier: Promise<void>): Promise<void> {
-  const exitedEarly = child.exited.then(async exitCode => {
-    const stdout = await new Response(child.stdout).text();
-    const stderr = await new Response(child.stderr).text();
+async function raceBarrier(result: Promise<ChildResult>, barrier: Promise<void>): Promise<void> {
+  const exitedEarly = result.then(({ exitCode, stdout, stderr }) => {
     throw new Error(`sync exited before provider barrier (${exitCode})\nstdout=${stdout}\nstderr=${stderr}`);
   });
   exitedEarly.catch(() => undefined);
   await Promise.race([barrier, exitedEarly]);
 }
+
+test("barrier diagnostics retain both pipes when the child exits first", async () => {
+  const sandbox = makeSandbox("ocx-retained-early-exit-");
+  const child = Bun.spawn([process.execPath, "--eval", `
+    process.stdout.write("fixture-stdout\\n");
+    process.stderr.write("fixture-stderr\\n");
+    process.exitCode = 7;
+  `], { cwd: repoRoot, env: sandboxChildEnv(sandbox), stdout: "pipe", stderr: "pipe" });
+  sandbox.children.add(child);
+  const result = captureChildResult(child);
+
+  await expect(raceBarrier(result, new Promise<void>(() => {}))).rejects.toThrow(
+    "sync exited before provider barrier (7)\nstdout=fixture-stdout\n\nstderr=fixture-stderr\n",
+  );
+  expect(await result).toEqual({ exitCode: 7, stdout: "fixture-stdout\n", stderr: "fixture-stderr\n" });
+}, SPAWN_BUDGET_MS);
 
 // A `bun --eval` child on a loaded windows-latest shard takes 8-11 s just to boot and
 // reach its marker (runs 33590540220 and 33605898170), so a 10 s wait was the coin flip,
@@ -210,9 +231,9 @@ async function holdCatalogLock(sandbox: Sandbox): Promise<{
   });
   sandbox.children.add(child);
   sandbox.releaseMarkers.add(release);
-  await waitForPath(ready, CHILD_MARKER_BUDGET_MS);
+  await waitForPath(ready, INTERNAL_DEADLINE_MS);
   return {
-    release: () => writeReleaseMarker(release),
+    release: () => { try { writeFileSync(release, "release"); } catch { /* teardown may have released already */ } },
     child,
   };
 }
@@ -284,7 +305,7 @@ test("startup and CLI sync-cache cannot write models_cache while another process
 // the CLI sync-cache in series), two of them importing the server/CLI graphs at
 // 8-11 s each on windows-latest (see waitForPath). 15 s timed out on CI run
 // 33920624827; the local timing (~450 ms) is not what this number is for.
-}, TWO_CHILD_TEST_BUDGET_MS);
+}, SPAWN_BUDGET_MS);
 
 test("native restore cannot read-transform-write the catalog while another process owns K", async () => {
   const sandbox = makeSandbox("ocx-retained-restore-");
@@ -307,7 +328,7 @@ test("native restore cannot read-transform-write the catalog while another proce
     holder.release();
     expect(await holder.child.exited).toBe(0);
   }
-}, TWO_CHILD_TEST_BUDGET_MS);
+});
 
 async function runPublisher(
   sandbox: Sandbox,
@@ -347,11 +368,13 @@ for (const publisher of ["convergence", "retained"] as const) {
       port: 0,
       fetch: async request => {
         if (!new URL(request.url).pathname.endsWith("/models")) return new Response("not found", { status: 404 });
-        if (requests++ === 0) {
+        const first = requests++ === 0;
+        if (first) {
           writeFileSync(requested, "requested");
           while (!existsSync(release)) await Bun.sleep(5);
         }
-        return Response.json({ data: [{ id: "race-model" }] });
+        // Distinct snapshots make a stale publish observable in the final catalog.
+        return Response.json({ data: [{ id: first ? "race-model" : "newer-race-model" }] });
       },
     });
     const config = {
@@ -379,29 +402,32 @@ for (const publisher of ["convergence", "retained"] as const) {
         console.log(JSON.stringify({ status: response.status, body: await response.json() }));
       `], sandbox.preloadPath)], { cwd: repoRoot, env: sandboxChildEnv(sandbox), stdout: "pipe", stderr: "pipe" });
       sandbox.children.add(sync);
-      const syncStdout = new Response(sync.stdout).text();
-      const syncStderr = new Response(sync.stderr).text();
+      const syncResult = captureChildResult(sync);
 
-      await raceBarrier(sync, waitForPath(requested, CHILD_MARKER_BUDGET_MS));
+      // This real child imports the management route before reaching /models.
+      // Keep the CI startup floor, then leave room for the second publisher process.
+      await raceBarrier(syncResult, waitForPath(requested, watchdogMs(INTERNAL_DEADLINE_MS)));
       const published = await runPublisher(sandbox, publisher, config);
       if (published.exitCode !== 0) {
         throw new Error(`${publisher} publisher failed\nstdout=${published.stdout}\nstderr=${published.stderr}`);
       }
       const newer = readFileSync(catalogPath, "utf8");
       expect(newer).not.toBe(initial);
+      const newerSlugs = JSON.parse(newer).models.map((model: { slug: string }) => model.slug);
+      expect(newerSlugs).toContain("fixture/newer-race-model");
+      expect(newerSlugs).not.toContain("fixture/race-model");
 
       writeFileSync(release, "release");
-      const [exitCode, stdout, stderr] = await Promise.all([
-        sync.exited,
-        syncStdout,
-        syncStderr,
-      ]);
+      // Exercise the losing exit branch before the successful caller reads output.
+      await sync.exited;
+      const { exitCode, stdout, stderr } = await syncResult;
       expect({ exitCode, stdout, stderr }).toMatchObject({ exitCode: 0 });
+      expect(JSON.parse(stdout).status).toBe(200);
       expect(readFileSync(catalogPath, "utf8")).toBe(newer);
     } finally {
       provider.stop(true);
     }
-  }, TWO_CHILD_TEST_BUDGET_MS);
+  }, SPAWN_BUDGET_MS * 2);
 }
 
 /**
@@ -448,7 +474,6 @@ test("a persisted runtime selection moved by another process during the await bl
 
   const sync = Bun.spawn([process.execPath, ...withOwnedServiceHomePreload(["--eval", `
     import { existsSync, writeFileSync } from "node:fs";
-    globalThis[Symbol.for("opencodex.test.provider-fetch")] = true;
     const config = ${JSON.stringify(config)};
     config.providers.together.fetch = async () => {
       writeFileSync(${JSON.stringify(requested)}, "requested");
@@ -459,10 +484,9 @@ test("a persisted runtime selection moved by another process during the await bl
     console.log(JSON.stringify(await syncCatalogModels(config)));
   `], sandbox.preloadPath)], { cwd: repoRoot, env: sandboxChildEnv(sandbox), stdout: "pipe", stderr: "pipe" });
   sandbox.children.add(sync);
-  const syncStdout = new Response(sync.stdout).text();
-  const syncStderr = new Response(sync.stderr).text();
+  const syncResult = captureChildResult(sync);
 
-  await raceBarrier(sync, waitForPath(requested, CHILD_MARKER_BUDGET_MS));
+  await raceBarrier(syncResult, waitForPath(requested, INTERNAL_DEADLINE_MS));
 
   // Another process selects a different Codex runtime. No catalog byte changes.
   writeFileSync(runtimeStatePath, `${JSON.stringify({
@@ -474,15 +498,12 @@ test("a persisted runtime selection moved by another process during the await bl
   }, null, 2)}\n`);
 
   writeFileSync(release, "release");
-  const [exitCode, stdout, stderr] = await Promise.all([
-    sync.exited,
-    syncStdout,
-    syncStderr,
-  ]);
+  await sync.exited;
+  const { exitCode, stdout, stderr } = await syncResult;
   expect({ exitCode, stderr }).toMatchObject({ exitCode: 0 });
   expect(JSON.parse(stdout.trim())).toMatchObject({ catalogWritten: false });
   expect(readFileSync(catalogPath, "utf8")).toBe(initial);
-}, TWO_CHILD_TEST_BUDGET_MS);
+}, SPAWN_BUDGET_MS);
 
 /**
  * The post-approval seam, raced by two real processes through a real route.
@@ -490,7 +511,7 @@ test("a persisted runtime selection moved by another process during the await bl
  * Every case above drives `/api/sync`, which is a retained root. This one drives
  * `PATCH /api/providers` — one of the sixteen management mutations that used to
  * reach a catalog write through `refreshCodexCatalogBestEffort`, whose entire
- * error policy silently discarded every exception. The interesting window is AFTER the route has
+ * error policy was `catch {}`. The interesting window is AFTER the route has
  * already persisted its own mutation and approved the refresh: two processes
  * arriving there together must serialize, and neither may report `committed`
  * for bytes the other replaced.
@@ -507,19 +528,6 @@ test("two processes at the post-approval management seam serialize instead of in
   const catalogPath = seedCatalog(sandbox);
   const seeded = readFileSync(catalogPath, "utf8");
   const barrier = join(sandbox.root, "seam-barrier");
-  const routeConfig = {
-    port: 10100,
-    defaultProvider: "together",
-    providers: {
-      together: {
-        adapter: "openai-chat",
-        baseUrl: "https://api.together.xyz/v1",
-        apiKey: "seam-key",
-        models: ["fallback-model"],
-      },
-    },
-  };
-  writeFileSync(join(sandbox.opencodexHome, "config.json"), JSON.stringify(routeConfig, null, 2));
 
   // Warm the config ownership + mutation database in a single process first.
   // Two cold processes otherwise race to create `.opencodex-owner.json` and both
@@ -547,8 +555,18 @@ test("two processes at the post-approval management seam serialize instead of in
       }
       return Response.json({ data: [{ id: "seam-model-" + ${JSON.stringify(marker)} }] });
     };
-    const config = ${JSON.stringify(routeConfig)};
-    const { mutatePersistedConfig, saveConfigPreservingClaudeCode } = await import("./src/config.ts");
+    const config = {
+      port: 10100,
+      defaultProvider: "together",
+      providers: {
+        together: {
+          adapter: "openai-chat",
+          baseUrl: "https://api.together.xyz/v1",
+          apiKey: "seam-key",
+          models: ["fallback-model"],
+        },
+      },
+    };
     const { handleManagementAPI } = await import("./src/server/management-api.ts");
     const url = new URL("http://localhost/api/providers?name=together");
     const req = new Request(url, {
@@ -556,12 +574,9 @@ test("two processes at the post-approval management seam serialize instead of in
       headers: { Host: "localhost", "content-type": "application/json" },
       body: JSON.stringify({ note: "seam-" + ${JSON.stringify(marker)} }),
     });
-    const response = await handleManagementAPI(req, url, config, {
-      mutatePersistedConfig,
-      saveConfigPreservingClaudeCode,
-    });
+    const response = await handleManagementAPI(req, url, config);
     const body = await response.json();
-    console.log(JSON.stringify({ status: response.status, body, catalogRefresh: body.catalogRefresh }));
+    console.log(JSON.stringify({ status: response.status, catalogRefresh: body.catalogRefresh }));
   `;
 
   const isPreApprovalLoss = (stderr: string): boolean =>
@@ -638,14 +653,10 @@ test("two processes at the post-approval management seam serialize instead of in
     }
     const parsed = JSON.parse(result.stdout.trim()) as {
       status: number;
-      body?: { error?: string };
       catalogRefresh: { status: string };
     };
-    if (parsed.status === 500 && parsed.body?.error === "management persistence unavailable") {
-      continue;
-    }
     // The route persisted its mutation, so it must answer 2xx no matter what the
-    // catalog attempt decided. A throw here would reproduce the old silent-catch failure
+    // catalog attempt decided. A throw here would be the old `catch {}` failure
     // inverted: a persisted change reported as a 500.
     expect(parsed.status).toBeGreaterThanOrEqual(200);
     expect(parsed.status).toBeLessThan(300);
@@ -662,9 +673,7 @@ test("two processes at the post-approval management seam serialize instead of in
   // with a typed disposition and satisfy every assertion above.
   const dispositions = results!
     .filter(r => r.exitCode === 0)
-    .map(r => JSON.parse(r.stdout.trim()) as { status: number; body?: { error?: string }; catalogRefresh?: { status: string } })
-    .filter(r => !(r.status === 500 && r.body?.error === "management persistence unavailable"))
-    .map(r => r.catalogRefresh?.status);
+    .map(r => (JSON.parse(r.stdout.trim()) as { catalogRefresh: { status: string } }).catalogRefresh.status);
   expect(dispositions).toContain("committed");
 
   // A commit means the catalog really moved.
@@ -677,4 +686,4 @@ test("two processes at the post-approval management seam serialize instead of in
   const fromA = slugs.some(s => s.includes("seam-model-a"));
   const fromB = slugs.some(s => s.includes("seam-model-b"));
   expect(fromA && fromB).toBe(false);
-}, TWO_CHILD_TEST_BUDGET_MS);
+}, SPAWN_BUDGET_MS);

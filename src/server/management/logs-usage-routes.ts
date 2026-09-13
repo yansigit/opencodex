@@ -10,6 +10,7 @@ import {
   multiAgentGuidanceEnabled,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
+  saveConfigPreservingClaudeCode,
 } from "../../config";
 import {
   clearLoginState,
@@ -37,7 +38,13 @@ import { getRestoreTrashTestStreamResponse, runRestoreTrashEntryJob } from "../.
 import {
   normalizeStorageCleanupPolicy,
   parseStorageCleanupPolicyInput,
-} from "../../storage/policy-input";
+  writeStorageCleanupPolicyToConfig,
+} from "../../storage/policy";
+import {
+  getStorageCleanupPolicyJobState,
+  getStorageCleanupPolicyTestStreamResponse,
+  requestStorageCleanupPolicyRun,
+} from "../../storage/policy-job";
 import {
   currentUsageLogRevision,
   usageLogIdentityKey,
@@ -69,7 +76,7 @@ import { applySystemEnvToggle } from "../system-env";
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
-import { MissingManagementPersistenceError, mutateManagementConfig, type ManagementContext } from "./context";
+import type { ManagementContext } from "./context";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 import {
   discardUsageSummaryCacheEntry,
@@ -99,7 +106,6 @@ function refreshedUsageSummary<T extends UsageSummary & { historyTruncated: bool
 
 export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Response | null> {
   const { req, url, config, deps, syncClaudeAgentDefsBestEffort } = ctx;
-  const storagePolicyJobState = () => deps.storageCleanupPolicyJob?.getState() ?? { status: "idle" as const };
 
   if (url.pathname === "/api/logs" && req.method === "GET") {
     const rawCursor = url.searchParams.get("cursor");
@@ -109,7 +115,10 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
     }
     const all = getRequestLogEntries();
     const total = filteredRequestLogCount(all, url.searchParams);
-    const logs = filterRequestLogs(all, url.searchParams).map(requestLogDto);
+    // Not point-free: requestLogDto takes an options object second, and Array.map would pass the
+    // element INDEX into it. An explicit arrow keeps the default (decode rate included) and is
+    // what /api/logs wants; /api/request-history opts out at its own call sites.
+    const logs = filterRequestLogs(all, url.searchParams).map(entry => requestLogDto(entry));
     const poll = selectRequestLogPoll(logs, url.searchParams, cursor);
     return jsonResponse({
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -216,6 +225,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
         const accumulator = filteredAggregate.accumulator;
         return jsonResponse({
           ...accumulator.summarize(range, now, surface),
+          ...(filteredAggregate.usageIncomplete ? { usageIncomplete: true as const, usageIncompleteReason: "oversized_rows" as const } : {}),
           historyTruncated: false,
           truncatedPrefixBytes: 0,
           entriesTruncated: false,
@@ -238,6 +248,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
       const revisionKey = `${usageLogRevisionKey(aggregate.revision)}\0${effectiveReadLimit}`;
       const lastSeenSize = aggregate.revision?.size ?? 0;
       const baseReadMetadata = {
+        ...(aggregate.usageIncomplete ? { usageIncomplete: true as const, usageIncompleteReason: "oversized_rows" as const } : {}),
         historyTruncated: false,
         truncatedPrefixBytes: 0,
         entriesTruncated: false,
@@ -419,6 +430,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
         bytes: result.bytes,
         ...(result.trashDir ? { trashDir: result.trashDir } : {}),
         removedPaths: result.removedPaths,
+        ...(result.skippedReferencedPaths?.length ? { skippedReferencedPaths: result.skippedReferencedPaths } : {}),
       });
     } catch {
       return jsonResponse({
@@ -522,7 +534,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
   }
 
   if (url.pathname === "/api/storage/cleanup-policy/test-stream" && req.method === "GET") {
-    const stream = deps.storageCleanupPolicyJob?.getTestStream();
+    const stream = getStorageCleanupPolicyTestStreamResponse();
     if (stream) return stream;
     // Production: hook is off. Return an explicit JSON 404 — do not fall through to the GUI.
     return jsonResponse({ error: "not_found" }, 404);
@@ -532,7 +544,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
     const policy = normalizeStorageCleanupPolicy(config.storageCleanupPolicy);
     return jsonResponse({
       ...policy,
-      job: storagePolicyJobState(),
+      job: getStorageCleanupPolicyJobState(),
     });
   }
 
@@ -542,25 +554,17 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
     const previous = normalizeStorageCleanupPolicy(config.storageCleanupPolicy);
     const parsed = parseStorageCleanupPolicyInput(raw, previous);
     if (!parsed.ok) return jsonResponse({ error: parsed.error }, 400);
+    // Never enable implicitly: if client omitted enabled, keep previous (default false).
     const body = raw as Record<string, unknown>;
-    const persisted = mutateManagementConfig(deps, disk => {
-      const latest = normalizeStorageCleanupPolicy(disk.storageCleanupPolicy);
-      const rebased = parseStorageCleanupPolicyInput(raw, latest);
-      if (!rebased.ok) throw new Error(rebased.error);
-      // Never enable implicitly: if client omitted enabled, keep the latest persisted value.
-      if (body.enabled === undefined) rebased.policy.enabled = latest.enabled;
-      disk.storageCleanupPolicy = rebased.policy;
-      return { changed: true, value: structuredClone(rebased.policy) };
-    });
-    if (persisted.status === "unavailable") return jsonResponse({ error: "management persistence unavailable" }, 500);
-    config.storageCleanupPolicy = persisted.value;
-    return jsonResponse({ ok: true, policy: persisted.value, job: storagePolicyJobState() });
+    if (body.enabled === undefined) parsed.policy.enabled = previous.enabled;
+    const saved = writeStorageCleanupPolicyToConfig(parsed.policy);
+    config.storageCleanupPolicy = saved;
+    return jsonResponse({ ok: true, policy: saved, job: getStorageCleanupPolicyJobState() });
   }
 
   if (url.pathname === "/api/storage/cleanup-policy/run" && req.method === "POST") {
     try {
-      if (!deps.storageCleanupPolicyJob) throw new MissingManagementPersistenceError();
-      const accepted = deps.storageCleanupPolicyJob.requestRun({ reason: "manual", force: true });
+      const accepted = requestStorageCleanupPolicyRun({ reason: "manual", force: true });
       if (!accepted.accepted) {
         return jsonResponse({
           ok: false,

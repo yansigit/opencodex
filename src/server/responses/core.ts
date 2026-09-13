@@ -1,6 +1,9 @@
+import { capturePoolQuotaWriter } from "../../codex/account-store";
 import type { Server } from "bun";
+import { recordContextSessionOwner } from "../../codex/context-owner";
+import { contextRelayActivated } from "../../codex/context-compat";
 import { randomUUID } from "node:crypto";
-import { adapterEventDiagnosticDetails, bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type BridgeDiagnosticContext, type BridgeDiagnosticSequence, type ResponsesTerminalStatus } from "../../bridge";
+import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
 import { formatPassthroughUpstreamError } from "./passthrough-error";
 import {
   createResponsesFieldBackfillBlockRewrite,
@@ -15,6 +18,7 @@ import { nativeContextLimits } from "../../codex/catalog";
 import { describeUpstreamConnectFailure } from "./upstream-error";
 import type { CodexWsQuotaObserver } from "./codex-ws-metadata";
 import { applyAccountQuotaFromUpstreamHeaders as applyCapturedCodexQuota } from "../../codex/quota";
+import { isCodexAccountGenerationLive } from "../../codex/account-store";
 import { isCodexWsQuotaObservedResponse } from "./ws-upstream";
 import {
   multiAgentGuidanceEnabled,
@@ -42,14 +46,10 @@ import {
   copyPreviousResponseReplayProvenance,
   expandPreviousResponseInput,
   markBodyNonPersistable,
-  prepareResponseStateReplay,
-  prepareSensitiveResponsePersistence,
   previousResponseProviderState,
-  previousResponseReplayPrefixLength,
   previousResponseReplayFailure,
   previousResponseScopeMismatch,
   rememberResponseState,
-  type ResponseStateDurability,
 } from "../../responses/state";
 import {
   bindTurnTerminationScope,
@@ -63,12 +63,15 @@ import {
   sameProviderContinuationOwner,
 } from "../../responses/provider-continuation";
 import {
+  rememberComboForLane,
+  recallComboForLane,
+} from "./combo-session-recall";
+import {
   comboRouteDecisionTrace,
   NoEligiblePolicyCandidateError,
   routeCompactionModel,
   routeConcreteModel,
   routeModel,
-  routedProviderConfig,
   type RouteResult,
 } from "../../router";
 import { evidenceFromBody } from "../../routing/request-evidence";
@@ -83,6 +86,7 @@ import {
   comboRequestHasImageInput,
   concreteComboRequestBody,
   getCombo,
+  resolveComboId,
   isComboTargetInCooldown,
   NoAvailableComboTargetsError,
   noteComboSuccess,
@@ -91,21 +95,20 @@ import {
   pickComboTargetWithWait,
   targetKey,
 } from "../../combos";
-import { isDebugEnabled, isInjectionDebugEnabled } from "../../lib/debug-settings";
-import { debugStreamDiagnostic } from "../../lib/debug";
+import { isInjectionDebugEnabled } from "../../lib/debug-settings";
 import {
   CYBER_POLICY_ERROR_CODE,
   CYBER_POLICY_FALLBACK_MESSAGE,
   adapterFailureFromMessage,
   isCyberPolicyCode,
   isCyberPolicyMessage,
-  OcxRequestValidationError,
 } from "../../lib/errors";
 import { injectionDebugLog } from "../../lib/injection-debug-log";
-import { antigravityOAuthDestinationConfigError, isAntigravityOAuthProvider } from "../../lib/provider-tls-profile";
 import { resolveClientRetryAfter } from "../../lib/retry-after";
-import { googleProviderOptionsRouteError } from "../../responses/google-provider-options";
-import { enrichOpenCodeZenRateLimitMessage } from "../../providers/opencode-zen-rate-limit";
+import {
+  enrichOpenCodeZenUpstreamMessage,
+  isTransientConsoleGoUploadRejection,
+} from "../../providers/opencode-zen-rate-limit";
 import { CODE_MODE_EXEC_TOOL_NAME, modelInList, namespacedToolName } from "../../types";
 import type {
   AdapterEvent,
@@ -141,25 +144,6 @@ import {
   rotateAnthropicAccountOn429,
   type AnthropicAccountSelectionReason,
 } from "../../oauth/anthropic-routing";
-import {
-  antigravitySessionKeyFromParts,
-  bindAntigravitySessionAffinity,
-  recordAntigravityCooldown,
-  recordAntigravitySyntheticFailure,
-  resolveAntigravityAccountForSession,
-  retryableAntigravity429DelayMs,
-} from "../../oauth/antigravity-routing";
-import {
-  CURSOR_POOL_MAX_FAILOVERS_PER_REQUEST,
-  bindCursorSessionAffinity,
-  cursorSessionKeyFromParts,
-  formatCursorProviderForLog,
-  isCursorAccountPoolActive,
-  recordCursorAccountBillingCooldown,
-  resolveCursorAccountForSession,
-  rotateCursorAccountOn429,
-  rotateCursorAccountOnAuth,
-} from "../../oauth/cursor-routing";
 import { stampOAuthAccountLabel } from "../../providers/label";
 import {
   failoverAccountSnapshot,
@@ -167,11 +151,17 @@ import {
   GENERIC_OAUTH_MAX_FAILOVERS_PER_REQUEST,
   isGenericFailoverProvider,
   isGenericOAuthFailoverEnabled,
+  noteGenericPoolSelection,
   preferredInitialAccount,
   rotateGenericOAuthAccountOn429,
 } from "../../oauth/generic-account-failover";
 import { resolveCopilotApiBaseUrl } from "../../oauth/github-copilot";
-import { buildWebSearchTool, mediaBridgeWillRun, planWebSearch, resolveCcaInTurnGrounding, runWithWebSearch, shouldResolveOpenAiWebSearchSidecar } from "../../web-search";
+import { buildWebSearchTool, planWebSearch, runWithWebSearch, shouldResolveOpenAiWebSearchSidecar } from "../../web-search";
+import {
+  createOllamaBridgeExecutor,
+  createPassthroughWebSearchBridgeStream,
+  planPassthroughWebSearchBridge,
+} from "../../web-search/passthrough-bridge";
 import { buildImageTool, buildVideoTool, planImageBridge, planVideoBridge, runWithImageBridge, clampImageMaxRounds, IMAGE_GEN_TOOL_NAME, VIDEO_GEN_TOOL_NAME } from "../../images";
 import { describeImagesInPlace, isModelTextOnly, planVisionSidecar, resolveOpenAiVisionModel, shouldResolveOpenAiVisionSidecar, stripImagesInPlace } from "../../vision";
 import { createAdapterEventQueue, preflightAdapterEvents, type AdapterEventQueue } from "../../adapters/run-turn-queue";
@@ -227,17 +217,23 @@ import {
   applyUpstreamRecoveryInit,
   fetchWithResetRetry,
   fetchWithTransientRetry,
+  isNonReplayableResponse,
+  isTransientUpstreamStatus,
   prepareSameTarget429Wait,
   sleepWithAbort,
 } from "../../lib/upstream-retry";
 import {
   ForwardAdmissionCredentialError,
   hasForwardableCodexBearer,
+  isProxyAdmissionSecret,
   validateForwardAdmissionCredential,
 } from "../auth-cors";
+import { resolveContextPrincipal } from "../auth-cors";
 import type { DataPlaneAdmission } from "../auth-cors";
 import { createTranslatorBudget, isTranslatorBudgetExceededError, type TranslatorBudget } from "../../lib/translator-budget";
-import { listOpenAiForwardSidecarCandidates, resolveFirstUsableOpenAiSidecar, type ResolvedOpenAiForwardSidecar } from "../../providers/openai-sidecar";
+import { captureExplicitOpenAiCallerAuth, listOpenAiForwardSidecarCandidates, resolveFirstUsableOpenAiSidecar, type ExplicitOpenAiCallerAuth, type ResolvedOpenAiForwardSidecar } from "../../providers/openai-sidecar";
+import { inspectChatGptDomainClaim } from "../../oauth/chatgpt";
+import { captureCallerDirectAuth, providerConsumesCallerAuthorization, type CallerDirectAuth } from "../../providers/caller-authorization";
 import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
 import { CODEX_RESERVE_HELPER_UNSUPPORTED_MESSAGE, isCodexReserveHelperUnsupported } from "../../codex/loopback-target";
 import { providerContextCap } from "../../providers/context-cap";
@@ -263,7 +259,13 @@ import { hasPassiveAccountQuota, recordAnthropicAccountQuotaFromHeaders, recordP
 import { captureConfigGeneration } from "../../lib/state-store-sweeper";
 import { applyOpenAiVirtualModel, resolveOpenAiCompactModel } from "../../providers/openai-virtual-models";
 import { isUsageDebugEnabled } from "../../usage/debug";
-import { readJsonRequestBody, DecompressedBodyTooLargeError, UnsupportedContentEncodingError } from "../request-decompress";
+import {
+  readJsonRequestBody,
+  describeInboundBodyRefusal,
+  resolveInboundBodyLimitBytes,
+  DecompressedBodyTooLargeError,
+  UnsupportedContentEncodingError,
+} from "../request-decompress";
 import { resolveAdapter, resolveWireProtocolOverride } from "../adapter-resolve";
 import {
   providerModelResponsesTerminalRepair,
@@ -271,10 +273,10 @@ import {
   type InboundWire,
 } from "../../providers/registry";
 import type { AdapterRequest, ProviderAdapter } from "../../adapters/base";
-import { isAzureIdentityProvider } from "../../config/provider-validation";
 import { providerApiKeySelectionIsCurrent, resolveCurrentProviderApiKeyTransport } from "../../providers/api-key-selection";
 import {
   hasKeyPoolFailover,
+  selectProactiveApiKeyTransport,
   rateLimitRetryDelayMs,
   rateLimitRetryPolicyFor,
   rotateProviderTransportOn429,
@@ -294,21 +296,22 @@ import {
 } from "../lifecycle";
 import { redactSecretString, sanitizeLogMetadataString } from "../../lib/redact";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
+import { isReasoningEffortRejection, planReasoningEffortDowngrade } from "../../providers/reasoning-metadata";
 import {
   ENCRYPTED_FUNCTION_OUTPUT_REJECTION,
   isRateLimitOrQuotaFailureMessage,
   upstreamErrorMessageFromPayload,
 } from "../../lib/errors";
 import type { AdmissionLease } from "../../lib/admission";
+import { tryClaimNativeMainProfileForTurn as tryClaimStoredSidecarMainProfile } from "../../codex/native-main-admission";
 import { prepareEffortNormalization, supportedLadderFor } from "../effort-policy";
-import { classifyAgentKind, isThreadSpawnRequest } from "../effort-policy";
+import { isThreadSpawnRequest } from "../effort-policy";
 import {
   applySubagentModelFallback,
   maybePrimeSubagentQuota,
   recordSubagentQuotaFailureForThreadSpawn,
-  resolveSubagentSelectionContext,
+  resolveSubagentFallbackChain,
   subagentFallbackNeedsModelEntitlements,
-  subagentSelectionNeedsPoolQuotaPrime,
   type SubagentModelEligibleAccountIds,
   type SubagentPoolAccountPreview,
 } from "../../codex/subagent-model-fallback";
@@ -331,6 +334,8 @@ import {
 } from "../request-log";
 import {
   conversationIdFromResponsesRequest,
+  getOrAllocateRequestSessionLane,
+  linkRequestSessionLane,
   normalizeLogConversationId,
   reasoningReplayConversationIdFromResponsesRequest,
   sessionLaneIdFromRequest,
@@ -341,11 +346,13 @@ import {
   consumeForInspection,
   consumeForResponseLogMetadata,
   createSseInspector,
+  terminalStatusFromParsed,
   isEagerRelaySseResponse,
   isNativePassthroughSseResponse,
   markEagerRelaySseResponse,
   markNativePassthroughSseResponse,
   relaySseWithFailedTail,
+  codexSafetyBufferingFilterOptions,
   relayWithAbort,
   sanitizePassthroughHeaders,
 } from "../relay";
@@ -364,16 +371,12 @@ import {
 import { isWin32EagerRewrite, selectEagerPath } from "../../lib/bun-stream-caps";
 import { cancelBodyOnAbort } from "../../lib/abort";
 import { isCodexWsUpstreamResponse, type BunRuntimeGateInput } from "./ws-upstream";
+import { readCodexWsStage } from "./codex-ws-wire";
 import {
   createResponsesItemIdPayloadRewrite,
   hasResponsesItemIdRepair,
   repairResponsesJsonItemIds,
 } from "../responses-item-id-repair";
-import {
-  createReasoningSummaryChannelPayloadRewrite,
-  rewriteReasoningSummaryInJsonString,
-  routeUsesContentChannelReasoning,
-} from "../responses-reasoning-summary-rewrite";
 import {
   createImageGenCallRestoreRewrite,
   imageGenToolCallAliases,
@@ -388,20 +391,11 @@ import {
   scrubSelfNamedToolCallNamespaceInJson,
 } from "../responses-self-named-namespace-scrub";
 import type { EffectiveSubagentRoster, SpawnAgentSurface } from "../../codex/catalog";
-import { isMultiAgentV2Enabled } from "../../codex/features";
 
 import { buildToolBridgeMaps, collabSurface, injectDeveloperMessage, multiAgentGuidanceText } from "./collaboration";
-import { decideV2RoutedDelegationBridge } from "./v2-routed-delegation-policy";
-import { decideV2NativeParentOverride } from "./v2-native-parent-override";
-import {
-  createV2RoutedDelegationSseRewrite,
-  injectV2RoutedDelegationBridge,
-  rewriteV2RoutedDelegationCallsInJson,
-  type V2RoutedDelegationBridgeContext,
-} from "./v2-routed-delegation-bridge";
 import { mapCodexAuthContextErrorToResponse, nativeMainRefreshFailureResponse } from "./codex-auth-error";
 import { hasUnreadableEncryptedAgentTask, looksLikeBackendCiphertext, sanitizeEncryptedContentInPlace } from "./encrypted-payload";
-import { fetchWithHeaderTimeout, providerFetch, safeHostLabel, safeOriginLabel, storedPoolReplayDispatchNotifier, UpstreamRedirectError, type ProviderFetchOptions } from "./fetch-helpers";
+import { fetchWithHeaderTimeout, providerFetch, safeHostLabel, safeOriginLabel, storedPoolReplayDispatchNotifier, type ProviderFetchOptions } from "./fetch-helpers";
 import { classifyTransportFailureKind, transportErrorCode } from "../../lib/upstream-reachability";
 import {
   acquireUpstreamHostAdmission,
@@ -426,7 +420,7 @@ import {
   payloadRewriteAsBlockRewrite,
   relaySseWithBlockRewrite,
 } from "../sse-payload-rewrite";
-import { restoreRoutedCustomCalls, restoreRoutedCustomCallsInJson } from "../../responses/custom-tool-compat";
+import { hasUnmappedRoutedCustomToolOutput, restoreRoutedCustomCalls, restoreRoutedCustomCallsInJson } from "../../responses/custom-tool-compat";
 import { createRoutedCustomToolRestoreBlockRewrite } from "../responses-custom-tool-repair";
 import { collectFunctionCallRepairSchemas, repairFunctionCallsInJson } from "../../responses/function-call-compat";
 import { createResponsesFunctionToolRepairBlockRewrite } from "../responses-function-tool-repair";
@@ -440,10 +434,26 @@ import {
   type RoutedNamespaceToolAliases,
 } from "../../responses/namespace-tool-compat";
 import {
+  createPlaintextV2AgentMessageCallRestoreRewrite,
+  PLAINTEXT_V2_AGENT_MESSAGE_RESTORE_OVERFLOW_MESSAGE,
+  restorePlaintextV2AgentMessageCalls,
+  restorePlaintextV2AgentMessageCallsInJsonResult,
+  shouldPreparePlaintextV2AgentMessages,
+} from "../../responses/plaintext-v2-agent-messages";
+import {
+  createMuseToolNameRestoreRewrite,
+  restoreMuseToolNames,
+  restoreMuseToolNamesInJson,
+  type MuseToolNameAliases,
+} from "../../responses/muse-tool-name-alias";
+import {
+  collectDeclaredBareWireToolNames,
   collectDeclaredNamelessClientCallTypes,
   collectDeclaredWireToolNames,
   collectProviderExecutedCallTypes,
   createUndeclaredToolCallGuardBlockRewrite,
+  normalizeDefaultNamespaceInJson,
+  normalizeDefaultNamespaceInResponse,
   currentTurnWireToolCatalogBody,
   hasExplicitWireToolCatalog,
   undeclaredToolCallMessage,
@@ -453,7 +463,7 @@ import {
 } from "../responses-undeclared-tool-guard";
 import { createGithubCopilotResponsesBlockRewrite } from "../github-copilot-responses-repair";
 import { responsesJsonToSseStream } from "../responses-json-events";
-import { streamingContextOverflowResponse } from "./context-overflow";
+import { jsonContextOverflowResponse, streamingContextOverflowResponse } from "./context-overflow";
 import { guardTerminalEventStream } from "./terminal-guard";
 import {
   emptyCompletionRetryEnabled,
@@ -467,34 +477,6 @@ import { preflightComboStreamResponse } from "./combo-stream-preflight";
 // bridging. A second byte-stream reader would reinterpret that transport's
 // already-committed event boundary and can replay custom adapter work.
 const runTurnAdapterSseResponses = new WeakSet<Response>();
-
-function diagnoseAdapterEvents(
-  events: AsyncIterable<AdapterEvent>,
-  adapterName: string,
-  requestId: string | undefined,
-  logCtx: RequestLogContext,
-  state: BridgeDiagnosticSequence,
-): AsyncIterable<AdapterEvent> {
-  if (!requestId) return events;
-  return (async function* () {
-    for await (const event of events) {
-      const attempt = logCtx.activeAttempt;
-      debugStreamDiagnostic(
-        {
-          requestId,
-          adapterName,
-          ...(attempt?.ordinal !== undefined ? { attempt: attempt.ordinal } : {}),
-          ...(attempt?.recoveryKinds.at(-1) !== undefined ? { recovery: attempt.recoveryKinds.at(-1) } : {}),
-        },
-        "adapter",
-        ++state.value,
-        event.type,
-        adapterEventDiagnosticDetails(event),
-      );
-      yield event;
-    }
-  })();
-}
 
 /**
  * Adapters whose continuation state must survive Codex's store:false requests.
@@ -863,6 +845,28 @@ export function shouldAttemptOpaqueBlobRecovery(args: {
     && isSelfIdentifiedOpaqueBlobRejection(args.errorBody);
 }
 
+/**
+ * Peek the upstream error body for the reasoning-effort downgrade. Only 400/403 are considered
+ * and the body must be complete and display-safe, the same contract the other rejection peeks
+ * use. The match is deliberately narrow: the upstream has to name reasoning effort, so an
+ * unrelated 400 never triggers a replay.
+ */
+async function reasoningEffortRejectionText(
+  response: Response,
+  alreadyAttempted: boolean,
+  signal: AbortSignal,
+): Promise<string | undefined> {
+  if (alreadyAttempted) return undefined;
+  if (response.status !== 400 && response.status !== 403) return undefined;
+  try {
+    const body = await readBoundedResponseBody(response.clone(), { signal });
+    if (!body.displaySafe || body.truncated) return undefined;
+    return isReasoningEffortRejection(body.text) ? body.text : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function opaqueBlobRejectionBodyForRecovery(
   response: Response,
   outboundBody: string | undefined,
@@ -871,12 +875,38 @@ async function opaqueBlobRejectionBodyForRecovery(
   signal: AbortSignal,
 ): Promise<string | undefined> {
   if (
-    response.status < 400
+    isNonReplayableResponse(response)
+    || response.status < 400
     || (response.status >= 500 && response.status !== 502)
     || adapterName !== "openai-responses"
     || alreadyAttempted
     || !outboundResponsesBodyCarriesOpaqueBlob(outboundBody)
   ) return undefined;
+  try {
+    const body = await readBoundedResponseBody(response.clone(), { signal });
+    return body.displaySafe && !body.truncated ? body.text : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Backoff for the single exact-request replay after a canonical Console upload rejection.
+ */
+const CONSOLE_GO_UPLOAD_RETRY_DELAY_MS = 800;
+
+/**
+ * Peek the upstream error body for the Console Go transient-400 recovery. Only a complete,
+ * display-safe body may drive a retry decision (same contract as
+ * opaqueBlobRejectionBodyForRecovery), and reading a clone leaves the original response intact
+ * for the caller's own error surface when no retry is taken.
+ */
+async function consoleGoUploadRejectionBody(
+  response: Response,
+  alreadyAttempted: boolean,
+  signal: AbortSignal,
+): Promise<string | undefined> {
+  if (isNonReplayableResponse(response) || response.status !== 400 || alreadyAttempted) return undefined;
   try {
     const body = await readBoundedResponseBody(response.clone(), { signal });
     return body.displaySafe && !body.truncated ? body.text : undefined;
@@ -1069,11 +1099,15 @@ export function usesCodexForwardPoolAuth(
     && provider.authMode === "forward" && provider.adapter === "openai-responses";
 }
 
-function codexWsQuotaObserver(authCtx: CodexAuthContext, provider: OcxProviderConfig): CodexWsQuotaObserver | undefined {
+function codexWsQuotaObserver(authCtx: CodexAuthContext, provider: OcxProviderConfig, modelId?: string): CodexWsQuotaObserver | undefined {
   if (!isCanonicalOpenAiForwardProvider(provider) || !usesCodexForwardPoolAuth(authCtx, provider)) return undefined;
   const { accountId, writerGeneration } = authCtx;
+  const credentialGeneration = authCtx.kind === "pool" ? authCtx.generation : undefined;
   const mainWriter = authCtx.kind === "main-pool" ? authCtx.mainQuotaWriter : undefined;
-  return headers => applyCapturedCodexQuota(accountId, headers, writerGeneration, mainWriter);
+  return headers => {
+    if (credentialGeneration !== undefined && !isCodexAccountGenerationLive(accountId, credentialGeneration)) return;
+    applyCapturedCodexQuota(accountId, headers, writerGeneration, mainWriter, { modelId, poolWriter: authCtx.kind === "pool" ? authCtx.poolQuotaWriter : undefined });
+  };
 }
 
 export function preAuthUpstreamHostCircuitKey(
@@ -1161,6 +1195,9 @@ export async function shouldRetryCodexPoolAccountQuota(
   response: Response,
   signal?: AbortSignal,
 ): Promise<boolean> {
+  // A post-send WebSocket gateway status must not become a second account's send; the
+  // body carries no quota evidence either, but the marker is the contract, not the prose.
+  if (isNonReplayableResponse(response)) return false;
   if (response.status === 402 || response.status === 429) return true;
   if (response.status < 500 || response.status >= 600) return false;
   try {
@@ -1176,8 +1213,31 @@ export async function shouldRetryCodexPoolAccountQuota(
   }
 }
 
+/**
+ * A pre-stream upstream 5xx another Codex account may still be able to serve.
+ *
+ * `server_is_overloaded` is the shape this exists for. The ChatGPT backend refuses in a few
+ * hundred milliseconds, the body carries no quota evidence, and nothing in that exchange is
+ * account health — so the pool keeps choosing the same account and every request fails on it
+ * while the other accounts sit idle. That is what an operator sees as the pool refusing to move.
+ *
+ * The status stays exactly as upstream sent it. `classifyCodexUpstreamOutcome` maps 5xx to the
+ * transient class, so the account earns an ordinary failure streak and `upstreamFailoverThreshold`
+ * decides when it is soft-avoided, rather than a quota cooldown it never earned.
+ *
+ * Deliberately narrow. {@link isNonReplayableResponse} still refuses: a post-send WebSocket
+ * gateway status means the body already reached the origin, so sending it from a second account
+ * could duplicate a turn the origin may still be running. A 5xx whose body confirms quota is not
+ * routed here either — {@link shouldRetryCodexPoolAccountQuota} classifies that one first and
+ * carries the cooldown with it.
+ */
+export function shouldRetryCodexPoolAccountTransient(response: Response): boolean {
+  return !isNonReplayableResponse(response) && isTransientUpstreamStatus(response.status);
+}
+
 interface CodexPoolAccountRetryArgs {
-  req: Request;
+  /** Sanitized caller input, before any selected Pool credential was materialized. */
+  callerAuthHeaders: Headers;
   config: OcxConfig;
   route: { providerName: string; modelId: string; provider: OcxProviderConfig };
   parsed: OcxParsedRequest;
@@ -1343,12 +1403,27 @@ async function retryCodexPoolOnAlternateAccount(
   args: CodexPoolAccountRetryArgs,
 ): Promise<CodexPoolAccountRetryResult> {
   const {
-    req, config, route, parsed, logCtx, options, firstAuthCtx, firstResponse,
+    callerAuthHeaders, config, route, parsed, logCtx, options, firstAuthCtx, firstResponse,
     outcomeStatus, upstream, connectMs, passthroughEstimate, stream,
   } = args;
   const inboundWire = options.inboundWire ?? "responses";
   const entitlementResolver = options.resolveCodexModelEntitlements ?? resolveCodexModelEntitlements;
   let retryAuthCtx: CodexAuthContext | undefined;
+  // A transient 5xx must record even when this request cannot move: the ordinary terminal
+  // recorder only fires for an OK event-stream body, so a pre-stream refusal would otherwise
+  // leave the account looking healthy no matter how many times it refused, and the pool would
+  // keep handing it the next request.
+  const recordUnmovedTransientOutcome = (): void => {
+    if (!isTransientUpstreamStatus(outcomeStatus)) return;
+    recordCodexUpstreamOutcome(config, firstAuthCtx.accountId, outcomeStatus, {
+      threadId: firstAuthCtx.affinityKey,
+      fixedAccount: firstAuthCtx.fixedAccount,
+      modelId: route.modelId,
+      probeLeaseId: codexProbeLeaseId(firstAuthCtx),
+      probeQuotaScope: codexProbeQuotaScope(firstAuthCtx),
+      writerGeneration: firstAuthCtx.writerGeneration,
+    });
+  };
   if (outcomeStatus === 400 && ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(route.modelId)) {
     invalidateCodexModelEntitlementsForAccount(firstAuthCtx.accountId);
     let refreshed;
@@ -1373,11 +1448,12 @@ async function retryCodexPoolOnAlternateAccount(
   // Exact account selectors may retry the same confirmed account above, but must never resolve
   // an alternate. Quota failures and a refreshed entitlement miss remain terminal.
   if (!retryAuthCtx && (firstAuthCtx.fixedAccount || args.sameAccountOnly === true)) {
+    recordUnmovedTransientOutcome();
     return { kind: "no-alternate" };
   }
   try {
     retryAuthCtx ??= await resolveCodexAuthContext(
-        req.headers,
+        callerAuthHeaders,
         config,
         "pool",
         {
@@ -1385,7 +1461,7 @@ async function retryCodexPoolOnAlternateAccount(
           admission: options.admission,
           codexAuthPolicy: options.codexAuthPolicy,
           modelId: route.modelId,
-          requestScopedMainCredential: hasForwardableCodexBearer(req.headers, config),
+          requestScopedMainCredential: hasForwardableCodexBearer(callerAuthHeaders, config),
           beginCodexAccountSelection: codexAccountSelectionForTurn(options.turnAdmissionLease),
           resolveCodexModelEntitlements: entitlementResolver,
         },
@@ -1423,6 +1499,7 @@ async function retryCodexPoolOnAlternateAccount(
         writerGeneration: firstAuthCtx.writerGeneration,
       });
     }
+    recordUnmovedTransientOutcome();
     return { kind: "no-alternate" };
   }
 
@@ -1434,6 +1511,7 @@ async function retryCodexPoolOnAlternateAccount(
       firstResponse.headers,
       firstAuthCtx.writerGeneration,
       firstAuthCtx.kind === "main-pool" ? firstAuthCtx.mainQuotaWriter : undefined,
+      { modelId: route.modelId, poolWriter: firstAuthCtx.kind === "pool" ? firstAuthCtx.poolQuotaWriter : undefined },
     );
   }
   const deferFirstOutcome = shouldDeferCodexResetDerivedCooldown(
@@ -1455,7 +1533,7 @@ async function retryCodexPoolOnAlternateAccount(
   // Only a combo reset-derived outcome is deferred. Retry-After, defaults, and
   // ordinary requests must block the first account before the alternate send.
   if (!deferFirstOutcome) recordFirstOutcome();
-  const retryHeaders = headersForCodexAuthContext(req.headers, retryAuthCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission);
+  const retryHeaders = headersForCodexAuthContext(callerAuthHeaders, retryAuthCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission);
   const retryProvider = applyCodexAuthContextToProvider(
     stripCodexRuntimeProviderFields(route.provider),
     retryAuthCtx,
@@ -1464,6 +1542,7 @@ async function retryCodexPoolOnAlternateAccount(
   const retryAdapter = resolveAdapter(
     resolveWireProtocolOverride(route.providerName, route.modelId, retryProvider, inboundWire),
     config.cacheRetention,
+    route.providerName,
   );
   bindRouteReasoningReplayScope({
     parsed,
@@ -1525,7 +1604,7 @@ async function retryCodexPoolOnAlternateAccount(
           providerFetch(route.provider, options.codexWsRuntimeIdentity, {
             providerName: route.providerName,
             modelId: route.modelId,
-            onCodexWsQuota: codexWsQuotaObserver(retryAuthCtx, route.provider),
+            onCodexWsQuota: codexWsQuotaObserver(retryAuthCtx, route.provider, route.modelId),
             beforeDispatch: isCanonicalOpenAiForwardProvider(route.provider)
               ? createCodexReserveDispatchGuard(retryAuthCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined,
           }),
@@ -1659,7 +1738,7 @@ export function decodeRequestErrorResponse(err: unknown, label: string): Respons
     return formatErrorResponse(415, "invalid_request_error", err.message);
   }
   if (err instanceof DecompressedBodyTooLargeError) {
-    return formatErrorResponse(413, "invalid_request_error", err.message);
+    return formatErrorResponse(413, "inbound_body_too_large", describeInboundBodyRefusal(err));
   }
   console.warn(`[${label}] request body decode/parse failed: ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`);
   return formatErrorResponse(400, "invalid_request_error", "Invalid JSON body");
@@ -1708,6 +1787,10 @@ export interface ConsumedComboFailure {
 
 
 export interface HandleResponsesOptions {
+  /** Internal Claude replay identity; consumed only by the final canonical Go transport. */
+  claudeGoAffinity?: { sessionLane?: string };
+  /** Validated Claude metadata identity; projected only into final canonical attempt headers. */
+  claudeNativeSessionId?: string;
   /** Original live policy owner; separate from caller-specific routing/sidecar snapshots. */
   codexAuthPolicy?: CodexAuthPolicyConfig;
   turnAdmissionLease?: AdmissionLease;
@@ -1729,6 +1812,8 @@ export interface HandleResponsesOptions {
   onCodexAuthContextResolved?: (context: CodexAuthContext | undefined) => void;
   /** Internal deterministic seam for account-gated native fallback tests. */
   resolveCodexModelEntitlements?: typeof resolveCodexModelEntitlements;
+  /** Internal: validated final client-visible model, after completed terminal success only. */
+  onResponseComplete?: (model: string) => void;
   recordTerminalOutcomes?: boolean;
   setTerminalOutcomeRecorder?: (recorder: ((status: ResponsesTerminalStatus, httpStatusOverride?: number) => void) | undefined) => void;
   onNativePassthroughTerminal?: (status: ResponsesTerminalStatus) => void;
@@ -1757,9 +1842,19 @@ export interface HandleResponsesOptions {
   /**
    * Claude replay may add native-main auth so OpenAI sidecars remain available.
    * Strip only that internal credential when the final route is a noncanonical
-   * forward destination; final routing can differ from Claude's preflight route.
+   * forward/caller-auth destination; final routing can differ from Claude's preflight route.
    */
   stripClaudeMainAuthForNoncanonicalForward?: boolean;
+  /** In-memory credential proven by Claude's native-main turn claim; never persist or log. */
+  trustedClaudeMainAuth?: { authorization: string; chatgptAccountId?: string };
+  /** Sidecar-only auth captured before route changes; null means no usable original pair. */
+  openAiSidecarAuth?: ExplicitOpenAiCallerAuth | null;
+  /** Internal Chat bridge permission to obtain claimed stored auth only for a final Direct sidecar. */
+  allowStoredOpenAiSidecarAuth?: boolean;
+  /** Original caller-owned native pair; separate from any claimed sidecar enrichment. */
+  nativeCallerAuth?: ExplicitOpenAiCallerAuth | null;
+  /** Caller Direct credential under Direct\'s own predicate; restored only for the canonical OpenAI final route. */
+  callerDirectAuth?: CallerDirectAuth | null;
   /** Internal recursion guard; callers outside this module must not set it. */
   comboAttempt?: boolean;
   /** Internal combo handoff for one parent-validated continuation snapshot. */
@@ -1786,10 +1881,6 @@ export interface HandleResponsesOptions {
    * rebuilds headers and carries the fact through this flag.
    */
   visionDescribeTerminal?: boolean;
-  /** Synchronous callback invoked after each newly resolved route; must be pure and fast. */
-  onResolvedRoute?: (info: ResolvedRouteInfo) => void;
-  /** Privacy-safe, benchmark-only raw-usage observer. */
-  claudeBenchmarkObserver?: (observation: ClaudeBenchmarkRawUsage) => void;
 }
 
 
@@ -1933,36 +2024,59 @@ export function createChildPassthroughCallbackGate(options: HandleResponsesOptio
   let state: "pending" | "committed" | "discarded" = "pending";
   let pending: Pending | undefined;
   let accepted = false;
+  let pendingModel: string | undefined;
+  let completionAccepted = false;
+  let completionRejected = false;
   const publish = (value: Pending): void => {
     if (value.kind === "terminal") options.onNativePassthroughTerminal?.(value.status);
     else options.onNativePassthroughCancel?.();
   };
+  const publishCompletion = (): void => {
+    if (state !== "committed" || completionRejected || pendingModel === undefined) return;
+    const model = pendingModel;
+    pendingModel = undefined;
+    options.onResponseComplete?.(model);
+  };
   const receive = (value: Pending): void => {
     if (state === "discarded" || accepted) return;
     accepted = true;
+    if (value.kind === "cancel" || value.status !== "completed") {
+      completionRejected = true;
+      pendingModel = undefined;
+    }
     if (state === "committed") return publish(value);
     pending ??= value;
   };
   return {
     onTerminal: (status: ResponsesTerminalStatus) => receive({ kind: "terminal", status }),
     onCancel: () => receive({ kind: "cancel" }),
+    onResponseComplete: (model: string) => {
+      if (state === "discarded" || completionRejected || completionAccepted || !model.trim()) return;
+      completionAccepted = true;
+      pendingModel = model;
+      publishCompletion();
+    },
     commit: () => {
       if (state !== "pending") return;
       state = "committed";
       if (pending) publish(pending);
       pending = undefined;
+      publishCompletion();
     },
     discard: () => {
       state = "discarded";
       pending = undefined;
+      pendingModel = undefined;
     },
   };
 }
 
 
-
 export function buildComboChildHeaders(parentHeaders: HeadersInit): Headers {
   const childHeaders = new Headers(parentHeaders);
+  // A provisional caller credential is not authoritative for a Combo child.
+  childHeaders.delete("authorization");
+  childHeaders.delete("chatgpt-account-id");
   // Combo children re-serialize already-decoded JSON. Keeping transport metadata from
   // the parent would make the child decoder treat plain JSON as compressed bytes.
   childHeaders.delete("content-length");
@@ -2046,8 +2160,17 @@ function canPassThroughEncryptedV2AgentTask(
   ).adapter === "openai-responses";
 }
 
+/** Keep synthesized Claude identity out of request headers reused by policy/combo fallback. */
+function withClaudeNativeSession(headers: Headers, provider: OcxProviderConfig, sessionId?: string): Headers {
+  if (!sessionId || !isCanonicalOpenAiForwardProvider(provider)
+    || headers.has("session_id") || headers.has("session-id") || headers.has("thread-id")) return headers;
+  const forwarded = new Headers(headers);
+  forwarded.set("session_id", sessionId);
+  return forwarded;
+}
+
 type ResponsesAuthResolution =
-  | { ok: true; authCtx: CodexAuthContext; headers: Headers; substituteMainCredential: boolean }
+  | { ok: true; authCtx: CodexAuthContext; headers: Headers; callerAuthHeaders: Headers; substituteMainCredential: boolean }
   | { ok: false; response: Response };
 
 /**
@@ -2059,8 +2182,75 @@ async function resolveResponsesCodexAuth(
   config: OcxConfig,
   route: RouteResult,
   options: HandleResponsesOptions,
+  credentialDomainWasRewritten = false,
 ): Promise<ResponsesAuthResolution> {
   try {
+    const routeMayChangeCredentialDomain = options.comboAttempt === true
+      || route.routeKind === "policy"
+      || credentialDomainWasRewritten;
+    const trustedClaudeMainForFinalRoute = options.stripClaudeMainAuthForNoncanonicalForward === true
+      && isCanonicalOpenAiForwardProvider(route.provider)
+      ? options.trustedClaudeMainAuth : undefined;
+    let authInputHeaders = req.headers;
+    // Route-changing recursion retains typed admission, never an unscoped raw
+    // caller credential. Bearer admission is substituted or stripped below.
+    if (routeMayChangeCredentialDomain && options.admission?.source !== "bearer"
+      && !trustedClaudeMainForFinalRoute) {
+      authInputHeaders = new Headers(req.headers);
+      authInputHeaders.delete("authorization");
+      authInputHeaders.delete("chatgpt-account-id");
+    }
+    if (trustedClaudeMainForFinalRoute) {
+      authInputHeaders = new Headers(authInputHeaders);
+      authInputHeaders.set("authorization", trustedClaudeMainForFinalRoute.authorization);
+      if (trustedClaudeMainForFinalRoute.chatgptAccountId) {
+        authInputHeaders.set("chatgpt-account-id", trustedClaudeMainForFinalRoute.chatgptAccountId);
+      } else {
+        authInputHeaders.delete("chatgpt-account-id");
+      }
+    }
+    // A caller-auth transport that is not canonical OpenAI (keyless Cursor) consumes the
+    // caller's Authorization as its own upstream token. Keep that contract only for a clean
+    // single bearer with NO ChatGPT-domain marker. A bearer marked for the ChatGPT domain —
+    // whether its marker is valid or malformed/conflicting — a combined/malformed value, or
+    // the captured explicit OpenAI pair is never a Cursor token; a foreign JWT carrying only
+    // a generic organizations claim is not ChatGPT-marked and keeps the legacy contract.
+    // chatgpt-account-id has no meaning outside the ChatGPT domain.
+    if (!isCanonicalOpenAiForwardProvider(route.provider)
+      && providerConsumesCallerAuthorization(route.provider)) {
+      const rawAuth = authInputHeaders.get("authorization")?.trim();
+      const singleBearer = /^Bearer[\t ]+([^\s,]+)$/i.exec(rawAuth ?? "")?.[1];
+      const domainClaim = singleBearer ? inspectChatGptDomainClaim(singleBearer) : { kind: "absent" as const };
+      const dropBearer = options.nativeCallerAuth != null || domainClaim.kind !== "absent"
+        || (rawAuth !== undefined && singleBearer === undefined);
+      if (dropBearer || authInputHeaders.has("chatgpt-account-id")) {
+        const scoped = new Headers(authInputHeaders);
+        if (dropBearer) scoped.delete("authorization");
+        scoped.delete("chatgpt-account-id");
+        authInputHeaders = scoped;
+      }
+    }
+    // The caller's own Direct credential may cross an internal route change only to the
+    // canonical OpenAI transport, under a predicate deliberately STRICTER than plain
+    // unchanged-route Direct forwarding: a clean non-proxy bearer whose ChatGPT-domain
+    // marker is valid, with any explicit account header matching that marker. Unchanged
+    // routes keep their legacy rules; sidecar enrichment grants no primary authority.
+    if (options.callerDirectAuth && isCanonicalOpenAiForwardProvider(route.provider)) {
+      const directHeaders = new Headers({
+        authorization: options.callerDirectAuth.authorization,
+        ...(options.callerDirectAuth.chatgptAccountId
+          ? { "chatgpt-account-id": options.callerDirectAuth.chatgptAccountId } : {}),
+      });
+      if (captureCallerDirectAuth(directHeaders, config)) {
+        authInputHeaders = new Headers(authInputHeaders);
+        authInputHeaders.set("authorization", options.callerDirectAuth.authorization);
+        if (options.callerDirectAuth.chatgptAccountId) {
+          authInputHeaders.set("chatgpt-account-id", options.callerDirectAuth.chatgptAccountId);
+        } else {
+          authInputHeaders.delete("chatgpt-account-id");
+        }
+      }
+    }
     // #1686: a caller that proved admission with a BEARER presented one of our own secrets.
     // Refusing it here is what made the codex-cli `env_key` contract unusable against Direct.
     // Admitting it is only safe because the stored main credential is substituted below, so
@@ -2084,15 +2274,16 @@ async function resolveResponsesCodexAuth(
     // no-ChatGPT-login install keeps working.
     const substituteMainCredential = options.admission?.source === "bearer"
       && (route.codexAccountMode !== undefined || isCanonicalOpenAiForwardProvider(route.provider));
+    const stripAuthorization = options.admission?.source === "bearer" && !substituteMainCredential;
     const requestScopedMainCredential = route.codexAccountMode !== undefined
       && !substituteMainCredential
-      && hasForwardableCodexBearer(req.headers, config);
+      && hasForwardableCodexBearer(authInputHeaders, config);
     if (route.codexAccountMode === "direct" && !substituteMainCredential) {
-      validateForwardAdmissionCredential(req.headers, config);
+      validateForwardAdmissionCredential(authInputHeaders, config);
     }
     let authCtx: CodexAuthContext;
     if (route.codexAccountMode) {
-      authCtx = await resolveCodexAuthContext(req.headers, config, route.codexAccountMode, {
+      authCtx = await resolveCodexAuthContext(authInputHeaders, config, route.codexAccountMode, {
         admission: options.admission,
         codexAuthPolicy: options.codexAuthPolicy,
         accountId: route.codexAccountId,
@@ -2128,7 +2319,7 @@ async function resolveResponsesCodexAuth(
     // (custom-named canonical-forward providers must retain the same protection).
     const mainPolicyConfig = isCanonicalOpenAiForwardProvider(route.provider)
       ? options.codexAuthPolicy ?? config : undefined;
-    const headers = await materializeCodexUpstreamAuthAsync(req.headers, authCtx, {
+    const headers = await materializeCodexUpstreamAuthAsync(authInputHeaders, authCtx, {
       admission: options.admission,
       config: mainPolicyConfig,
       modelId: route.modelId,
@@ -2147,10 +2338,27 @@ async function resolveResponsesCodexAuth(
         response: formatErrorResponse(401, "authentication_error", "Selected Codex account needs reauthentication"),
       };
     }
+    if (stripAuthorization) {
+      headers.delete("authorization");
+      headers.delete("chatgpt-account-id");
+    }
+    if (providerConsumesCallerAuthorization(route.provider) && options.admission?.source !== undefined
+      && options.admission.source !== "loopback") {
+      validateForwardAdmissionCredential(headers, config);
+    } else {
+      // Even adapters that ignore caller auth must not retain a proxy secret for
+      // a later internal hop or a future transport change.
+      const bearer = headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
+      if (bearer && isProxyAdmissionSecret(bearer, config)) {
+        headers.delete("authorization");
+        headers.delete("chatgpt-account-id");
+      }
+    }
     return {
       ok: true,
       authCtx,
       headers,
+      callerAuthHeaders: new Headers(authInputHeaders),
       substituteMainCredential,
     };
   } catch (err) {
@@ -2184,6 +2392,50 @@ async function resolveResponsesCodexAuth(
  */
 function isTerminalPoolRefreshFailure(error: unknown): boolean {
   return error instanceof TokenRefreshError && (error.reason === "revoked" || error.reason === "expired");
+}
+
+/**
+ * The refusal an operator meets when a stored pool credential's forced refresh does not complete.
+ *
+ * A bare "retry this request" reads as a transient fault in the proxy, which is how #4212's
+ * reporter spent an afternoon concluding OpenCodex had broken while one of their own accounts was
+ * the thing that needed them. It stays a retryable 503 and stays non-quarantining, because the
+ * refresh genuinely may succeed and a token-endpoint 5xx must not retire a healthy account
+ * (#2887). What it adds is the account and the exit: when retrying stops helping, that account
+ * has to be signed in again.
+ *
+ * The label is a public account selector when the request carried one, otherwise the durable
+ * `p`-prefixed log label — never the raw pool id and never the email. Those are the identifiers
+ * `responses-compaction-routing.test.ts` and `codex-auth-context.test.ts` already assert must not
+ * reach an operator-facing surface, and an error body travels further than a log line, not less.
+ * When neither is resolvable the sentence degrades to "the selected Codex pool account" rather
+ * than naming something opaque, because a wrong name is worse than no name.
+ *
+ * The wording says "sign in to that account again" and deliberately does NOT say
+ * "reauthentication". `classifyError` runs `isAuthenticationMessage` before it reaches the
+ * `status === 503` arm, and that check is status-blind on the bare substring "authentication",
+ * which "reauthentication" contains. A body carrying that word is reclassified to
+ * `authentication_error` / `invalid_api_key` even though the HTTP status stays 503 — and Codex
+ * applies retry-after backoff only for `server_is_overloaded`, so the friendlier sentence would
+ * have quietly disabled the retry this refusal exists to ask for. `options.code` cannot buy the
+ * classification back; only the wording can.
+ */
+export function poolCredentialRefreshIncompleteResponse(args: {
+  authCtx: CodexAuthContext;
+  config: Pick<OcxConfig, "codexAccounts">;
+  accountSelector?: string;
+}): Response {
+  const label = args.accountSelector ?? codexAuthContextLogLabel(args.authCtx, args.config);
+  const account = label ? `Codex pool account ${label}` : "the selected Codex pool account";
+  const response = formatErrorResponse(
+    503,
+    "server_busy",
+    `Codex credential refresh did not complete for ${account}; retry this request. `
+      + "If it keeps failing, sign in to that account again.",
+  );
+  const headers = new Headers(response.headers);
+  headers.set("Retry-After", "1");
+  return new Response(response.body, { status: response.status, headers });
 }
 
 /**
@@ -2233,6 +2485,7 @@ async function refreshPoolForwardAuth(args: {
       accessToken: refreshed.accessToken,
       chatgptAccountId: refreshed.chatgptAccountId,
       generation: refreshed.generation,
+      poolQuotaWriter: capturePoolQuotaWriter(authCtx.accountId, refreshed),
     };
     const provider = applyCodexAuthContextToProvider(
       stripCodexRuntimeProviderFields(route.provider),
@@ -2256,14 +2509,15 @@ async function refreshPoolForwardAuth(args: {
         response: formatErrorResponse(401, "authentication_error", "Selected Codex account needs reauthentication"),
       };
     }
-    const response = formatErrorResponse(
-      503,
-      "server_busy",
-      "Codex credential refresh did not complete; retry this request",
-    );
-    const headers = new Headers(response.headers);
-    headers.set("Retry-After", "1");
-    return { ok: false, quarantine: false, response: new Response(response.body, { status: response.status, headers }) };
+    return {
+      ok: false,
+      quarantine: false,
+      response: poolCredentialRefreshIncompleteResponse({
+        authCtx,
+        config,
+        accountSelector: route.codexAccountNamespace,
+      }),
+    };
   }
 }
 
@@ -2350,6 +2604,7 @@ async function applyFinalRouteRequestNormalization(args: {
   logCtx: RequestLogContext;
   inboundWire: InboundWire;
   inboundTransport?: "websocket";
+  claudeGoAffinity?: HandleResponsesOptions["claudeGoAffinity"];
 }): Promise<void> {
   const { parsed, route, config, req, logCtx, inboundWire, inboundTransport } = args;
   const effortSelector = prepareEffortNormalization(parsed, route);
@@ -2378,8 +2633,21 @@ async function applyFinalRouteRequestNormalization(args: {
   // Settle the wire once so logging, fast-mode, auth, and sidecars read the adapter
   // this request will actually use (#404).
   route.provider = resolveOpenCodeGoTransport(route.provider,
-    sessionLaneIdFromRequest(req.headers) ?? normalizeLogConversationId(req.headers.get("x-opencode-session")));
+    args.claudeGoAffinity ? args.claudeGoAffinity.sessionLane : getOrAllocateRequestSessionLane(req));
   route.provider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire);
+  parsed._plaintextV2AgentMessages = shouldPreparePlaintextV2AgentMessages({
+    enabled: config.plaintextV2AgentMessages === true,
+    inboundWire,
+    canonicalChatGpt: isCanonicalOpenAiForwardProvider(route.provider),
+    requestBody: parsed._rawBody,
+  });
+  // Recompute from the original wire preference on every route, including fallback.
+  // A provider default never converts raw reasoning into a summary.
+  if (inboundWire === "responses" && parsed._rawBody) {
+    const summary = (parsed._rawBody as { reasoning?: { summary?: unknown } }).reasoning?.summary;
+    parsed.options.hideThinkingSummary = summary === "none"
+      || (!summary && route.provider.showThinkingSummary !== true);
+  }
   if (preserveAnthropicResponseModel) parsed._responseModelId = responseModelId;
   logCtx.model = route.modelId;
   logCtx.provider = route.providerName;
@@ -2391,20 +2659,6 @@ async function applyFinalRouteRequestNormalization(args: {
     parsed.stream = false;
     if (parsed._rawBody && typeof parsed._rawBody === "object") {
       (parsed._rawBody as Record<string, unknown>).stream = false;
-    }
-  }
-
-  // The private ChatGPT Codex Responses endpoint accepts only streaming
-  // requests, even when the downstream HTTP client asked for a unary JSON
-  // response. The caller preference was captured before this normalization;
-  // the passthrough response path drains this SSE back into bounded JSON.
-  if (
-    isCanonicalOpenAiForwardProvider(route.provider)
-    && route.provider.adapter === "openai-responses"
-  ) {
-    parsed.stream = true;
-    if (parsed._rawBody && typeof parsed._rawBody === "object") {
-      (parsed._rawBody as Record<string, unknown>).stream = true;
     }
   }
 
@@ -2479,7 +2733,6 @@ async function applyFinalRouteRequestNormalization(args: {
       subagentModels: config.subagentModels,
       subagentModelFallback: config.subagentModelFallback,
       injectionPrompt: config.injectionPrompt,
-      syncCodexSubagentDefaults: config.syncCodexSubagentDefaults === true,
     });
     if (guidance) {
       injectDeveloperMessage(parsed, guidance);
@@ -2505,8 +2758,8 @@ async function applyFinalRouteRequestNormalization(args: {
   {
     const { applyEffortCap, effortCapAppliesTo, supportedLadderFor } = await import("../effort-policy");
     const surface = collabSurface(parsed);
-    if (effortCapAppliesTo(surface, req.headers, config, parsed._compactionRequest === true, logCtx.agentKind)) {
-      const capped = applyEffortCap(parsed, req.headers, config, supportedLadderFor(route), logCtx.agentKind);
+    if (effortCapAppliesTo(surface, req.headers, config, parsed._compactionRequest === true)) {
+      const capped = applyEffortCap(parsed, req.headers, config, supportedLadderFor(route));
       if (capped) {
         logCtx.requestedEffort = `${capped.from}->${capped.to}`;
         if (isInjectionDebugEnabled()) {
@@ -2515,19 +2768,6 @@ async function applyFinalRouteRequestNormalization(args: {
       }
     } else if (isInjectionDebugEnabled() && (config.effortCap || config.subagentEffortCap)) {
       injectionDebugLog(`[opencodex] ${route.modelId}: effort cap skipped (surface=${surface ?? "none"}, v2 feature only)`);
-    }
-  }
-
-  {
-    const { sanitizeEffortForModel, supportedLadderFor } = await import("../effort-policy");
-    const previousEffort = parsed.options.reasoning;
-    const ladder = supportedLadderFor(route);
-    if (ladder !== undefined && ladder.length === 0 && previousEffort) {
-      sanitizeEffortForModel(parsed, ladder);
-      logCtx.requestedEffort = `${logCtx.requestedEffort ?? previousEffort}->none`;
-      if (isInjectionDebugEnabled()) {
-        injectionDebugLog(`[opencodex] ${route.modelId}: stripped reasoning effort for effortless model`);
-      }
     }
   }
 
@@ -2576,7 +2816,6 @@ export async function handleComboResponses(
   // continuation that only references prior images still fails closed when
   // imageInput is disabled (and so targets see the full replayed input).
   const inboundClientThreadId = req.headers.get("x-codex-parent-thread-id")?.trim() || undefined;
-  await prepareResponseStateReplay(rawBody);
   const body = expandPreviousResponseInput(rawBody, inboundClientThreadId);
   const scopeMismatch = previousResponseScopeMismatch(body);
   if (scopeMismatch) {
@@ -2746,12 +2985,15 @@ export async function handleComboResponses(
   logCtx.routeDecision = comboRouteDecisionTrace(config, comboId, pick, requestedModel);
 
   let lastFailure: Response | null = null;
+  // The exhausted-combo mapping below runs outside the loop, where `failure.upstreamCode`
+  // is gone, so carry the loop's own classification decision instead of re-deriving a
+  // weaker one from the status alone (#4149).
+  let lastFailureClassifiesOverflow = false;
   while (pick) {
     if (options.abortSignal?.aborted) return clientCancelledResponse();
     const childLog: RequestLogContext = {
       model: pick.target.model,
       provider: pick.target.provider,
-      ...(logCtx.agentKind ? { agentKind: logCtx.agentKind } : {}),
       ...(logCtx.conversationId ? { conversationId: logCtx.conversationId } : {}),
       ...(logCtx.surface ? { surface: logCtx.surface } : {}),
     };
@@ -2761,6 +3003,7 @@ export async function handleComboResponses(
       pick.target,
       comboDefaultEffort(config, comboId),
       supportedLadderFor({ provider: targetRoute.provider, modelId: targetRoute.modelId }),
+      combo.reasoningEffortMode,
     );
     const childHeaders = buildComboChildHeaders(req.headers);
     const childRequest = new Request(req.url, {
@@ -2768,6 +3011,7 @@ export async function handleComboResponses(
       headers: childHeaders,
       body: JSON.stringify(childBody),
     });
+    linkRequestSessionLane(req, childRequest);
     let resolvedAuth: CodexAuthContext | undefined;
     let terminalRecorder: ((status: ResponsesTerminalStatus, httpStatusOverride?: number) => void) | undefined;
     const started = Date.now();
@@ -2791,9 +3035,22 @@ export async function handleComboResponses(
       (logCtx.attempts ??= []).push(attempt);
       attemptRetained = true;
     };
+    const completedTarget = { provider: pick.target.provider, model: pick.target.model };
+    const writerGeneration = pick.writerGeneration;
     let consumedChildFailure: ConsumedComboFailure | undefined;
     const callbackGate = createChildPassthroughCallbackGate({
       ...options,
+      onResponseComplete: model => {
+        // The live config can change while the child is streaming. Never retain credentials.
+        const currentCombo = getCombo(config, comboId);
+        const provider = config.providers[completedTarget.provider];
+        if (Object.hasOwn(config.providers, completedTarget.provider)
+          && provider && provider.disabled !== true
+          && currentCombo?.targets.some(target => targetKey(target) === targetKey(completedTarget))) {
+          rememberComboForLane(sessionLaneIdFromRequest(req.headers), comboId, completedTarget, model, writerGeneration);
+        }
+        options.onResponseComplete?.(model);
+      },
       onNativePassthroughTerminal: status => {
         // A committed stream can acquire terminal metadata after preflight copied
         // the child log. Publish it before the outer logger finalizes, but only
@@ -2834,6 +3091,7 @@ export async function handleComboResponses(
         onStoredPool401ReplayDispatched: () => { storedPool401ReplayDispatched = true; },
         onNativePassthroughTerminal: callbackGate.onTerminal,
         onNativePassthroughCancel: callbackGate.onCancel,
+        onResponseComplete: callbackGate.onResponseComplete,
       });
     } catch (error) {
       callbackGate.discard();
@@ -2940,6 +3198,12 @@ export async function handleComboResponses(
     const failureDecision = comboFailureDecision(failure.response.status, failure.classificationText, {
       code: failure.upstreamCode,
     });
+    const wantsStream = (rawBody as { stream?: unknown } | null)?.stream === true;
+    // Local byte admission has its own diagnostic; do not relabel it as an upstream refusal.
+    const classifyOverflow = failure.response.status === 413
+      && (wantsStream || (failure.upstreamCode !== "outbound_body_too_large"
+        && failure.upstreamCode !== "translation_buffer_limit"));
+    lastFailureClassifiesOverflow = classifyOverflow;
     if (storedPool401ReplayDispatched) {
       if (failureDecision === "hop" && unreadableEncryptedAgentTask && !comboPayloadReadable) {
         const recoveredTarget = await pickWithWait({
@@ -2964,15 +3228,19 @@ export async function handleComboResponses(
       // Keep the spent Pool budget sticky even after a recovered routed child:
       // no later failure may reopen ordinary combo/native account hopping.
       adoptFailedChildLog(childLog);
+      if (classifyOverflow && failureDecision === "stop") {
+        return wantsStream
+          ? streamingContextOverflowResponse(requestedModel, options.translatorBudget)
+          : jsonContextOverflowResponse();
+      }
       return lastFailure;
     }
     if (failureDecision === "stop") {
       adoptFailedChildLog(childLog);
-      if (
-        failure.response.status === 413
-        && (rawBody as { stream?: unknown } | null)?.stream === true
-      ) {
-        return streamingContextOverflowResponse(requestedModel, options.translatorBudget);
+      if (classifyOverflow) {
+        return wantsStream
+          ? streamingContextOverflowResponse(requestedModel, options.translatorBudget)
+          : jsonContextOverflowResponse();
       }
       return lastFailure;
     }
@@ -3022,9 +3290,11 @@ export async function handleComboResponses(
   }
   if (
     lastFailure?.status === 413
-    && (rawBody as { stream?: unknown } | null)?.stream === true
+    && lastFailureClassifiesOverflow
   ) {
-    return streamingContextOverflowResponse(requestedModel, options.translatorBudget);
+    return (rawBody as { stream?: unknown } | null)?.stream === true
+      ? streamingContextOverflowResponse(requestedModel, options.translatorBudget)
+      : jsonContextOverflowResponse();
   }
   return lastFailure!;
 }
@@ -3138,6 +3408,12 @@ export async function handleResponses(
   try {
     const response = await handleResponsesInner(req, config, logCtx, {
       ...options,
+      openAiSidecarAuth: options.openAiSidecarAuth === undefined
+        ? captureExplicitOpenAiCallerAuth(req.headers, config) : options.openAiSidecarAuth,
+      nativeCallerAuth: options.nativeCallerAuth === undefined
+        ? captureExplicitOpenAiCallerAuth(req.headers, config) : options.nativeCallerAuth,
+      callerDirectAuth: options.callerDirectAuth === undefined
+        ? captureCallerDirectAuth(req.headers, config) : options.callerDirectAuth,
       // Capture before combo replay rebuilds the Request headers; children carry options.
       visionDescribeTerminal: options.visionDescribeTerminal === true
         || req.headers.get("x-opencodex-vision-describe") === "1",
@@ -3145,75 +3421,8 @@ export async function handleResponses(
     });
     return ownsBudget ? finalizeOwnedTranslatorBudget(response, translatorBudget) : response;
   } catch (error) {
-    if (error instanceof OcxRequestValidationError) {
-      const response = formatErrorResponse(error.status, "invalid_request_error", redactSecretString(error.message));
-      return ownsBudget ? finalizeOwnedTranslatorBudget(response, translatorBudget) : response;
-    }
     if (ownsBudget) translatorBudget.dispose();
     throw error;
-  }
-}
-
-export type ResolvedRouteInfo = {
-  parsed: OcxParsedRequest;
-  route: RouteResult;
-  provider: OcxProviderConfig;
-  modelId: string;
-  adapterName: string;
-  headers: Headers;
-};
-
-/** Benchmark-only observation passed to the optional raw-usage observer. */
-export interface ClaudeBenchmarkRawUsage {
-  adapterKind: string;
-  modelId: string;
-  usage: OcxUsage | undefined;
-}
-
-/** Invoke the benchmark observer at most once per attempt context (per registration). */
-function observeBenchmarkUsage(
-  observer: HandleResponsesOptions["claudeBenchmarkObserver"],
-  gate: { done: boolean },
-  adapterKind: string,
-  modelId: string,
-  usage: OcxUsage | undefined,
-): void {
-  if (!observer || gate.done) return;
-  gate.done = true;
-  const safeUsage = usage ? {
-    inputTokens: usage.inputTokens,
-    outputTokens: usage.outputTokens,
-    ...(usage.contextTotalTokens !== undefined ? { contextTotalTokens: usage.contextTotalTokens } : {}),
-    ...(usage.totalTokens !== undefined ? { totalTokens: usage.totalTokens } : {}),
-    ...(usage.cachedInputTokens !== undefined ? { cachedInputTokens: usage.cachedInputTokens } : {}),
-    ...(usage.cacheReadInputTokens !== undefined ? { cacheReadInputTokens: usage.cacheReadInputTokens } : {}),
-    ...(usage.cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens: usage.cacheCreationInputTokens } : {}),
-    ...(usage.reasoningOutputTokens !== undefined ? { reasoningOutputTokens: usage.reasoningOutputTokens } : {}),
-    ...(usage.estimated !== undefined ? { estimated: usage.estimated } : {}),
-  } : undefined;
-  try {
-    observer({ adapterKind, modelId, usage: safeUsage });
-  } catch {
-    // Benchmark-only seam: ordinary requests must be unaffected by the observer.
-  }
-}
-
-function maybeInvokeResolvedRoute(
-  options: HandleResponsesOptions,
-  parsed: OcxParsedRequest,
-  route: RouteResult,
-  provider: OcxProviderConfig,
-  adapterName: string,
-  headers: Headers,
-): void {
-  const callback = options.onResolvedRoute;
-  if (!callback) return;
-  try {
-    callback({ parsed, route, provider, modelId: route.modelId, adapterName, headers });
-  } catch (error) {
-    throw error instanceof OcxRequestValidationError
-      ? error
-      : new OcxRequestValidationError(redactSecretString(error instanceof Error ? error.message : String(error)));
   }
 }
 
@@ -3237,7 +3446,7 @@ async function handleResponsesInner(
   const agentTaskRecovery = agentTaskRecoveryConfig(config);
   let body: unknown;
   try {
-    body = await readJsonRequestBody(req, translatorBudget);
+    body = await readJsonRequestBody(req, translatorBudget, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));
   } catch (err) {
     if (options.abortSignal?.aborted || req.signal.aborted) {
       return clientCancelledResponse();
@@ -3273,6 +3482,47 @@ async function handleResponsesInner(
       effort: comboEffortRow.effort,
     };
   }
+  // Compaction may send the last client-visible bare model after a combo switch.
+  // Configured selectors take precedence; otherwise recall before combo dispatch (#3891).
+  if (!options.comboAttempt && body && typeof body === "object" && !Array.isArray(body)) {
+    const rawModel = (body as { model?: unknown }).model;
+    const rawInput = (body as { input?: unknown }).input;
+    const isCompactionTrigger = Array.isArray(rawInput)
+      && rawInput.some((item: unknown) =>
+        typeof item === "object" && item !== null && (item as { type?: string }).type === "compaction_trigger");
+    if (typeof rawModel === "string" && !rawModel.includes("/") && isCompactionTrigger
+      && !comboRows.fastRow && !comboEffortRow
+      && !resolveComboId(config, rawModel)) {
+      const recalledComboId = recallComboForLane(config, sessionLaneIdFromRequest(req.headers), rawModel);
+      if (recalledComboId) {
+        (body as Record<string, unknown>).model = `combo/${recalledComboId}`;
+      }
+    }
+  }
+  // A shadow-call replacement that names a COMBO is routing policy, not the identity of any
+  // one pick. The late intercept site below resolves it through routeModel/tryPickComboModel,
+  // which collapses the table to a single target while still tagging `routeKind: "combo"`, so
+  // the combo gate on the next line never fires, handleComboResponses never runs, and 429/5xx
+  // hops — which only exist inside that loop — are unreachable (#4129). Rewrite the selector
+  // here instead, before comboIdFromRawBody reads `model`, and identify the combo by CONFIG
+  // LOOKUP so the check can never observe a one-candidate collapse.
+  if (!options.comboAttempt && body && typeof body === "object" && !Array.isArray(body)) {
+    const shadowIntercept = config.shadowCallIntercept;
+    const rawShadowModel = (body as { model?: unknown }).model;
+    if (shadowIntercept?.enabled && shadowIntercept.model && typeof rawShadowModel === "string"
+      && isShadowSourceModel(rawShadowModel, shadowIntercept.sourceModels)) {
+      const shadowComboId = resolveComboId(config, shadowIntercept.model);
+      if (shadowComboId && Object.hasOwn(config.combos ?? {}, shadowComboId)) {
+        (body as Record<string, unknown>).model = shadowIntercept.model;
+        // Same rule as the late intercept site: record the operator-configured prefix that
+        // matched, never the caller's raw model string. Matching is by prefix, so the raw
+        // value is caller-controlled and reaches usage.jsonl and /api/logs.
+        logCtx.shadowCallRewrittenFrom = sanitizeLogMetadataString(
+          shadowSourceModelPrefix(rawShadowModel, shadowIntercept.sourceModels),
+        );
+      }
+    }
+  }
   const comboId = !options.comboAttempt ? comboIdFromRawBody(body, config) : null;
   if (comboId && Object.hasOwn(config.combos ?? {}, comboId)) {
     options.onRequestBodyRead?.();
@@ -3283,7 +3533,6 @@ async function handleResponsesInner(
       onRequestBodyRead: undefined,
     });
   }
-  await prepareResponseStateReplay(body);
   let unreadableEncryptedAgentTask = hasUnreadableEncryptedAgentTask(
     (body as { input?: unknown } | undefined)?.input,
   );
@@ -3394,16 +3643,9 @@ async function handleResponsesInner(
     return formatErrorResponse(400, "invalid_request_error", err instanceof Error ? err.message : String(err));
   }
   options.onRequestBodyRead?.();
-  let v2RoutedDelegationBridge: V2RoutedDelegationBridgeContext | undefined;
-  let v2BridgeStateDurability: ResponseStateDurability | undefined;
-  const responseStateOptions = (force = false): {
-    force?: boolean;
-    clientThreadId?: string;
-    durability?: ResponseStateDurability;
-  } => ({
+  const responseStateOptions = (force = false): { force?: boolean; clientThreadId?: string } => ({
     ...(force ? { force: true } : {}),
     ...(parsed._clientThreadId ? { clientThreadId: parsed._clientThreadId } : {}),
-    ...(v2BridgeStateDurability ? { durability: v2BridgeStateDurability } : {}),
   });
   const resolvedConversationId = conversationIdFromResponsesRequest({
     clientThreadId: parsed._clientThreadId,
@@ -3443,8 +3685,8 @@ async function handleResponsesInner(
   logCtx.configuredServiceTier = readConfiguredCodexServiceTier();
   logCtx.configuredSpeedLabel = requestLogSpeedLabel(logCtx.configuredServiceTier);
 
-  let shadowIntercepted = false;
   let route: RouteResult;
+  let credentialDomainWasRewritten = false;
   try {
     // A `compaction_trigger` turn may name a bare native model the operator has
     // no canonical OpenAI route for (#2901). Only the initial compaction route
@@ -3466,7 +3708,7 @@ async function handleResponsesInner(
       } catch { /* Native Codex helper calls remain OpenAI-owned without an enabled OpenAI route. */ }
       const targetRoute = resolveRoute(_sci.model);
       if (shouldInterceptShadowCall(parsed.modelId, _sci.sourceModels, sourceIdentity, targetRoute)) {
-        shadowIntercepted = true;
+        credentialDomainWasRewritten = true;
         const _sciOriginal = parsed.modelId;
         parsed.modelId = _sci.model;
         if (parsed._rawBody && typeof parsed._rawBody === "object") {
@@ -3500,41 +3742,18 @@ async function handleResponsesInner(
     return formatErrorResponse(404, "invalid_request_error", err instanceof Error ? err.message : String(err));
   }
 
-  const parentOverride = decideV2NativeParentOverride({
-    kind: "responses",
-    config,
-    headers: req.headers,
-    parsed,
-    sourceRoute: route,
-    comboAttempt: options.comboAttempt,
-    targetEvidence: evidenceFromBody(parsed._rawBody),
-  });
-  if (parentOverride.kind === "reject") {
-    if (parentOverride.trace) logCtx.routeDecision = parentOverride.trace as typeof logCtx.routeDecision;
-    return formatErrorResponse(404, "invalid_request_error", parentOverride.message);
-  }
-  if (parentOverride.kind === "override") {
-    route = parentOverride.route;
-    parsed.modelId = route.modelId;
-    if (parsed._rawBody && typeof parsed._rawBody === "object") {
-      (parsed._rawBody as { model?: string }).model = route.modelId;
-    }
-  }
-
   const hasUnexpandedPreviousResponse = !!parsed.previousResponseId
     && parsed._previousResponseInputExpanded !== true;
-  // Exact account selectors are isolated from Pool-wide quota work unless the effective spawn
-  // policy can overwrite them with an unqualified native Pool route. A canonical replay miss
-  // must also fail closed without polling quota upstream. Cached fallback state can still select
-  // a provider with native continuation support below.
-  const agentKind = logCtx.agentKind ?? classifyAgentKind(req.headers, "responses");
-  const threadSpawn = isThreadSpawnRequest(req.headers, agentKind);
-  const initialSubagentSelectionContext = threadSpawn && !options.comboAttempt
-    ? resolveSubagentSelectionContext(parsed, req.headers, config)
+  // Exact account selectors are isolated from Pool-wide quota work. A canonical replay miss must
+  // also fail closed without polling quota upstream. Cached fallback state can still select a
+  // provider with native continuation support below.
+  const threadSpawn = isThreadSpawnRequest(req.headers);
+  const initialSubagentFallbackChain = threadSpawn && !options.comboAttempt
+    ? resolveSubagentFallbackChain(parsed, config)
     : null;
   const previewSelectionAdmission = threadSpawn
     && !options.comboAttempt
-    && (route.codexAccountId === undefined || initialSubagentSelectionContext !== null)
+    && (route.codexAccountId === undefined || initialSubagentFallbackChain !== null)
     ? codexAccountSelectionForTurn(options.turnAdmissionLease)?.()
     : undefined;
   const nativeMainRecoveryBlocked = isNativeMainTrafficBlocked();
@@ -3555,10 +3774,7 @@ async function handleResponsesInner(
   try {
     if (
       threadSpawn
-      && (
-        route.codexAccountId === undefined
-        || subagentSelectionNeedsPoolQuotaPrime(initialSubagentSelectionContext, config)
-      )
+      && route.codexAccountId === undefined
       && !(hasUnexpandedPreviousResponse && isCanonicalOpenAiForwardProvider(route.provider))
     ) {
       await maybePrimeSubagentQuota(config, Date.now(), { nativeMainReadsForbidden });
@@ -3571,16 +3787,16 @@ async function handleResponsesInner(
   if (
     threadSpawn
     && !options.comboAttempt
-    && (route.codexAccountId === undefined || initialSubagentSelectionContext !== null)
+    && (route.codexAccountId === undefined || initialSubagentFallbackChain !== null)
   ) {
     // The final resolveCodexAuthContext binds under codexQuotaScopeForModel(route.modelId),
     // so the preview must read the same scope slot — an undefined scope would map to the
     // "legacy" affinity bucket and never find a binding made under "shared" or a native
     // model scope, making the preview diverge from the account that actually authenticates.
-    const selectionContext = initialSubagentSelectionContext;
+    const fallbackChain = initialSubagentFallbackChain;
     subagentFallbackModelEligibleAccountIdsForModel = await resolveSubagentFallbackModelEligibility({
       config,
-      fallbackChain: selectionContext?.chain ?? null,
+      fallbackChain,
       nativeMainReadsForbidden,
       resolver: options.resolveCodexModelEntitlements ?? resolveCodexModelEntitlements,
     });
@@ -3609,9 +3825,8 @@ async function handleResponsesInner(
       previewSelectionOptions,
       subagentFallbackAccountPreview,
       subagentFallbackModelEligibleAccountIdsForModel,
-      undefined,
+      fallbackChain,
       candidateRoute => canPassThroughEncryptedV2AgentTask(candidateRoute, inboundWire),
-      selectionContext,
     );
     if (fallback) {
       (logCtx as unknown as Record<string, unknown>).subagentModelFallbackFrom = fallback.from;
@@ -3625,6 +3840,7 @@ async function handleResponsesInner(
     if (fallback?.to && !slugsEquivalent(fallback.to, route.modelId)) {
       try {
         route = routeModel(config, fallback.to, evidenceFromBody(parsed._rawBody));
+        credentialDomainWasRewritten = true;
         logCtx.routeDecision = route.routeDecision;
       } catch (err) {
         if (err instanceof NoAvailableComboTargetsError) {
@@ -3644,10 +3860,19 @@ async function handleResponsesInner(
   let recoveryFailureReason: AgentTaskRecoveryFailureReason | undefined;
   // Native fallback and explicitly trusted direct Responses routes can consume ciphertext,
   // so recover only after final route selection.
+  //
+  // Deliberately NOT gated on `threadSpawn` (#4089). Switching a live thread from a native
+  // ChatGPT model to a routed provider replays a backend-minted encrypted agent message on every
+  // later turn, and a model switch is not a spawn, so the spawn requirement failed the thread
+  // closed permanently without ever attempting recovery. The trust boundary is
+  // `recoveryAdmission()` in ./agent-task-recovery -- Codex originator, live native ChatGPT
+  // bearer, matching chatgpt-account-id, no inbound API key, no proxy-admission secret -- which
+  // admits only the owner of the session that would be spent. `threadSpawn` narrowed which of
+  // that owner's own requests could use their own session; it kept nobody else out. The combo
+  // gate above keeps its spawn requirement: that path has its own native-target filtering and
+  // per-attempt failover, and the reported defect is on this path.
   if (
     inboundWire === "responses"
-    &&
-    threadSpawn
     && agentTaskRecovery
     && !isCanonicalOpenAiForwardProvider(route.provider)
     && !options.comboAttempt
@@ -3761,6 +3986,7 @@ async function handleResponsesInner(
           if (fallback?.to && !slugsEquivalent(fallback.to, route.modelId)) {
             try {
               route = routeModel(config, fallback.to, evidenceFromBody(parsed._rawBody));
+              credentialDomainWasRewritten = true;
               logCtx.routeDecision = route.routeDecision;
             } catch (err) {
               if (err instanceof NoAvailableComboTargetsError) {
@@ -3801,60 +4027,32 @@ async function handleResponsesInner(
   // The canonical ChatGPT backend rejects previous_response_id, so a local replay miss leaves no
   // safe way to recover the omitted history. Fail before auth, adapter construction, or upstream
   // I/O instead of stripping the id and silently forwarding a context-free delta (#702).
+  // Codex recognizes previous_response_not_found on WebSocket errors and reconnects with its
+  // full input. A generic invalid_request_error instead terminates the task after cache expiry.
   if (
     hasUnexpandedPreviousResponse
     && isCanonicalOpenAiForwardProvider(route.provider)
   ) {
     return formatErrorResponse(
       400,
-      "invalid_request_error",
-      "OpenAI forward continuation state is unavailable or expired; start a new session instead of reusing this previous_response_id.",
+      "previous_response_not_found",
+      "OpenAI forward continuation state is unavailable or expired; resend the full conversation without previous_response_id.",
     );
   }
 
-  // Child fallback and encrypted-task recovery can change both the parsed catalog and the
-  // destination. Arm the plaintext mirror only after that selection is final: eligible native
-  // children may then delegate to routed grandchildren without creating ChatGPT-only ciphertext,
-  // while routed fallbacks and non-spawn maintenance turns never see the private namespace.
-  const bridgeDecision = decideV2RoutedDelegationBridge({
-    enabled: config.v2RoutedDelegationBridge === true,
-    inboundWire,
-    multiAgentMode: config.multiAgentMode,
-    upstreamV2Enabled: isMultiAgentV2Enabled(),
-    canonicalNativeRoute: isCanonicalOpenAiForwardProvider(route.provider),
-    // `classifyAgentKind` incorporates both x-openai-subagent and the JSON
-    // x-codex-turn-metadata marker. Undefined is malformed/conflicting and fails closed.
-    hasSubagentMarker: agentKind !== "main",
-    threadSpawn,
-    comboAttempt: options.comboAttempt === true,
-    compaction: parsed._compactionRequest === true,
-    shadowRoute: shadowIntercepted,
-    collaborationSurface: collabSurface(parsed),
-    body: parsed._rawBody,
-    replayPrefixLength: previousResponseReplayPrefixLength(parsed._rawBody),
-  });
-  if (config.v2RoutedDelegationBridge === true) {
-    Object.assign(logCtx, {
-      v2BridgeDecision: bridgeDecision.decision,
-      ...(bridgeDecision.active ? { v2BridgeScope: bridgeDecision.scope } : {}),
-    });
-  }
-  if (bridgeDecision.active) {
-    try {
-      v2RoutedDelegationBridge = injectV2RoutedDelegationBridge(parsed);
-      if (v2RoutedDelegationBridge) {
-        copyPreviousResponseReplayProvenance(
-          parsed._rawBody,
-          v2RoutedDelegationBridge.requestStateBody,
-        );
-        v2BridgeStateDurability = await prepareSensitiveResponsePersistence(
-          v2RoutedDelegationBridge.requestStateBody,
-        );
-        Object.assign(logCtx, { v2BridgeStateDurability });
-        toolBridgeMaps = buildToolBridgeMaps(parsed, translatorBudget);
-      }
-    } catch (error) {
-      return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+  if (hasUnexpandedPreviousResponse) {
+    const continuationProvider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire);
+    // Stateless destinations cannot resolve the omitted prefix. Stateful destinations may,
+    // but a lowered custom result still needs its call to recover the original wire type.
+    // Native function/custom continuations without lowering keep their upstream-owned state.
+    if (continuationProvider.adapter === "openai-responses"
+      && (continuationProvider.statelessResponses === true
+        || hasUnmappedRoutedCustomToolOutput(parsed._rawBody, continuationProvider.supportsResponsesCustomTools))) {
+      return formatErrorResponse(
+        400,
+        "previous_response_not_found",
+        "Routed continuation requires unavailable local history; resend the full conversation without previous_response_id.",
+      );
     }
   }
 
@@ -3871,6 +4069,7 @@ async function handleResponsesInner(
     logCtx,
     inboundWire,
     inboundTransport: options.inboundTransport,
+    claudeGoAffinity: options.claudeGoAffinity,
   });
   // Attribute local auth/cooldown failures to the public selector too; exact auth may fail before
   // the normal post-resolution provider label is assigned.
@@ -3927,11 +4126,13 @@ async function handleResponsesInner(
   }
 
   let substituteMainCredential = false;
+  let callerAuthHeaders: Headers;
   {
-    const finalAuth = await resolveResponsesCodexAuth(req, config, route, options);
+    const finalAuth = await resolveResponsesCodexAuth(req, config, route, options, credentialDomainWasRewritten);
     if (!finalAuth.ok) return finalAuth.response;
     authCtx = finalAuth.authCtx;
-    selectedForwardHeaders = finalAuth.headers;
+    selectedForwardHeaders = withClaudeNativeSession(finalAuth.headers, route.provider, options.claudeNativeSessionId);
+    callerAuthHeaders = withClaudeNativeSession(finalAuth.callerAuthHeaders, route.provider, options.claudeNativeSessionId);
     substituteMainCredential = finalAuth.substituteMainCredential;
   }
 
@@ -3952,30 +4153,17 @@ async function handleResponsesInner(
 
   // OAuth providers: swap in a fresh access token (auto-refreshed) as the Bearer key, so the
   // existing openai-chat / anthropic adapters authenticate with no change.
-  const isAntigravityOAuth = isAntigravityOAuthProvider(route.providerName, route.provider);
-  if (route.providerName === "google-antigravity") {
-    const antigravityConfigError = antigravityOAuthDestinationConfigError(route.providerName, route.provider);
-    if (antigravityConfigError) {
-      return formatErrorResponse(400, "invalid_request_error", antigravityConfigError);
-    }
-  }
-  const isOAuth401ReplayProvider = isAntigravityOAuth
-    || ((route.providerName === "xai" || route.providerName === "github-copilot" || route.providerName === "kiro" || route.providerName === "cursor" || route.providerName === "orcarouter-oauth")
-      && route.provider.authMode === "oauth");
+  const isOAuth401ReplayProvider = (
+    route.providerName === "xai"
+    || route.providerName === "github-copilot"
+    || route.providerName === "kiro"
+    || route.providerName === "google-antigravity"
+    || route.providerName === "orcarouter-oauth"
+  ) && route.provider.authMode === "oauth";
   let sentOAuthSnapshot: OAuthAccessSnapshot | undefined;
   let replayOAuthCredentialSnapshot: Pick<OAuthAccessSnapshot, "accountId" | "generation"> | undefined;
   let anthropicPoolAccountId: string | null = null;
   let anthropicPoolFailovers = 0;
-  let antigravityAccountId: string | null = null;
-  let antigravitySessionKey: string | null = null;
-  let antigravity429RetryAttempted = false;
-  const observeAntigravityProviderError = isAntigravityOAuth
-    ? (error: { code?: string; status?: number; message?: string }) => {
-        if (antigravityAccountId) recordAntigravitySyntheticFailure(antigravityAccountId, error);
-      }
-    : undefined;
-  let cursorPoolAccountId: string | null = null;
-  let cursorPoolFailovers = 0;
   // Generic OAuth rotation (#2568) for providers with no pool of their own. Bound to the account
   // the request actually used, so a concurrent rotation cannot cool an innocent replacement.
   let genericFailoverAccountId: string | null = null;
@@ -3996,7 +4184,6 @@ async function handleResponsesInner(
   const invalidateSameTargetRequest = (): void => { transportToken += 1; };
   type DispatchBinding =
     | { kind: "oauth"; selection: NonNullable<typeof oauthSelection>; snapshot: OAuthAccessSnapshot }
-    | { kind: "azure-identity"; provider: OcxProviderConfig }
     | { kind: "api-key"; provider: OcxProviderConfig };
   const requestBindings = new WeakMap<AdapterRequest, DispatchBinding>();
   const adapterBindings = new WeakMap<ProviderAdapter, DispatchBinding>();
@@ -4054,10 +4241,6 @@ async function handleResponsesInner(
     const admitted = await commitResolvedOAuthSelection(candidate);
     if (!admitted) throw new Error("OAuth selection changed during credential recovery");
     genericFailoverAccountId = admitted.accountId;
-    if (isAntigravityOAuth) {
-      antigravityAccountId = admitted.accountId;
-      bindAntigravitySessionAffinity(antigravitySessionKey, admitted.accountId);
-    }
     stampOAuthAccountLabel(logCtx, route.providerName, route.provider, admitted.accountId);
     return admitted;
   };
@@ -4126,10 +4309,6 @@ async function handleResponsesInner(
     } else {
       genericFailoverAccountId = snapshot.accountId;
     }
-    if (isAntigravityOAuth) {
-      antigravityAccountId = snapshot.accountId;
-      bindAntigravitySessionAffinity(antigravitySessionKey, snapshot.accountId);
-    }
     sentOAuthSnapshot = snapshot;
     replayOAuthCredentialSnapshot = { accountId: snapshot.accountId, generation: snapshot.generation };
     return true;
@@ -4138,11 +4317,6 @@ async function handleResponsesInner(
     if (route.provider.authMode === "forward") return true;
     if (!binding) return false;
     if (binding.kind === "api-key") return providerApiKeySelectionIsCurrent(config, route.providerName, binding.provider);
-    if (binding.kind === "azure-identity") {
-      const current = config.providers[route.providerName];
-      return !!current && !current.disabled && isAzureIdentityProvider(current)
-        && JSON.stringify(current) === JSON.stringify(binding.provider);
-    }
     const selected = captureOAuthAccountSelection(route.providerName);
     const row = getAccountCredentialWithStatus(route.providerName, binding.snapshot.accountId);
     return selected?.accountId === binding.selection.accountId && selected?.revision === binding.selection.revision
@@ -4150,17 +4324,13 @@ async function handleResponsesInner(
       && credentialGeneration(row.credential) === binding.snapshot.generation;
   };
   const resolveSelectionAdapter = (provider: OcxProviderConfig, retention = config.cacheRetention): ProviderAdapter => {
-    const resolved = resolveAdapter(provider, retention);
+    const resolved = resolveAdapter(provider, retention, route.providerName);
     if (route.provider.authMode === "forward") return resolved;
-    const binding: DispatchBinding | undefined = isAzureIdentityProvider(provider)
-      ? config.providers[route.providerName]
-        ? { kind: "azure-identity", provider: structuredClone(config.providers[route.providerName]!) }
+    const binding: DispatchBinding | undefined = route.provider.authMode === "oauth"
+      ? oauthSelection && servingOAuthSnapshot
+        ? { kind: "oauth", selection: { ...oauthSelection }, snapshot: servingOAuthSnapshot }
         : undefined
-      : route.provider.authMode === "oauth"
-        ? oauthSelection && servingOAuthSnapshot
-          ? { kind: "oauth", selection: { ...oauthSelection }, snapshot: servingOAuthSnapshot }
-          : undefined
-        : { kind: "api-key", provider: { ...route.provider } };
+      : { kind: "api-key", provider: { ...route.provider } };
     if (binding) adapterBindings.set(resolved, binding);
     const build = resolved.buildRequest.bind(resolved);
     resolved.buildRequest = async (requestParsed, incoming) => {
@@ -4180,12 +4350,6 @@ async function handleResponsesInner(
       if (!servingOAuthSnapshot || !await applyFailoverSnapshot(servingOAuthSnapshot, requestParsed)) {
         throw new Error("OAuth account selection changed before dispatch");
       }
-    } else if (isAzureIdentityProvider(config.providers[route.providerName] ?? route.provider)) {
-      const current = config.providers[route.providerName];
-      if (!current || current.disabled || !isAzureIdentityProvider(current)) {
-        throw new Error("Azure identity selection is unavailable before dispatch");
-      }
-      route.provider = routedProviderConfig(route.providerName, structuredClone(current));
     } else {
       const current = resolveCurrentProviderApiKeyTransport(config, route.providerName, route.provider);
       if (!current) throw new Error("API key selection is unavailable before dispatch");
@@ -4258,7 +4422,8 @@ async function handleResponsesInner(
           const ownsBearer = snapshot !== undefined
             && sentHeaders?.get("authorization") === `Bearer ${snapshot.accessToken}`
             && !sentHeaders?.has("x-api-key");
-          const response = await fetchImpl(destination, dispatchInit);
+          // Reselection can choose a provider override instead of the supplied executor.
+          const response = await fetchImpl(destination, { ...dispatchInit, redirect: "manual" });
           // Observe each physical response before retries replace it. The binding belongs to
           // this dispatch, so a manual switch cannot file A's headers against B. Header
           // overrides and credential replacement make ownership unprovable: skip those writes.
@@ -4302,26 +4467,16 @@ async function handleResponsesInner(
       throw new Error("OAuth account selection changed repeatedly before dispatch");
     };
   };
-  const oauthSessionKeyParts = {
-    sessionIdHeader: sessionIdHeaderFromRequest(req.headers),
-    threadIdHeader: req.headers.get("thread-id"),
-    promptCacheKey: typeof parsed.options.promptCacheKey === "string" ? parsed.options.promptCacheKey : null,
-    clientThreadId: typeof parsed._clientThreadId === "string" ? parsed._clientThreadId : null,
-    promptCacheKeyIsSharedCohort: options.promptCacheKeyIsSharedCohort === true,
-  };
   const anthropicSessionKey = route.providerName === "anthropic" && route.provider.authMode === "oauth"
-    ? anthropicSessionKeyFromParts(oauthSessionKeyParts)
-    : null;
-  if (isAntigravityOAuth) {
-    antigravitySessionKey = antigravitySessionKeyFromParts(oauthSessionKeyParts);
-  }
-  const cursorSessionKey = route.providerName === "cursor"
-    && route.provider.authMode === "oauth"
-    ? cursorSessionKeyFromParts({
+    ? anthropicSessionKeyFromParts({
+      sessionIdHeader: sessionIdHeaderFromRequest(req.headers),
+      threadIdHeader: req.headers.get("thread-id"),
+      promptCacheKey: typeof parsed.options.promptCacheKey === "string" ? parsed.options.promptCacheKey : null,
       clientThreadId: typeof parsed._clientThreadId === "string" ? parsed._clientThreadId : null,
+      promptCacheKeyIsSharedCohort: options.promptCacheKeyIsSharedCohort === true,
     })
     : null;
-  if (route.provider.authMode === "oauth" || isAntigravityOAuth) {
+  if (route.provider.authMode === "oauth") {
     try {
       if (route.providerName === "anthropic" && isAnthropicAccountPoolEnabled(config)) {
         const selection = resolveAnthropicAccountForSession(anthropicSessionKey, config);
@@ -4342,43 +4497,6 @@ async function handleResponsesInner(
         anthropicPoolAccountId = admitted.accountId;
         route.provider = { ...route.provider, apiKey: admitted.accessToken };
         logCtx.provider = formatAnthropicProviderForLog("anthropic", admitted.accountId, config);
-      } else if (
-        route.providerName === "cursor"
-        && route.provider.authMode === "oauth"
-        && isCursorAccountPoolActive(config)
-      ) {
-        const selection = resolveCursorAccountForSession(cursorSessionKey, config);
-        if (!selection.accountId) {
-          if (selection.reason === "all-cooled") {
-            return formatErrorResponse(
-              429,
-              "rate_limit_error",
-              "All Cursor OAuth accounts are temporarily rate-limited",
-            );
-          }
-          return formatErrorResponse(401, "authentication_error", "No eligible Cursor OAuth account available");
-        }
-        let resolved = await getValidAccessTokenSnapshot("cursor");
-        if (selection.accountId !== resolved.accountId) {
-          const accessToken = await getValidAccessTokenForAccount("cursor", selection.accountId);
-          resolved = { ...resolved, accountId: selection.accountId, accessToken };
-        }
-        const admitted = await commitResolvedOAuthSelection(resolved, true);
-        if (!admitted) return formatErrorResponse(409, "conflict_error", "OAuth account selection changed; retry the request");
-        resolved = admitted;
-        cursorPoolAccountId = selection.accountId;
-        parsed._cursorIdentityScope = selection.accountId;
-        bindCursorSessionAffinity(cursorSessionKey, selection.accountId);
-        replayOAuthCredentialSnapshot = {
-          accountId: resolved.accountId,
-          generation: resolved.generation,
-        };
-        if (isOAuth401ReplayProvider) sentOAuthSnapshot = resolved;
-        route.provider = { ...route.provider, apiKey: resolved.accessToken };
-        logCtx.provider = formatCursorProviderForLog("cursor", selection.accountId);
-        if (selection.accountId) {
-          logCtx.accountLogLabel = selection.accountId;
-        }
       } else {
         // Prefer the account with known headroom BEFORE the first attempt. Rotation alone
         // only reacts to a 429, so a turn could open on an account a previous probe already
@@ -4394,25 +4512,7 @@ async function handleResponsesInner(
         // with this same bearer, exactly as it does for the active account.
         let usedPreferredAccount = preferredAccountId !== null;
         let resolved: OAuthAccessSnapshot;
-        if (isAntigravityOAuth) {
-          const selection = resolveAntigravityAccountForSession(antigravitySessionKey);
-          if (!selection.accountId) {
-            return formatErrorResponse(401, "authentication_error", "Selected Antigravity OAuth account is unavailable");
-          }
-          if (selection.cooldownUntil !== undefined) {
-            const retryAfter = Math.max(1, Math.ceil((selection.cooldownUntil - Date.now()) / 1000));
-            if (selection.cooldownKind === "geoblock") {
-              return formatErrorResponse(403, "permission_error", "Selected Antigravity OAuth account is in local cooldown after upstream location block");
-            }
-            return formatErrorResponse(429, "rate_limit_error", "Selected Antigravity OAuth account is in local cooldown after upstream rate limit", { retryAfter: String(retryAfter) });
-          }
-          if (selection.reason === "active-needs-reauth") {
-            return formatErrorResponse(401, "authentication_error", "Selected Antigravity OAuth account needs reauthentication");
-          }
-          antigravityAccountId = selection.accountId;
-          resolved = await getValidAccessSnapshotForAccount(route.providerName, selection.accountId, { requireUsableAccount: true });
-          bindAntigravitySessionAffinity(antigravitySessionKey, selection.accountId);
-        } else if (preferredAccountId) {
+        if (preferredAccountId) {
           try {
             // `requireUsableAccount` makes a removed OR reauth-flagged account throw from
             // inside the resolver's own store read. Without it a revoked account resolves
@@ -4463,6 +4563,10 @@ async function handleResponsesInner(
         // whichever account is active by the time the response comes back (#2568).
         if (isGenericFailoverProvider(route.providerName, route.provider)) {
           genericFailoverAccountId = resolved.accountId;
+          // Advance the pool cursor only now that this account is actually admitted. The
+          // helper returns immediately unless the kernel is on AND the strategy is
+          // round-robin, so quota and fill-first pools reach it without being touched.
+          noteGenericPoolSelection(config, route.providerName, resolved.accountId);
         }
         // Anthropic is excluded from isGenericFailoverProvider -- its own pool owns affinity and
         // a fail-closed local-cli credential rule -- so without this stamp its identity is
@@ -4484,13 +4588,7 @@ async function handleResponsesInner(
         // Project identity belongs to the admitted account on EVERY request, including
         // the request after a pool transition made that account the persisted active one.
         if (route.provider.googleMode === "cloud-code-assist") {
-          if (isAntigravityOAuth) {
-            if (!resolved.projectId) {
-              return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(new Error("Antigravity account project is unavailable")));
-            }
-          } else if (!resolved.projectId) {
-            return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(new Error("Cloud Code Assist account project is unavailable")));
-          }
+          if (!resolved.projectId) return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(new Error("Cloud Code Assist account project is unavailable")));
           route.provider = { ...route.provider, project: resolved.projectId };
         }
       }
@@ -4506,6 +4604,26 @@ async function handleResponsesInner(
       return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(err));
     }
   }
+  // Key-auth twin of the OAuth preference above: pick a warm key BEFORE the first attempt when
+  // the committed one is already cooling, instead of spending the request earning a 429 the
+  // runtime could already predict. The picker refuses to override a healthy committed key and
+  // returns null without a configured strategy, so an ordinary install evaluates one predicate.
+  //
+  // It RETURNS a rebuilt route rather than mutating one, and the assignment has to land here --
+  // ahead of the transport pin below, the adapterProvider copy that follows it, and the request
+  // the HTTP path bakes later. The image bridge and web search read route.provider directly and
+  // have no stale-selection re-read to save them, so ordering is the whole correctness argument.
+  //
+  // The Transport variant, not the bare picker: the picker answers with the PERSISTED row, and
+  // a built-in provider stored in its valid minimal form would lose the adapter id, base URL
+  // and static headers registry backfill supplies, throwing `Unknown adapter: undefined`.
+  const proactiveKeyProvider = selectProactiveApiKeyTransport(
+    config,
+    route.providerName,
+    route.provider,
+    parsed.options.promptCacheKey,
+  );
+  if (proactiveKeyProvider) route.provider = proactiveKeyProvider;
   route.provider = resolveProviderTransport(
     route.providerName,
     route.provider,
@@ -4516,9 +4634,9 @@ async function handleResponsesInner(
   );
   let adapterProvider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire);
   const stripClaudeMainAuth = options.stripClaudeMainAuthForNoncanonicalForward === true
-    && adapterProvider.adapter === "openai-responses"
-    && adapterProvider.authMode === "forward"
-    && !isCanonicalOpenAiForwardProvider(adapterProvider);
+    && !isCanonicalOpenAiForwardProvider(adapterProvider)
+    && ((adapterProvider.adapter === "openai-responses" && adapterProvider.authMode === "forward")
+      || providerConsumesCallerAuthorization(adapterProvider));
   if (stripClaudeMainAuth) {
     releaseCodexAuthContextProbeLease(authCtx);
     authCtx = { kind: "main", accountId: null };
@@ -4534,26 +4652,6 @@ async function handleResponsesInner(
     delete logCtx.accountLogLabel;
   }
   adapter = resolveSelectionAdapter(adapterProvider, config.cacheRetention);
-  maybeInvokeResolvedRoute(options, parsed, route, adapterProvider, adapter.name, selectedForwardHeaders);
-  const googleOptionsError = googleProviderOptionsRouteError(parsed, {
-    providerName: route.providerName,
-    provider: adapterProvider,
-    adapterName: adapter.name,
-  });
-  if (googleOptionsError) return formatErrorResponse(400, "invalid_request_error", googleOptionsError);
-  const assertGoogleOptionsRoute = (
-    candidate: Pick<ProviderAdapter, "name" | "validateRequest">,
-    provider: OcxProviderConfig,
-    requestParsed: OcxParsedRequest = parsed,
-  ): void => {
-    const message = googleProviderOptionsRouteError(requestParsed, {
-      providerName: route.providerName,
-      provider,
-      adapterName: candidate.name,
-    });
-    if (message) throw new OcxRequestValidationError(message);
-    if (requestParsed.options.providerOptions?.google) candidate.validateRequest?.(requestParsed);
-  };
   bindRouteReasoningReplayScope({
     parsed,
     providerName: route.providerName,
@@ -4567,12 +4665,6 @@ async function handleResponsesInner(
     logCtx.conversationId = normalizeLogConversationId(parsed._cursorConversationId);
   }
   logCtx.providerAdapter = adapter.name;
-  try {
-    assertGoogleOptionsRoute(adapter, adapterProvider);
-    adapter.validateRequest?.(parsed);
-  } catch (err) {
-    return formatErrorResponse(400, "invalid_request_error", redactSecretString(err instanceof Error ? err.message : String(err)));
-  }
   // Ordinary requests receive one durable attempt only after their final initial
   // adapter is resolved. Combo children own their attempt and retries keep it.
   if (!options.comboAttempt && !logCtx.activeAttempt) {
@@ -4606,23 +4698,6 @@ async function handleResponsesInner(
     );
     if (passiveSubjectId) logCtx.activeAttempt.labRouteSubjectId = passiveSubjectId;
   }
-  const diagnosticRequestId = isDebugEnabled() ? randomUUID() : undefined;
-  const adapterDiagnosticState: BridgeDiagnosticSequence = { value: 0 };
-  const diagnosticContext: BridgeDiagnosticContext | undefined = diagnosticRequestId
-    ? { requestId: diagnosticRequestId, adapterName: adapter.name, sequence: adapterDiagnosticState }
-    : undefined;
-  const noteDiagnosticAttempt = (
-    attempt: RequestLogContext["activeAttempt"],
-    inputEstimate: number | undefined,
-    recovery?: AttemptRecoveryKind,
-    adapterName?: string,
-  ): void => {
-    noteAttemptSend(attempt, inputEstimate, recovery);
-    if (!diagnosticContext) return;
-    diagnosticContext.attempt = attempt?.ordinal;
-    diagnosticContext.recovery = recovery;
-    if (adapterName) diagnosticContext.adapterName = adapterName;
-  };
   const isPassthrough = "passthrough" in adapter && !!adapter.passthrough;
 
   const rawInput = (parsed._rawBody as { input?: unknown }).input;
@@ -4645,13 +4720,43 @@ async function handleResponsesInner(
   }
 
   let openAiSidecar: ResolvedOpenAiForwardSidecar | undefined;
-  const needsOpenAiVision = shouldResolveOpenAiVisionSidecar(config, route.provider, route.modelId, parsed);
-  const needsOpenAiSearch = shouldResolveOpenAiWebSearchSidecar(config, parsed, isPassthrough);
+  const visionDescribeTerminal = options.visionDescribeTerminal === true;
+  const routedCompaction = parsed._compactionRequest === true
+    && !isCanonicalOpenAiForwardProvider(route.provider);
+  const needsOpenAiVision = !visionDescribeTerminal
+    && shouldResolveOpenAiVisionSidecar(config, route.provider, route.modelId, parsed);
+  const needsOpenAiSearch = !routedCompaction && !adapter.runTurn
+    && shouldResolveOpenAiWebSearchSidecar(config, parsed, isPassthrough);
   if (needsOpenAiVision || needsOpenAiSearch) {
     try {
+      const candidates = listOpenAiForwardSidecarCandidates(config);
+      let sidecarAuth = options.openAiSidecarAuth;
+      if (!sidecarAuth && options.allowStoredOpenAiSidecarAuth === true
+        && route.codexAccountId === undefined
+        && candidates.some(candidate => candidate.accountMode === "direct")
+        && tryClaimStoredSidecarMainProfile(options.turnAdmissionLease)) {
+        // Request-local helper authority only: never promote this pair to caller, primary,
+        // or retry credentials. Claim before reading so profile switches remain fenced.
+        try {
+          const { getMainAccountToken } = await import("../../codex/main-account");
+          const token = getMainAccountToken();
+          if (token) sidecarAuth = captureExplicitOpenAiCallerAuth(new Headers({
+            authorization: `Bearer ${token.accessToken}`, "chatgpt-account-id": token.chatgptAccountId,
+          }), config);
+        } catch { /* stored enrichment is optional */ }
+      }
+      // Preserve explicit OpenAI helper auth across route changes without returning it to
+      // primary-provider headers or alternate-main retry. The resolver revalidates scope.
+      const sidecarHeaders = new Headers(req.headers);
+      sidecarHeaders.delete("authorization");
+      sidecarHeaders.delete("chatgpt-account-id");
+      if (sidecarAuth) {
+        sidecarHeaders.set("authorization", sidecarAuth.authorization);
+        sidecarHeaders.set("chatgpt-account-id", sidecarAuth.chatgptAccountId);
+      }
       openAiSidecar = await resolveFirstUsableOpenAiSidecar(
-        listOpenAiForwardSidecarCandidates(config),
-        req.headers,
+        candidates,
+        sidecarHeaders,
         config,
         {
           admission: options.admission,
@@ -4685,7 +4790,6 @@ async function handleResponsesInner(
   // call must never plan another describe. The flag arrives from the Chat
   // surface (whose bridge rebuilds headers) or as the raw header for native
   // Responses callers. Marked + text-only routed model → strip, depth cap 1.
-  const visionDescribeTerminal = options.visionDescribeTerminal === true;
   const visionPlan = visionDescribeTerminal
     ? undefined
     : planVisionSidecar(config, route.provider, route.modelId, parsed, openAiSidecar, {
@@ -4708,6 +4812,17 @@ async function handleResponsesInner(
   }
 
   const recordTerminalOutcomes = options.recordTerminalOutcomes !== false;
+  let responseCompletionNotified = false;
+  let responseCompletionCancelled = false;
+  const cancelResponseCompletion = (): void => { responseCompletionCancelled = true; };
+  const notifyResponseComplete = (response: { status?: unknown; model?: unknown }): void => {
+    if (responseCompletionNotified || responseCompletionCancelled
+      || options.abortSignal?.aborted || req.signal.aborted
+      || response.status !== "completed"
+      || typeof response.model !== "string" || !response.model.trim()) return;
+    responseCompletionNotified = true;
+    options.onResponseComplete?.(response.model);
+  };
 
   const continuationStateForResponse = (
     emitted?: OcxProviderContinuationState,
@@ -4736,10 +4851,16 @@ async function handleResponsesInner(
   // `compaction_trigger` item — only the canonical ChatGPT backend speaks that
   // contract. An API-key gateway would receive the trigger, answer with an ordinary
   // message, and leave Codex fataling on a missing compaction item (#422).
-  const routedCompaction = parsed._compactionRequest === true
-    && !isCanonicalOpenAiForwardProvider(route.provider);
-  const commitReasoningReplayServingRoute = (): void => {
+  const commitReasoningReplayServingRoute = (outboundHeaders?: HeadersInit): void => {
     commitReasoningReplayServingIdentity(parsed._reasoningReplayScope);
+    // History has no model namespace. Record the account that actually accepted this
+    // final attempt, after refresh/failover, rather than guessing from mutable affinity.
+    // Recording is relay state. With the feature off there is no relay, so building an owner
+    // registry for it is out of scope for this request.
+    if (outboundHeaders && isCanonicalOpenAiForwardProvider(route.provider) && contextRelayActivated()) {
+      recordContextSessionOwner(resolveContextPrincipal(req, config, options.admission), req.headers,
+        route.provider.baseUrl, authCtx, new Headers(outboundHeaders), substituteMainCredential);
+    }
   };
   if (routedCompaction) {
     delete parsed.context.tools;
@@ -4760,14 +4881,23 @@ async function handleResponsesInner(
   }
 
   let routedNamespaceToolAliases: RoutedNamespaceToolAliases = new Map();
-  const refreshRoutedNamespaceToolAliases = (builtRequest: AdapterRequest): void => {
+  let plaintextV2AgentMessageToolNames: ReadonlySet<string> = new Set();
+  let plaintextV2AgentMessageAliasedToolNames: ReadonlySet<string> = new Set();
+  let routedMuseToolNameAliases: MuseToolNameAliases = new Map();
+  const refreshRequestToolAliases = (builtRequest: AdapterRequest): void => {
     routedNamespaceToolAliases = builtRequest.convertedRoutedNamespaceToolAliases ?? new Map();
+    plaintextV2AgentMessageToolNames = builtRequest.plaintextV2AgentMessageToolNames ?? new Set();
+    plaintextV2AgentMessageAliasedToolNames = builtRequest.plaintextV2AgentMessageAliasedToolNames ?? new Set();
+    routedMuseToolNameAliases = builtRequest.convertedMuseToolNameAliases ?? new Map();
   };
 
   if ("passthrough" in adapter && adapter.passthrough && !routedCompaction) {
     let hostAdmissionLease = pendingHostAdmissionLease;
     pendingHostAdmissionLease = null;
     try {
+    const codexSafetyBufferingOptions = isCanonicalOpenAiForwardProvider(route.provider)
+      ? codexSafetyBufferingFilterOptions(config)
+      : undefined;
     const imageGenCallAliases = route.provider.authMode === "forward"
       ? new Map<string, { namespace: string; name: string }>()
       : imageGenToolCallAliases(toolBridgeMaps.toolNsMap, parsed._rawBody, translatorBudget);
@@ -4787,12 +4917,7 @@ async function handleResponsesInner(
       && (!parsed.previousResponseId || parsed._previousResponseInputExpanded === true);
     const rememberPassthroughResponse = passthroughRecordEligible
       ? (response: { id?: unknown; output?: unknown; status?: unknown }) =>
-        rememberResponseState(
-          v2RoutedDelegationBridge?.requestStateBody ?? parsed._rawBody,
-          response,
-          undefined,
-          responseStateOptions(true),
-        )
+        rememberResponseState(parsed._rawBody, response, undefined, responseStateOptions(true))
       : undefined;
     if (parsed.previousResponseId && !parsed._previousResponseInputExpanded) {
       console.warn(
@@ -4814,6 +4939,7 @@ async function handleResponsesInner(
     );
     const clientExplicitWireToolCatalog = hasExplicitWireToolCatalog(clientToolAuthorizationBody);
     const clientDeclaredWireToolNames = collectDeclaredWireToolNames(clientToolAuthorizationBody);
+    const clientDeclaredBareWireToolNames = collectDeclaredBareWireToolNames(clientToolAuthorizationBody);
     const clientDeclaredNamelessCallTypes = collectDeclaredNamelessClientCallTypes(
       clientToolAuthorizationBody,
     );
@@ -4825,11 +4951,7 @@ async function handleResponsesInner(
     const providerExecutedCallTypes = new Set<ProviderExecutedCallType>();
     let request: Awaited<ReturnType<typeof adapter.buildRequest>>;
     try {
-      request = await adapter.buildRequest(parsed, {
-        headers: selectedForwardHeaders,
-        translatorBudget,
-        ...(observeAntigravityProviderError ? { onProviderError: observeAntigravityProviderError } : {}),
-      });
+      request = await adapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
     } catch (error) {
       releaseCodexAuthContextProbeLease(authCtx);
       // A tool catalog this proxy cannot lower onto one wire namespace is a client input error, and
@@ -4846,17 +4968,19 @@ async function handleResponsesInner(
     const functionRepairSchemas = isCanonicalOpenAiForwardProvider(route.provider)
       ? new Map()
       : collectFunctionCallRepairSchemas(clientToolAuthorizationBody);
-    for (const name of request.convertedRoutedCustomToolNames ?? []) {
-      if (
-        toolBridgeMaps.freeformToolNames.has(name)
-        || toolBridgeMaps.toolNsMap.get(name)?.freeform === true
-      ) routedCustomToolNames.add(name);
-    }
-    for (const name of request.routedCustomToolRepairNames ?? []) {
-      if (
-        toolBridgeMaps.freeformToolNames.has(name)
-        || toolBridgeMaps.toolNsMap.get(name)?.freeform === true
-      ) routedCustomToolRepairNames.add(name);
+    if (!isCanonicalOpenAiForwardProvider(route.provider)) {
+      for (const name of request.convertedRoutedCustomToolNames ?? []) {
+        if (
+          toolBridgeMaps.freeformToolNames.has(name)
+          || toolBridgeMaps.toolNsMap.get(name)?.freeform === true
+        ) routedCustomToolNames.add(name);
+      }
+      for (const name of request.routedCustomToolRepairNames ?? []) {
+        if (
+          toolBridgeMaps.freeformToolNames.has(name)
+          || toolBridgeMaps.toolNsMap.get(name)?.freeform === true
+        ) routedCustomToolRepairNames.add(name);
+      }
     }
     for (const name of request.convertedRoutedToolSearchNames ?? []) {
       // The adapter already keeps this set empty when tool_choice forbids the private search.
@@ -4864,7 +4988,7 @@ async function handleResponsesInner(
       // would incorrectly disable restoration for the exact ambiguous-name case the alias fixes.
       routedToolSearchNames.add(name);
     }
-    refreshRoutedNamespaceToolAliases(request);
+    refreshRequestToolAliases(request);
     // #1700: the bridged paths refuse a call to a tool the request never declared
     // (`declaredToolNames`, src/bridge.ts). The passthrough had no equivalent, so a routed
     // provider's top-level `apply_patch` — which under Codex code mode exists only as a nested
@@ -4891,6 +5015,7 @@ async function handleResponsesInner(
     };
     let outboundRequestBody: Record<string, unknown> | undefined;
     const declaredWireToolNames = new Set<string>();
+    const declaredBareWireToolNames = new Set<string>();
     const declaredNamelessClientCallTypes = new Set<string>();
     // `buildToolBridgeMaps` creates a bare alias only when the caller selected exactly one
     // namespaced tool through a bare tool_choice. Restore that request-bounded identity before
@@ -4940,12 +5065,17 @@ async function handleResponsesInner(
       // aliases are authoritative. A continuation's outbound body still contains historical
       // catalogs (and may promote historical tool-search definitions), so it can never widen the
       // current caller snapshot captured above.
+      declaredBareWireToolNames.clear();
       if (replayedInputPrefixLength === 0) {
         for (const name of collectDeclaredWireToolNames(outboundRequestBody)) {
           declaredWireToolNames.add(name);
         }
+        for (const name of collectDeclaredBareWireToolNames(outboundRequestBody)) {
+          declaredBareWireToolNames.add(name);
+        }
       }
       for (const name of clientDeclaredWireToolNames) declaredWireToolNames.add(name);
+      for (const name of clientDeclaredBareWireToolNames) declaredBareWireToolNames.add(name);
       declaredNamelessClientCallTypes.clear();
       if (replayedInputPrefixLength === 0) {
         for (const callType of collectDeclaredNamelessClientCallTypes(outboundRequestBody)) {
@@ -4964,7 +5094,7 @@ async function handleResponsesInner(
           // `buildToolBridgeMaps` also aliases a namespaced tool under its bare name when the
           // caller's `tool_choice` selected it unambiguously, which the bridge needs to route the
           // call back. For `exec` alone that alias would also switch on nested-helper
-          // normalization and re-authorize `exec_command`/`shell_command`/`apply_patch`, so it is
+          // normalization and re-authorize `exec_command`/`shell_command`/`apply_patch`/`view_image`, so it is
           // admitted here only when the caller's own catalog declared a bare `exec`. Selecting an
           // MCP `exec` is not a declaration of the code-mode shell tool.
           if (
@@ -4992,9 +5122,26 @@ async function handleResponsesInner(
     // check sees nothing undeclared, and the refused turn enters continuation state anyway. So the
     // rejection is sticky for the whole turn, set from every parsed payload on the inspection side.
     let inspectionSawUndeclaredTool = false;
+    let inspectedTerminal: ResponsesTerminalStatus | null = null;
+    let inspectedCompletionSeen = false;
+    let firstTerminalAllowsRecall = false;
     const passiveQuotaObserved = hasPassiveAccountQuota(route.providerName)
       && route.provider.authMode === "oauth";
     const noteInspectedPayload = (payload: unknown) => {
+      // First terminal stays authoritative even in metadata-only inspection, which
+      // intentionally continues parsing after a failed/incomplete terminal.
+      const terminal = terminalStatusFromParsed(payload);
+      if (inspectedTerminal === null && terminal !== null) {
+        inspectedTerminal = terminal;
+        // The client boundary accepts a terminal by event type, even without a
+        // response object. Such a terminal must permanently decline recall.
+        if (terminal === "completed" && payload && typeof payload === "object"
+          && "response" in payload && payload.response && typeof payload.response === "object"
+          && !Array.isArray(payload.response) && "model" in payload.response) {
+          firstTerminalAllowsRecall = typeof payload.response.model === "string"
+            && payload.response.model.trim().length > 0;
+        }
+      }
       // Meta reports subscription usage ONLY as an in-stream event; there is no endpoint
       // to poll (003 §E probed 17 paths, all 404). Observed here rather than behind a
       // dedicated inspector handler because onParsedPayload already reaches every
@@ -5013,48 +5160,90 @@ async function handleResponsesInner(
           recordPassiveAccountQuota(route.providerName, servingAccountId, quota, passiveQuotaWriterGeneration);
         }
       }
-      if (isAntigravityOAuth && antigravityAccountId) {
-        recordAntigravitySyntheticFailure(antigravityAccountId, payload);
-      }
       // Gated on the same flag as the guard itself: with no readable catalog (or a forward-auth
       // provider) every name looks undeclared, and flipping this would stop recording continuation
       // state for exactly the passthrough traffic the guard deliberately stands down for.
-      if (!undeclaredToolGuardActive || inspectionSawUndeclaredTool) return;
-      if (undeclaredToolCallName(
-        restoreAuthorizedBareNamespaceToolCalls(payload),
+      if (undeclaredToolGuardActive && !inspectionSawUndeclaredTool && undeclaredToolCallName(
+        restoreAuthorizedBareNamespaceToolCalls(
+          restoreMuseToolNames(payload, routedMuseToolNameAliases).value,
+        ),
         declaredWireToolNames,
         declaredNamelessClientCallTypes,
         providerExecutedCallTypes,
+        declaredBareWireToolNames,
       ) !== undefined) {
         inspectionSawUndeclaredTool = true;
       }
-    };
-    const rememberPassthroughResponseChecked = rememberPassthroughResponse
-      ? (response: { id?: unknown; output?: unknown; status?: unknown }) => {
-        if (inspectionSawUndeclaredTool) return;
-        const restored = restoreRoutedCustomCalls(
-          restoreAuthorizedBareNamespaceToolCalls(restoreRoutedNamespaceCalls(response, routedNamespaceToolAliases).value),
-          routedCustomToolNames,
-          routedCustomToolRepairNames,
-          declaredWireToolNames,
-        ).value;
-        const restoredResponse = (functionRepairSchemas.size > 0
-          ? JSON.parse(normalizeFunctionCompletionJson(JSON.stringify(restored)))
-          : restored) as { id?: unknown; output?: unknown; status?: unknown };
-        if (
-          undeclaredToolGuardActive
-          && undeclaredToolCallNameInResponse(
-            restoredResponse,
-            declaredWireToolNames,
-            declaredNamelessClientCallTypes,
-            providerExecutedCallTypes,
-          ) !== undefined
-        ) {
-          return;
-        }
-        rememberPassthroughResponse(restoredResponse);
+      // The snapshot callback opts the inspector into output reconstruction. Compaction
+      // has no continuation cache, so use the parsed terminal here without adding retention.
+      if (plaintextV2AgentMessageToolNames.size === 0 && !rememberPassthroughResponse && payload && typeof payload === "object"
+        && "type" in payload && payload.type === "response.completed"
+        && "response" in payload && payload.response && typeof payload.response === "object"
+        && !Array.isArray(payload.response)) {
+        rememberPassthroughResponseChecked(payload.response as Record<string, unknown>);
       }
-      : undefined;
+    };
+    const rememberPassthroughResponseChecked = (
+      response: { id?: unknown; output?: unknown; status?: unknown; model?: unknown },
+    ) => {
+      if (inspectionSawUndeclaredTool) return;
+      const restored = restoreRoutedCustomCalls(
+        restoreAuthorizedBareNamespaceToolCalls(
+          restoreRoutedNamespaceCalls(
+            restoreMuseToolNames(response, routedMuseToolNameAliases).value,
+            routedNamespaceToolAliases,
+          ).value,
+        ),
+        routedCustomToolNames,
+        routedCustomToolRepairNames,
+        declaredWireToolNames,
+      ).value;
+      const normalizedResponse = (functionRepairSchemas.size > 0
+        ? JSON.parse(normalizeFunctionCompletionJson(JSON.stringify(restored)))
+        : restored) as { id?: unknown; output?: unknown; status?: unknown };
+      const plaintextRestore = restorePlaintextV2AgentMessageCalls(
+        normalizedResponse, plaintextV2AgentMessageToolNames, plaintextV2AgentMessageAliasedToolNames,
+      );
+      if (plaintextRestore.overflowed) return;
+      const restoredResponse = plaintextRestore.value as typeof normalizedResponse;
+      // Replay overlap compares the items the client echoes, including visible reasoning shape.
+      const replayResponse = restoredResponse;
+      if (
+        undeclaredToolGuardActive
+        && undeclaredToolCallNameInResponse(
+          restoredResponse,
+          declaredWireToolNames,
+          declaredNamelessClientCallTypes,
+          providerExecutedCallTypes,
+          declaredBareWireToolNames,
+        ) !== undefined
+      ) {
+        return;
+      }
+      const normalizedReplayResponse = (undeclaredToolGuardActive
+        ? normalizeDefaultNamespaceInResponse(
+            replayResponse,
+            declaredWireToolNames,
+            declaredBareWireToolNames,
+          ).value
+        : replayResponse) as typeof replayResponse;
+      rememberPassthroughResponse?.(normalizedReplayResponse);
+      const firstCompletion = !inspectedCompletionSeen;
+      inspectedCompletionSeen = true;
+      if (firstCompletion && (inspectedTerminal === null || firstTerminalAllowsRecall)) {
+        // A model-less first completion permanently declines recall; later terminal
+        // frames are hidden by the client boundary and cannot supply its identity.
+        // Native inspection sees the pre-rewrite model. Only an actual terminal
+        // model can seed recall; an absent model never falls back to the pick.
+        if (typeof response.model === "string" && response.model.trim()) {
+          notifyResponseComplete({
+            status: response.status,
+            model: parsed._responseModelId !== undefined && parsed._responseModelId !== parsed.modelId
+              ? parsed._responseModelId : response.model,
+          });
+        }
+      }
+    };
     recordAdapterReasoning(logCtx, request);
     recordAdapterTier(logCtx, request);
     const actualHostKey = upstreamHostHealthKey(
@@ -5094,6 +5283,22 @@ async function handleResponsesInner(
         resetUpstreamHostHealth(actualHostKey);
       }
       hostAdmissionLease = null;
+    };
+    /**
+     * #4191: a Codex WS exchange pins its content-free stage record on the
+     * Response it resolves (markCodexWsStage). Adopting the record here, at
+     * the single funnel every physical upstream response passes through,
+     * binds it to the attempt that actually served it — including the 502/504
+     * pre-response JSON settles that never reach the SSE relay.
+     */
+    const adoptCodexWsStage = (response: Response): void => {
+      const stage = readCodexWsStage(response);
+      if (stage && logCtx.activeAttempt) logCtx.activeAttempt.codexWsStage = stage;
+    };
+    const adoptObservedResponse = <T extends Response>(response: T): T => {
+      settleObservedHostResponse();
+      adoptCodexWsStage(response);
+      return response;
     };
     let passthroughEstimate = typeof request.usageLog?.inputTokens === "number"
       ? request.usageLog.inputTokens
@@ -5219,17 +5424,14 @@ async function handleResponsesInner(
               dispatchOverride: oauthDispatch(request),
               providerName: route.providerName,
               modelId: route.modelId,
-              onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider),
+              onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider, route.modelId),
               beforeDispatch: isCanonicalOpenAiForwardProvider(route.provider)
                 ? createCodexReserveDispatchGuard(authCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined,
             }),
             route.provider.authMode === "forward")
             // Every real attempt response — including an intermediate 5xx the
             // retry wrapper replaces — proves the host was reached (#914 review).
-            .then(res => {
-              settleObservedHostResponse();
-              return res;
-            });
+            .then(adoptObservedResponse);
         },
         { abortSignal: upstream.signal, label: safeHostLabel(request.url) },
       );
@@ -5240,8 +5442,13 @@ async function handleResponsesInner(
     }
 
     const opaqueBlobRecoveryGuard: OpaqueBlobRecoveryGuard = { attempted: false };
+    // At most one reasoning-effort downgrade per request.
+    const reasoningEffortDowngradeGuard: { attempted: boolean } = { attempted: false };
     let oauth401ReplayAttempted = false;
     let codex401ReplayKind: "main" | "stored" | null = null;
+    // Console Go answers a transient 400 "Invalid upload request." for bodies it accepts
+    // moments later; at most one byte-identical replay is allowed per request.
+    const consoleGoUploadRetryGuard: { attempted: boolean } = { attempted: false };
     const rateLimitPolicy = rateLimitRetryPolicyFor(route.provider);
     let rateLimitRetries = 0;
     const rebuildAndRefetch = async (
@@ -5256,12 +5463,13 @@ async function handleResponsesInner(
         return { failed: formatErrorResponse(502, "upstream_error", "Recovery changed the provider wire unexpectedly") };
       }
       try {
-        request = await retryAdapter.buildRequest(parsed, {
-          headers: selectedForwardHeaders,
-          translatorBudget,
-          ...(observeAntigravityProviderError ? { onProviderError: observeAntigravityProviderError } : {}),
-        });
-        refreshRoutedNamespaceToolAliases(request);
+        if (recovery !== "console-go-upload-retry") {
+          request = await retryAdapter.buildRequest(parsed, {
+            headers: selectedForwardHeaders,
+            translatorBudget,
+          });
+        }
+        refreshRequestToolAliases(request);
         recordAdapterReasoning(logCtx, request);
         recordAdapterTier(logCtx, request);
       } catch (err) {
@@ -5298,15 +5506,12 @@ async function handleResponsesInner(
               dispatchOverride: oauthDispatch(request),
                 providerName: route.providerName,
                 modelId: route.modelId,
-                onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider),
+                onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider, route.modelId),
                 beforeDispatch: isCanonicalOpenAiForwardProvider(route.provider)
                   ? createCodexReserveDispatchGuard(authCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined,
               }),
               route.provider.authMode === "forward")
-              .then(response => {
-                settleObservedHostResponse();
-                return response;
-              });
+              .then(adoptObservedResponse);
           },
           { abortSignal: upstream.signal, label: safeHostLabel(request.url) },
         );
@@ -5353,7 +5558,7 @@ async function handleResponsesInner(
       }
       authCtx = replay.authCtx;
       route.provider = replay.provider;
-      selectedForwardHeaders = replay.headers;
+      selectedForwardHeaders = withClaudeNativeSession(replay.headers, replay.provider, options.claudeNativeSessionId);
       const replayAdapter = resolveSelectionAdapter(
         resolveWireProtocolOverride(route.providerName, route.modelId, replay.provider, inboundWire),
         config.cacheRetention,
@@ -5377,9 +5582,8 @@ async function handleResponsesInner(
         request = await replayAdapter.buildRequest(parsed, {
           headers: selectedForwardHeaders,
           translatorBudget,
-          ...(observeAntigravityProviderError ? { onProviderError: observeAntigravityProviderError } : {}),
         });
-        refreshRoutedNamespaceToolAliases(request);
+        refreshRequestToolAliases(request);
         recordAdapterReasoning(logCtx, request);
         recordAdapterTier(logCtx, request);
         refreshUndeclaredToolGuard(request);
@@ -5405,17 +5609,14 @@ async function handleResponsesInner(
               dispatchOverride: oauthDispatch(request),
               providerName: route.providerName,
               modelId: route.modelId,
-              onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider),
+              onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider, route.modelId),
               beforeDispatch: isCanonicalOpenAiForwardProvider(route.provider)
                 ? createCodexReserveDispatchGuard(authCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined,
             }),
             codex401ReplayKind === "stored" ? options.onStoredPool401ReplayDispatched : undefined,
           ),
           route.provider.authMode === "forward",
-        ).then(response => {
-          settleObservedHostResponse();
-          return response;
-        });
+        ).then(adoptObservedResponse);
       } catch (err) {
         return transportFailureResponse(err);
       } finally {
@@ -5446,21 +5647,10 @@ async function handleResponsesInner(
         releaseCodexAuthContextProbeLease(authCtx);
         return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(err));
       }
-      if (isAntigravityOAuth && refreshed.accountId !== antigravityAccountId) {
-        upstream.abort();
-        releaseCodexAuthContextProbeLease(authCtx);
-        return formatErrorResponse(401, "authentication_error", "Antigravity OAuth account changed during refresh");
-      }
       if (route.provider.googleMode === "cloud-code-assist" && !refreshed.projectId) {
         upstream.abort();
         releaseCodexAuthContextProbeLease(authCtx);
-        return formatErrorResponse(
-          401,
-          "authentication_error",
-          isAntigravityOAuth
-            ? "Antigravity project unavailable — re-run `ocx login google-antigravity`"
-            : publicOAuthAuthenticationErrorMessage(new Error("Cloud Code Assist project is required")),
-        );
+        return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(new Error("Cloud Code Assist project is required")));
       }
       sentOAuthSnapshot = refreshed;
       replayOAuthCredentialSnapshot = {
@@ -5510,9 +5700,8 @@ async function handleResponsesInner(
         request = await refreshedAdapter.buildRequest(parsed, {
           headers: selectedForwardHeaders,
           translatorBudget,
-          ...(observeAntigravityProviderError ? { onProviderError: observeAntigravityProviderError } : {}),
         });
-        refreshRoutedNamespaceToolAliases(request);
+        refreshRequestToolAliases(request);
         recordAdapterReasoning(logCtx, request);
         recordAdapterTier(logCtx, request);
       } catch (err) {
@@ -5537,15 +5726,12 @@ async function handleResponsesInner(
               dispatchOverride: oauthDispatch(request),
                 providerName: route.providerName,
                 modelId: route.modelId,
-                onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider),
+                onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider, route.modelId),
                 beforeDispatch: isCanonicalOpenAiForwardProvider(route.provider)
                   ? createCodexReserveDispatchGuard(authCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined,
               }),
               route.provider.authMode === "forward")
-              .then(res => {
-                settleObservedHostResponse();
-                return res;
-              });
+              .then(adoptObservedResponse);
           },
           { abortSignal: upstream.signal, label: safeHostLabel(request.url) },
         );
@@ -5637,15 +5823,12 @@ async function handleResponsesInner(
               dispatchOverride: oauthDispatch(request),
                 providerName: route.providerName,
                 modelId: route.modelId,
-                onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider),
+                onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider, route.modelId),
                 beforeDispatch: isCanonicalOpenAiForwardProvider(route.provider)
                   ? createCodexReserveDispatchGuard(authCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined,
               }),
               route.provider.authMode === "forward")
-              .then(res => {
-                settleObservedHostResponse();
-                return res;
-              });
+              .then(adoptObservedResponse);
           },
           { abortSignal: upstream.signal, label: safeHostLabel(request.url) },
         );
@@ -5693,6 +5876,10 @@ async function handleResponsesInner(
         // ChatGPT sometimes wraps quota exhaustion in a generic 5xx. Normalize only
         // body-confirmed cases to quota evidence so cooldown and rotation both apply.
         poolRetryOutcome = upstreamResponse.status >= 500 ? 429 : upstreamResponse.status;
+      } else if (!authCtx.fixedAccount && shouldRetryCodexPoolAccountTransient(upstreamResponse)) {
+        // A plain transient 5xx the same-account retry layer could not absorb. Keep the real
+        // status so it records as transient rather than quota.
+        poolRetryOutcome = upstreamResponse.status;
       }
 
       if (poolRetryOutcome !== undefined) {
@@ -5705,7 +5892,7 @@ async function handleResponsesInner(
         // justify because this flag already produced the identical result.
         const storedReplaySpent = codex401ReplayKind === "stored";
         const retry = await retryCodexPoolOnAlternateAccount({
-          req,
+          callerAuthHeaders,
           config,
           route,
           parsed,
@@ -5720,6 +5907,7 @@ async function handleResponsesInner(
           passthroughEstimate,
           stream: parsed.stream,
           onResponse: (response, retryAuthCtx, retryRequest) => {
+            adoptCodexWsStage(response);
             captureAffinityResponse(
               response,
               retryAuthCtx,
@@ -5735,7 +5923,7 @@ async function handleResponsesInner(
         if (retry.kind === "retried") {
           authCtx = retry.authCtx;
           request = retry.request;
-          refreshRoutedNamespaceToolAliases(request);
+          refreshRequestToolAliases(request);
           refreshUndeclaredToolGuard(request);
           upstreamResponse = retry.upstreamResponse;
           selectedForwardHeaders = retry.selectedForwardHeaders;
@@ -5803,9 +5991,68 @@ async function handleResponsesInner(
         logCtx.terminalIncompleteReason = preflightLog.terminalIncompleteReason;
       }
     }
+    // Console Go (opencode-zen / opencode-go) intermittently rejects a body it accepts seconds
+    // later with 400 invalid_request_error / "Invalid upload request." Replay the byte-identical
+    // request once after the exact gateway rejection. Single-shot guard.
+    // This recovery reuses the captured request; other recovery kinds still rebuild.
+    if (!consoleGoUploadRetryGuard.attempted) {
+      const uploadRejectionBody = await consoleGoUploadRejectionBody(
+        upstreamResponse,
+        consoleGoUploadRetryGuard.attempted,
+        upstream.signal,
+      );
+      if (uploadRejectionBody !== undefined
+        && isTransientConsoleGoUploadRejection({
+          status: upstreamResponse.status,
+          errorBody: uploadRejectionBody,
+          outboundUrl: request.url,
+        })) {
+        consoleGoUploadRetryGuard.attempted = true;
+        try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
+        if (!upstream.signal.aborted) {
+          try {
+            await sleepWithAbort(CONSOLE_GO_UPLOAD_RETRY_DELAY_MS, upstream.signal);
+          } catch { return clientCancelledResponse(); }
+        }
+        if (upstream.signal.aborted) return clientCancelledResponse();
+        const result = await rebuildAndRefetch("console-go-upload-retry");
+        if ("failed" in result) return result.failed;
+        upstreamResponse = result;
+        continue passthroughRecovery;
+      }
+    }
+    // Reasoning-effort downgrade: a rung the catalog still advertises can be refused upstream --
+    // the metadata records the model's ladder, not this account's entitlement (a Muse Code
+    // subscription gates max on muse-spark-1.3-contributor, for example). Learn the refusal so
+    // later turns clamp before dispatch, then replay once at the next lower published rung
+    // instead of failing the turn; requestedEffort/effectiveEffort keep both values in usage.
+    if (!reasoningEffortDowngradeGuard.attempted) {
+      const rejectionText = await reasoningEffortRejectionText(
+        upstreamResponse,
+        reasoningEffortDowngradeGuard.attempted,
+        upstream.signal,
+      );
+      const downgrade = rejectionText === undefined
+        ? undefined
+        : planReasoningEffortDowngrade({
+            provider: route.provider,
+            modelId: parsed.modelId,
+            requested: parsed.options.reasoning,
+            rejectionText,
+          });
+      if (downgrade) {
+        reasoningEffortDowngradeGuard.attempted = true;
+        parsed.options.reasoning = downgrade.effort;
+        try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
+        const result = await rebuildAndRefetch("reasoning-effort-downgrade");
+        if ("failed" in result) return result.failed;
+        upstreamResponse = result;
+        continue passthroughRecovery;
+      }
+    }
     break;
     }
-    const headers = sanitizePassthroughHeaders(upstreamResponse.headers);
+    const headers = sanitizePassthroughHeaders(upstreamResponse.headers, codexSafetyBufferingOptions);
     const resolvedModel = headers.get("openai-model")?.trim();
     if (resolvedModel && !logCtx.preserveResolvedModelFromRoute) logCtx.resolvedModel = resolvedModel;
     if (isUsageDebugEnabled()) {
@@ -5815,8 +6062,8 @@ async function handleResponsesInner(
     // The chatgpt backend may omit Content-Type on SSE responses. Fall back to
     // treating a successful body as SSE when the caller requested streaming.
     const passthroughCt = headers.get("content-type")?.toLowerCase();
-    let isEventStream = passthroughCt?.includes("text/event-stream")
-      || (upstreamResponse.ok && !!upstreamResponse.body && !passthroughCt && parsed.stream);
+    const isEventStream = passthroughCt?.includes("text/event-stream")
+      || (plaintextV2AgentMessageToolNames.size === 0 && upstreamResponse.ok && !!upstreamResponse.body && !passthroughCt && parsed.stream);
     const recordTerminalOutcome = codexForwardTerminalOutcomeRecorder(
       config,
       authCtx,
@@ -5841,7 +6088,8 @@ async function handleResponsesInner(
       const { applyAccountQuotaFromUpstreamHeaders } = await import("../../codex/auth-api");
       if (!isCodexWsQuotaObservedResponse(upstreamResponse)) {
         applyAccountQuotaFromUpstreamHeaders(authCtx.accountId, upstreamResponse.headers,
-          authCtx.writerGeneration, authCtx.kind === "main-pool" ? authCtx.mainQuotaWriter : undefined);
+          authCtx.writerGeneration, authCtx.kind === "main-pool" ? authCtx.mainQuotaWriter : undefined,
+          { modelId: route.modelId, poolWriter: authCtx.kind === "pool" ? authCtx.poolQuotaWriter : undefined });
       }
       if (terminalBodyWillRecord) {
         options.setTerminalOutcomeRecorder?.((status, httpStatusOverride) => {
@@ -5882,7 +6130,8 @@ async function handleResponsesInner(
 
     // Non-2xx passthrough failures must never reach Codex as an empty body —
     // Codex renders that as the opaque "Unknown error" (#452). Combo attempts
-    // keep their typed failure envelope. Non-empty bodies are relayed verbatim
+    // keep their typed failure envelope. Except for the classified 413 below,
+    // non-empty bodies are relayed verbatim
     // (headers included) so pool-retry Activation B/D and client diagnostics stay intact.
     // Manual-redirect policy (#914): a 3xx is relayed as-is (Location preserved
     // through sanitizePassthroughHeaders) so a redirect to a dead host can never
@@ -5892,7 +6141,7 @@ async function handleResponsesInner(
       return new Response(upstreamResponse.body, {
         status: upstreamResponse.status,
         statusText: upstreamResponse.statusText,
-        headers: sanitizePassthroughHeaders(upstreamResponse.headers),
+        headers: sanitizePassthroughHeaders(upstreamResponse.headers, codexSafetyBufferingOptions),
       });
     }
     if (!upstreamResponse.ok) {
@@ -5910,11 +6159,10 @@ async function handleResponsesInner(
       // The bounded reader owns the original body, deadline, abort settlement, and lock.
       // Unsafe partial data falls back to #452's non-empty status-only JSON.
       const errorText = await readDisplaySafeErrorText(upstreamResponse, upstream.signal, "");
-      if (upstreamResponse.status === 413 && clientRequestedStream) {
-        return streamingContextOverflowResponse(
-          parsed._responseModelId ?? parsed.modelId,
-          translatorBudget,
-        );
+      if (upstreamResponse.status === 413) {
+        return clientRequestedStream
+          ? streamingContextOverflowResponse(parsed._responseModelId ?? parsed.modelId, translatorBudget)
+          : jsonContextOverflowResponse();
       }
       return formatPassthroughUpstreamError(upstreamResponse.status, errorText, {
         statusText: upstreamResponse.statusText,
@@ -5933,166 +6181,79 @@ async function handleResponsesInner(
     // (src/server/relay-eager.ts; policy:
     // devlog/_fin/260731_macos_rss_retention/100_darwin_eager_optin.md).
     // The bundled known-bad runtime remains on tee by default on both platforms.
-    if (isEventStream && upstreamResponse.body && clientRequestedStream !== true) {
-      commitReasoningReplayServingRoute();
-      const bridgeSseRewrite = createV2RoutedDelegationSseRewrite(v2RoutedDelegationBridge);
-      const normalizedBody = bridgeSseRewrite
-        ? relaySseWithBlockRewrite(
-          upstreamResponse.body,
-          payloadRewriteAsBlockRewrite(bridgeSseRewrite),
-          translatorBudget,
-        )
-        : upstreamResponse.body;
-      const terminalBoundedBody = relaySseWithFailedTail(
-        normalizedBody,
-        upstream,
-        undefined,
-        { synthesizeMissingTerminal: false },
-      );
-      let completedResponse: { id?: unknown; output?: unknown; status?: unknown } | undefined;
-      let terminalResponse: { id?: unknown; output?: unknown; status?: unknown } | undefined;
-      let rawTerminalResponse: { id?: unknown; output?: unknown; status?: unknown } | undefined;
-      let terminalEventType: "response.completed" | "response.failed" | "response.incomplete" | undefined;
-      let observedTerminal: { status: ResponsesTerminalStatus; httpStatusOverride?: number } | undefined;
-      const reportNativeTerminal = recordTerminalOutcomes
-        ? (status: ResponsesTerminalStatus, httpStatusOverride?: number) => {
-          terminalRecorder?.(status, httpStatusOverride);
-          options.onNativePassthroughTerminal?.(status);
-        }
-        : undefined;
-      let aggregationFailureSettled = false;
-      const failUnarySseAggregation = (message: string): Response => {
-        if (!aggregationFailureSettled) {
-          aggregationFailureSettled = true;
-          logCtx.transportPhase = "mid_stream";
-          logCtx.terminalSource = "synthetic";
-          if (logCtx.activeAttempt) logCtx.activeAttempt.streamAborted = true;
-          reportNativeTerminal?.("failed", 502);
-        }
-        return formatErrorResponse(502, "upstream_error", message);
-      };
-      const inspector = createSseInspector({
-        onTerminal: (status, httpStatusOverride) => {
-          observedTerminal ??= {
-            status,
-            ...(httpStatusOverride !== undefined ? { httpStatusOverride } : {}),
-          };
-        },
-        logCtx,
-        onCompletedResponse: response => { completedResponse = response; },
-        onParsedPayload: payload => {
-          noteInspectedPayload(payload);
-          if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
-          const event = payload as { type?: unknown; response?: unknown };
-          if (
-            event.type !== "response.completed"
-            && event.type !== "response.failed"
-            && event.type !== "response.incomplete"
-          ) return;
-          terminalEventType ??= event.type;
-          if (!event.response || typeof event.response !== "object" || Array.isArray(event.response)) return;
-          rawTerminalResponse ??= event.response as { id?: unknown; output?: unknown; status?: unknown };
-          if (event.type !== "response.completed") terminalResponse = rawTerminalResponse;
-        },
-        onFirstOutput: options.onFirstOutput,
-        pinCompletedResponseIdToFirstSeen: route.providerName === "github-copilot",
-      });
-      let bounded;
-      try {
-        bounded = await readBoundedResponseBody(
-          new Response(terminalBoundedBody),
-          { ...UPSTREAM_JSON_BODY_READ_OPTIONS, signal: upstream.signal, fatalUtf8: true },
-        );
-        if (!bounded.oversized && !bounded.truncated) {
-          inspector.feed(new TextEncoder().encode(bounded.text));
-          inspector.finish();
-        }
-      } catch (error) {
-        inspector.dispose();
-        if (options.abortSignal?.aborted || req.signal.aborted) {
-          releaseCodexAuthContextProbeLease(authCtx);
-          options.onNativePassthroughCancel?.();
-          return clientCancelledResponse();
-        }
-        if (isTranslatorBudgetExceededError(error)) {
-          return failUnarySseAggregation("upstream translation buffer exceeded the safe limit");
-        }
-        return failUnarySseAggregation("upstream response stream could not be decoded");
-      } finally {
-        inspector.dispose();
-      }
-      if (bounded.oversized) return failUnarySseAggregation("upstream response stream exceeded the safe body limit");
-      if (bounded.truncated) return failUnarySseAggregation("upstream response stream stalled before completing");
-      if (inspectionSawUndeclaredTool) return failUnarySseAggregation("upstream emitted a tool call outside the request catalog");
-      const collected = completedResponse ?? terminalResponse;
-      const expectedStatus = terminalEventType === "response.completed"
-        ? "completed"
-        : terminalEventType === "response.failed"
-          ? "failed"
-          : terminalEventType === "response.incomplete"
-            ? "incomplete"
-            : undefined;
-      if (
-        !collected
-        || !rawTerminalResponse
-        || !observedTerminal
-        || !expectedStatus
-        || observedTerminal.status !== expectedStatus
-        || typeof rawTerminalResponse.id !== "string"
-        || rawTerminalResponse.id.length === 0
-        || rawTerminalResponse.status !== expectedStatus
-        || !Array.isArray(rawTerminalResponse.output)
-        || typeof collected.id !== "string"
-        || collected.id.length === 0
-        || collected.status !== expectedStatus
-        || !Array.isArray(collected.output)
-      ) {
-        return failUnarySseAggregation(
-          terminalEventType
-            ? "upstream response stream carried an invalid terminal response"
-            : "upstream response stream closed before a terminal response",
-        );
-      }
-      reportNativeTerminal?.(observedTerminal.status, observedTerminal.httpStatusOverride);
-      headers.set("content-type", "application/json");
-      headers.delete("cache-control");
-      upstreamResponse = new Response(JSON.stringify(collected), {
-        status: upstreamResponse.status,
-        statusText: upstreamResponse.statusText,
-        headers,
-      });
-      isEventStream = false;
-    }
-
     if (isEventStream && upstreamResponse.body) {
       // For streamed passthrough, a successful terminal response means non-error upstream status
       // before relay starts. Waiting for SSE completion would retain request state across the whole
       // stream; a later body failure does not undo that this destination accepted and served the turn.
-      commitReasoningReplayServingRoute();
+      commitReasoningReplayServingRoute(request.headers);
       const terminalRepairPolicy = providerModelResponsesTerminalRepair(
         route.providerName,
         route.provider,
         route.modelId,
       );
+      // #3761: opt-in hosted-web-search bridge. Codex always declares the hosted web_search tool,
+      // and this branch relays that declaration on the assumption the destination executes it.
+      // A KEY-auth gateway that does not (Ollama Cloud GLM) answers with a function_call named
+      // web_search that nothing runs, and the undeclared-tool guard below ends the turn. When the
+      // provider opts in, the bridge intercepts that one call, runs the search, continues the
+      // conversation upstream, and hands back ordinary Responses SSE — so every rewrite below,
+      // including the guard itself, still inspects the client-facing stream. Default OFF: without
+      // the opt-in this is one planner call and the relay is byte-identical to before.
+      const webSearchBridgePlan = planPassthroughWebSearchBridge(parsed, route.provider, {
+        isPassthrough: true,
+        stream: parsed.stream === true,
+      });
+      // Capture the binding that actually served the first leg, after its permitted reselection.
+      const webSearchBridgeBinding = requestBindings.get(request);
+      // The bridge wraps the RAW upstream body, so terminal repair below still owns the single
+      // client-facing terminal — the bridge drops the terminal of every intercepted leg.
+      const upstreamSseBody = webSearchBridgePlan
+        ? createPassthroughWebSearchBridgeStream({
+          plan: webSearchBridgePlan,
+          firstLeg: upstreamResponse.body,
+          requestBody: request.body,
+          // Continuation legs replay the same built request with the executed search appended.
+          // The first leg already passed the recovery ladder, the outbound size ceiling, and the
+          // host circuit; a KEY-auth destination has no OAuth refresh to replay on a later leg.
+          send: (continuationBody: string) => fetchWithHeaderTimeout(
+            request.url,
+            { method: request.method, headers: request.headers, body: continuationBody },
+            upstream.signal,
+            connectMs,
+            true,
+            providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+              // Pacing can outlive a manual selection change. A continuation must retain the
+              // first leg's key and appended search result, never rebuild from the original turn.
+              beforeDispatch: () => {
+                if (webSearchBridgeBinding?.kind !== "api-key"
+                  || !providerApiKeySelectionIsCurrent(config, route.providerName, webSearchBridgeBinding.provider)) {
+                  throw new Error("API key selection changed during a web-search continuation");
+                }
+              },
+              providerName: route.providerName,
+              modelId: route.modelId,
+            }),
+            false,
+          ),
+          execute: createOllamaBridgeExecutor(webSearchBridgePlan, route.provider.apiKey ?? ""),
+          // Appending a search result can push the continuation past the ceiling the first leg
+          // was admitted under, so the same limit is re-applied before every later send.
+          checkOutboundBody: (continuationBody: string) => {
+            const result = checkOutboundBodySize(continuationBody, config.maxUpstreamBodyBytes);
+            return result.admitted ? undefined : describeOutboundBodyRefusal(result);
+          },
+          signal: upstream.signal,
+        })
+        : upstreamResponse.body;
       const passthroughSseBody = terminalRepairPolicy
         ? relayResponsesSseWithTerminalRepair(
-          upstreamResponse.body,
+          upstreamSseBody,
           upstream,
           terminalRepairPolicy,
           translatorBudget,
           options.responsesTerminalRepairScheduler,
         )
-        : upstreamResponse.body;
-      // Apply request-scoped bridge admission before the stream is split so the
-      // client, inspector, and continuation cache observe the same event history.
-      const bridgeSseRewrite = createV2RoutedDelegationSseRewrite(v2RoutedDelegationBridge);
-      const normalizedPassthroughSseBody = bridgeSseRewrite
-        ? relaySseWithBlockRewrite(
-          passthroughSseBody,
-          payloadRewriteAsBlockRewrite(bridgeSseRewrite),
-          translatorBudget,
-        )
-        : passthroughSseBody;
+        : upstreamSseBody;
       const repairConfig = route.provider.responsesItemIdRepair;
       // Grok Build renders deltas live but reconstructs its durable assistant
       // turn from the completed response snapshot. Native Responses streams
@@ -6111,6 +6272,9 @@ async function handleResponsesInner(
         createImageGenCallRestoreRewrite(imageGenCallAliases),
         // #3217: a call whose namespace repeats its own name is unroutable in codex-rs.
         createSelfNamedToolCallNamespaceScrubRewrite(selfNamedNamespaceScrubAuthorization),
+        routedMuseToolNameAliases.size > 0
+          ? createMuseToolNameRestoreRewrite(routedMuseToolNameAliases)
+          : undefined,
         routedNamespaceToolAliases.size > 0
           ? createRoutedNamespaceCallRestoreRewrite(routedNamespaceToolAliases)
           : undefined,
@@ -6121,15 +6285,23 @@ async function handleResponsesInner(
           ? createResponsesItemIdPayloadRewrite(repairConfig!, translatorBudget)
           : undefined,
         responseModelRewrite,
-        parsed.options.hideThinkingSummary !== true
-          && routeUsesContentChannelReasoning(route.provider, route.modelId)
-          ? createReasoningSummaryChannelPayloadRewrite()
-          : undefined,
       ].filter((rewrite): rewrite is NonNullable<typeof rewrite> => rewrite !== undefined);
       // #893: sparse-snapshot gateways get field backfills AND lifecycle event
       // injection at the block level, after payload rewrites. Defaults come
       // from the finalized OUTBOUND body — the normalized internal tool shapes
       // are not the Responses wire shapes the snapshot must mirror.
+      // Only validated client blocks may publish plaintext continuation state.
+      // Raw inspection precedes rewriting on eager relays, so it cannot own this write.
+      const plaintextInspector = plaintextV2AgentMessageToolNames.size > 0
+        ? createSseInspector({ onCompletedResponse: rememberPassthroughResponseChecked })
+        : undefined;
+      const plaintextEncoder = plaintextInspector ? new TextEncoder() : undefined;
+      const rememberPlaintextBlock = plaintextInspector
+        ? Object.assign((block: string): readonly string[] => {
+          plaintextInspector.feed(plaintextEncoder!.encode(`${block}\n\n`));
+          return [block];
+        }, { dispose: () => plaintextInspector.dispose() })
+        : undefined;
       const blockRewrites = [
         payloadRewrites.length > 0
           ? payloadRewriteAsBlockRewrite(composeSsePayloadRewrites(...payloadRewrites))
@@ -6157,6 +6329,11 @@ async function handleResponsesInner(
         snapshotRepairEnabled
           ? createResponsesSnapshotBlockRewrite(outboundRequestBody, translatorBudget)
           : undefined,
+        plaintextV2AgentMessageToolNames.size > 0
+          ? payloadRewriteAsBlockRewrite(createPlaintextV2AgentMessageCallRestoreRewrite(
+            plaintextV2AgentMessageToolNames, plaintextV2AgentMessageAliasedToolNames,
+          ))
+          : undefined,
         createResponsesFieldBackfillBlockRewrite(),
         functionRepairSchemas.size > 0
           ? createResponsesFunctionToolRepairBlockRewrite(functionRepairSchemas, translatorBudget)
@@ -6168,13 +6345,15 @@ async function handleResponsesInner(
             declaredWireToolNames,
             declaredNamelessClientCallTypes,
             providerExecutedCallTypes,
+            declaredBareWireToolNames,
           )
           : undefined,
+        rememberPlaintextBlock,
       ].filter((rewrite): rewrite is NonNullable<typeof rewrite> => rewrite !== undefined);
       const clientBlockRewrite = blockRewrites.length > 0
         ? composeSseBlockRewrites(...blockRewrites)
         : undefined;
-      const needsClientRewrite = bridgeSseRewrite !== undefined || clientBlockRewrite !== undefined;
+      const needsClientRewrite = clientBlockRewrite !== undefined;
       // #864: win32 rewrite traffic must never enter the tee()+JS-pull chain
       // (Bun#32111 JS-sink segfault — text frames pass, the terminal block is
       // lost). The eager single reader applies the same rewrites inline.
@@ -6217,12 +6396,12 @@ async function handleResponsesInner(
         const inspector = createSseInspector({
           onTerminal: reportNativeTerminal,
           logCtx,
-          onCompletedResponse: rememberPassthroughResponseChecked,
+          onCompletedResponse: rememberPassthroughResponse && plaintextV2AgentMessageToolNames.size === 0 ? rememberPassthroughResponseChecked : undefined,
           onParsedPayload: noteInspectedPayload,
           onFirstOutput: options.onFirstOutput,
           pinCompletedResponseIdToFirstSeen: githubCopilotRepairEnabled,
         });
-        const eagerBody = relaySseEagerBounded(normalizedPassthroughSseBody, turnAc, {
+        const eagerBody = relaySseEagerBounded(passthroughSseBody, turnAc, {
           inspectChunk: chunk => inspector.feed(chunk),
           finishInspection: () => inspector.finish(),
           disposeInspection: () => inspector.dispose(),
@@ -6247,10 +6426,14 @@ async function handleResponsesInner(
               reportNativeTerminal("failed", 502);
             }
           },
-          onClientCancel: () => options.onNativePassthroughCancel?.(),
+          onClientCancel: () => {
+            responseCompletionCancelled = true;
+            options.onNativePassthroughCancel?.();
+          },
           onDone: () => unregisterTurn(turnAc),
         }, {
           clientGoneSignal: options.abortSignal,
+          terminalBoundary: codexSafetyBufferingOptions,
           ...(inlineEagerRewrite ? { rewriteBudget: translatorBudget } : {}),
           ...(logCtx.upstreamError === undefined ? {} : { upstreamError: logCtx.upstreamError }),
         });
@@ -6266,7 +6449,7 @@ async function handleResponsesInner(
           })),
         );
       }
-      const [nativeBody, inspectBody] = normalizedPassthroughSseBody.tee();
+      const [nativeBody, inspectBody] = passthroughSseBody.tee();
       const turnAc = new AbortController();
       const clientGone = new AbortController();
       linkAbortSignal(upstream, turnAc.signal);
@@ -6309,8 +6492,11 @@ async function handleResponsesInner(
           turnAc.signal,
           () => unregisterTurn(turnAc),
           logCtx,
-          () => options.onNativePassthroughCancel?.(),
-          rememberPassthroughResponseChecked,
+          () => {
+            responseCompletionCancelled = true;
+            options.onNativePassthroughCancel?.();
+          },
+          rememberPassthroughResponse && plaintextV2AgentMessageToolNames.size === 0 ? rememberPassthroughResponseChecked : undefined,
           options.onFirstOutput,
           inspectionConsumerOptions,
         );
@@ -6320,7 +6506,7 @@ async function handleResponsesInner(
           logCtx,
           turnAc.signal,
           () => unregisterTurn(turnAc),
-          rememberPassthroughResponseChecked,
+          rememberPassthroughResponse && plaintextV2AgentMessageToolNames.size === 0 ? rememberPassthroughResponseChecked : undefined,
           options.onFirstOutput,
           inspectionConsumerOptions,
         );
@@ -6335,8 +6521,11 @@ async function handleResponsesInner(
       const clientBody = relaySseWithFailedTail(
         rewrittenBody,
         upstream,
-        reason => clientGone.abort(reason),
-        { upstreamError: logCtx.upstreamError },
+        reason => {
+          responseCompletionCancelled = true;
+          clientGone.abort(reason);
+        },
+        { upstreamError: logCtx.upstreamError, terminalBoundary: codexSafetyBufferingOptions },
       );
       return markNativePassthroughSseResponse(new Response(clientBody, {
         status: upstreamResponse.status,
@@ -6359,10 +6548,14 @@ async function handleResponsesInner(
       }
       const text = bounded.text;
       inspectResponseLogJson(logCtx, text);
-      const clientJson = (() => {
+      let plaintextV2RestoreFailed = false;
+      let clientJson = (() => {
         const restoredNamespace = restoreRoutedNamespaceCallsInJson(
           scrubSelfNamedToolCallNamespaceInJson(
-            restoreImageGenCallsInJson(text, imageGenCallAliases),
+            restoreMuseToolNamesInJson(
+              restoreImageGenCallsInJson(text, imageGenCallAliases),
+              routedMuseToolNameAliases,
+            ),
             selfNamedNamespaceScrubAuthorization,
           ),
           routedNamespaceToolAliases,
@@ -6371,12 +6564,8 @@ async function handleResponsesInner(
           restoredNamespace,
           authorizedBareNamespaceToolAliases,
         );
-        const bridgeNormalized = rewriteV2RoutedDelegationCallsInJson(
-          restoredAuthorizedBareNamespace,
-          v2RoutedDelegationBridge,
-        );
         const restored = restoreRoutedCustomCallsInJson(
-          bridgeNormalized,
+          restoredAuthorizedBareNamespace,
           routedCustomToolNames,
           routedCustomToolRepairNames,
           declaredWireToolNames,
@@ -6385,18 +6574,20 @@ async function handleResponsesInner(
           restored,
           routedToolSearchNames,
         );
-        const repaired = normalizeFunctionCompletionJson(restoredToolSearch);
+        const normalizedJson = normalizeFunctionCompletionJson(restoredToolSearch);
+        const plaintextRestore = restorePlaintextV2AgentMessageCallsInJsonResult(
+          normalizedJson, plaintextV2AgentMessageToolNames, plaintextV2AgentMessageAliasedToolNames,
+        );
+        plaintextV2RestoreFailed = plaintextRestore.overflowed;
+        const repaired = plaintextRestore.value;
         const modelRewritten = parsed._responseModelId !== undefined && parsed._responseModelId !== parsed.modelId
           ? rewriteResponsesModelJson(repaired, parsed._responseModelId)
           : repaired;
-        // The bounded-JSON answer bypasses the SSE payload rewrite, so content-
-        // channel reasoning needs the same normalization here for the plain
-        // JSON answer and every reframed-SSE variant built from clientJson.
-        return parsed.options.hideThinkingSummary !== true
-          && routeUsesContentChannelReasoning(route.provider, route.modelId)
-          ? rewriteReasoningSummaryInJsonString(modelRewritten)
-          : modelRewritten;
+        return modelRewritten;
       })();
+      if (plaintextV2RestoreFailed) {
+        return formatErrorResponse(502, "upstream_error", PLAINTEXT_V2_AGENT_MESSAGE_RESTORE_OVERFLOW_MESSAGE);
+      }
       // #1700: same fail-closed policy as the SSE relay above. Both the plain JSON answer and
       // the reframed-SSE branch below are built from this body, so one check covers them. This
       // runs BEFORE the continuation cache write below: a refused turn must not become state a
@@ -6409,6 +6600,7 @@ async function handleResponsesInner(
               declaredWireToolNames,
               declaredNamelessClientCallTypes,
               providerExecutedCallTypes,
+              declaredBareWireToolNames,
             );
           } catch {
             return undefined;
@@ -6417,15 +6609,18 @@ async function handleResponsesInner(
         if (undeclared !== undefined) {
           return formatErrorResponse(502, "upstream_error", undeclaredToolCallMessage(undeclared));
         }
+        clientJson = normalizeDefaultNamespaceInJson(
+          clientJson,
+          declaredWireToolNames,
+          declaredBareWireToolNames,
+        );
       }
-      commitReasoningReplayServingRoute();
-      if (rememberPassthroughResponseChecked) {
-        try {
-          rememberPassthroughResponseChecked(
-            JSON.parse(clientJson) as { id?: unknown; output?: unknown; status?: unknown },
-          );
-        } catch { /* non-JSON despite content-type; recording is best-effort */ }
-      }
+      commitReasoningReplayServingRoute(request.headers);
+      try {
+        rememberPassthroughResponseChecked(
+          JSON.parse(text) as { id?: unknown; output?: unknown; status?: unknown; model?: unknown },
+        );
+      } catch { /* non-JSON despite content-type; recording is best-effort */ }
       // #875: the transport-neutral reliability policy forced a bounded JSON
       // upstream for a client that asked for SSE. Reframe the completed JSON
       // as the canonical terminal SSE sequence (created → output_item.done →
@@ -6467,7 +6662,7 @@ async function handleResponsesInner(
             }
             throw error;
           }
-          const sseHeaders = sanitizePassthroughHeaders(headers);
+          const sseHeaders = sanitizePassthroughHeaders(headers, codexSafetyBufferingOptions);
           sseHeaders.set("content-type", "text/event-stream");
           sseHeaders.set("cache-control", "no-store");
           return new Response(stream, {
@@ -6500,9 +6695,13 @@ async function handleResponsesInner(
         headers,
       });
     }
+    if (plaintextV2AgentMessageToolNames.size > 0) {
+      try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already closed */ }
+      return formatErrorResponse(502, "upstream_error", "plaintext V2 agent-message response used an unsupported content type");
+    }
     // An unclassified passthrough body is relayed directly and has no bounded completion observer;
     // use the same non-error-status success boundary as SSE instead of retaining per-stream state.
-    commitReasoningReplayServingRoute();
+    commitReasoningReplayServingRoute(request.headers);
     const body = relayWithAbort(upstreamResponse.body, upstream);
     const turnAc = new AbortController();
     const tracked = body ? trackStreamLifetime(body, turnAc, undefined, options.turnAdmissionLease) : null;
@@ -6558,26 +6757,14 @@ async function handleResponsesInner(
   //   - non-runTurn: web-search wins over image when both eligible (documented priority)
   //   - runTurn: image bridge may run (it supports runTurn); web-search is skipped so runTurn
   //     can proceed for web-search-only turns
-  const imgPlan = !routedCompaction ? await planImageBridge(config, parsed, route.provider) : undefined;
-  const vidPlan = !routedCompaction ? await planVideoBridge(config, parsed, route.provider) : undefined;
-  const hasMediaPlan = !!(imgPlan || vidPlan);
-  // A media plan is not enough to suppress Gemini 2.x grounding: both bridges inject tools only
-  // on streaming turns. This is the potential-injection value used to resolve sidecar precedence.
-  const mediaMayInject = mediaBridgeWillRun(hasMediaPlan, false, !!adapter.runTurn, parsed.stream);
   const wsPlan = !routedCompaction
     ? planWebSearch(config, parsed, false, route.provider, route.modelId, openAiSidecar, {
-      admission: options.admission,
-      codexAuthPolicy: options.codexAuthPolicy,
-      hasMediaBridge: mediaMayInject,
+      admission: options.admission, codexAuthPolicy: options.codexAuthPolicy,
     })
     : undefined;
-  const webSearchWinsMedia = !!wsPlan && !adapter.runTurn;
-  const mediaWillRun = mediaBridgeWillRun(hasMediaPlan, !!wsPlan, !!adapter.runTurn, parsed.stream);
-  const ccaInTurnGrounding = !routedCompaction
-    ? resolveCcaInTurnGrounding(config, parsed, false, route.provider, route.modelId, mediaWillRun)
-    : undefined;
-  if (ccaInTurnGrounding) parsed._ccaInTurnGrounding = ccaInTurnGrounding;
-  const canRunWebSearch = webSearchWinsMedia && !ccaInTurnGrounding;
+  const imgPlan = !routedCompaction ? await planImageBridge(config, parsed, route.provider) : undefined;
+  const vidPlan = !routedCompaction ? await planVideoBridge(config, parsed, route.provider) : undefined;
+  const canRunWebSearch = !!wsPlan && !adapter.runTurn;
   const rotateSidecarProviderOn429 = async (
     retryAfter: string | null,
     responseHeaders?: Headers,
@@ -6715,17 +6902,14 @@ async function handleResponsesInner(
       options.codexWsRuntimeIdentity,
       { providerName: route.providerName, modelId: route.modelId },
     );
-    const benchmarkUsageGate = { done: false };
     const imgResponse = await runWithImageBridge({
       parsed, adapter,
       incomingMeta: { headers: selectedForwardHeaders, abortSignal: options.abortSignal, translatorBudget },
-      ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
       ...(imgPlan ? { plan: imgPlan } : {}),
       ...(vidPlan ? { videoPlan: vidPlan } : {}),
       forwardHeaders: selectedForwardHeaders,
       onAttemptSend: (recovery?: AttemptRecoveryKind) =>
-        noteDiagnosticAttempt(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery, adapter.name),
-      ...(diagnosticContext ? { diagnostic: diagnosticContext } : {}),
+        noteAttemptSend(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery),
       abortSignal: options.abortSignal,
       maxRounds: imgPlan && vidPlan
         ? clampImageMaxRounds(Math.min(config.images?.maxRounds ?? 3, config.images?.videoMaxRounds ?? 2))
@@ -6747,10 +6931,8 @@ async function handleResponsesInner(
         recordAdapterReasoning(logCtx, request);
         recordAdapterTier(logCtx, request);
       },
-      validateAdapter: (requestParsed, candidate) => assertGoogleOptionsRoute(candidate, route.provider, requestParsed),
       ...(vidPlan?.timeoutMs ? { videoTimeoutMs: vidPlan.timeoutMs } : {}),
       onUsage: usage => {
-        observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, adapter.name, parsed._responseModelId ?? parsed.modelId, usage);
         // Cursor may assign _cursorConversationId inside the image loop's first runTurn;
         // backfill so Logs can filter/total that opening request (parity with the normal
         // runTurn branch).
@@ -6776,10 +6958,12 @@ async function handleResponsesInner(
           continuationStateForResponse(providerState),
           responseStateOptions(adapterNeedsForcedContinuation(adapter.name)),
         );
+        notifyResponseComplete(response);
       },
     });
     if (imgResponse.body) {
       const imgTurnAc = new AbortController();
+      imgTurnAc.signal.addEventListener("abort", cancelResponseCompletion, { once: true });
       return new Response(trackStreamLifetime(imgResponse.body, imgTurnAc, undefined, options.turnAdmissionLease), {
         status: imgResponse.status,
         headers: imgResponse.headers,
@@ -6803,7 +6987,6 @@ async function handleResponsesInner(
         providerName: route.providerName,
         modelId: route.modelId,
       })(input, init)) as typeof globalThis.fetch;
-    const benchmarkUsageGate = { done: false };
     const wsResponse = await runWithWebSearch({
       parsed, adapter,
       fetchForRequest: (request, iterParsed) => providerFetch(route.provider, options.codexWsRuntimeIdentity, {
@@ -6816,7 +6999,6 @@ async function handleResponsesInner(
         translatorBudget,
         providerFetch: routedProviderFetch,
       },
-      ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
       backend: wsPlan.backend,
       forwardProvider: wsPlan.forwardSidecar?.provider,
       anthropicSidecar: wsPlan.anthropicSidecar,
@@ -6836,12 +7018,9 @@ async function handleResponsesInner(
         recordAdapterReasoning(logCtx, request);
         recordAdapterTier(logCtx, request);
       },
-      validateAdapter: (requestParsed, candidate) => assertGoogleOptionsRoute(candidate, route.provider, requestParsed),
       onAttemptSend: (recovery?: AttemptRecoveryKind) =>
-        noteDiagnosticAttempt(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery, adapter.name),
-      ...(diagnosticContext ? { diagnostic: diagnosticContext } : {}),
+        noteAttemptSend(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery),
       onUsage: usage => {
-        observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, adapter.name, parsed._responseModelId ?? parsed.modelId, usage);
         logCtx.usageFromBridge = true;
         if (usage) {
           logCtx.usage = usage;
@@ -6855,12 +7034,16 @@ async function handleResponsesInner(
       streamRoutedModelOutput: wsPlan.streamRoutedModelOutput,
       on429: rotateSidecarProviderOn429,
       retryOn429Policy: rateLimitRetryPolicyFor(route.provider),
-      onCompletedResponse: commitReasoningReplayServingRoute,
+      onCompletedResponse: response => {
+        commitReasoningReplayServingRoute();
+        notifyResponseComplete(response);
+      },
     });
     // Register the sidecar stream as an active turn so drainAndShutdown waits for (or aborts)
     // in-flight web-search turns instead of skipping them during graceful shutdown.
     if (wsResponse.body) {
       const wsTurnAc = new AbortController();
+      wsTurnAc.signal.addEventListener("abort", cancelResponseCompletion, { once: true });
       return new Response(trackStreamLifetime(wsResponse.body, wsTurnAc, undefined, options.turnAdmissionLease), {
         status: wsResponse.status,
         headers: wsResponse.headers,
@@ -6916,16 +7099,11 @@ async function handleResponsesInner(
       pacingSlotAcquired = false,
     ): Promise<void> => {
       try {
-        if (diagnosticContext) {
-          diagnosticContext.recovery = recovery;
-          diagnosticContext.attempt = logCtx.activeAttempt?.ordinal;
-          diagnosticContext.adapterName = runTurnAdapter.name;
-        }
         if (!pacingSlotAcquired) {
           await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, runTurnAbort.signal);
         }
         await refreshRunTurnSelection();
-        noteDiagnosticAttempt(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery, runTurnAdapter.name);
+        noteAttemptSend(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery);
         const runTurnProviderFetch = providerFetch(
           route.provider,
           options.codexWsRuntimeIdentity,
@@ -7050,15 +7228,13 @@ async function handleResponsesInner(
         onBacklogExceeded: () => runTurnAbort.abort(),
       });
       void runTurnAttempt(retryQueue, "empty-completion");
-      return diagnoseAdapterEvents(retryQueue.stream(), runTurnAdapter.name, diagnosticRequestId, logCtx, adapterDiagnosticState);
+      return retryQueue.stream();
     };
 
     const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, toolSearchToolNames } = toolBridgeMaps;
     if (parsed.stream) {
       void runTurn();
-      let eventSource: AsyncIterable<AdapterEvent> = diagnoseAdapterEvents(
-        queue.stream(), runTurnAdapter.name, diagnosticRequestId, logCtx, adapterDiagnosticState,
-      );
+      let eventSource: AsyncIterable<AdapterEvent> = queue.stream();
       if (route.provider.authMode === "oauth" || (genericFailoverAccountId && isGenericOAuthFailoverEnabled(config, route.providerName))) {
         // Preflight holds only heartbeats and the first meaningful event. A first-event 429 can be
         // replayed transparently; after any output reaches the bridge, a later error stays terminal.
@@ -7088,10 +7264,10 @@ async function handleResponsesInner(
         : observeEmptyCompletion(eventSource, () => {
           console.warn(emptyCompletionNotice(route.providerName, route.modelId));
         });
-      const benchmarkUsageGate = { done: false };
       const sseStream = bridgeToResponsesSSE(
         guardedSource, parsed._responseModelId ?? parsed.modelId, toolNsMap, freeformToolNames, toolSearchToolNames,
         () => {
+          cancelResponseCompletion();
           runTurnAbort.abort();
           queue.close();
         }, 2_000,
@@ -7108,11 +7284,9 @@ async function handleResponsesInner(
           // grok-build's strict decoder dies on the typed response.heartbeat frame; its
           // eventsource layer tolerates comment keep-alives. Codex needs the opposite.
           ...(logCtx.surface === "grok" ? { heartbeatStyle: "comment" as const } : {}),
-          ...(diagnosticContext ? { diagnostic: diagnosticContext } : {}),
           onUsage: usage => {
             // Raw adapter usage, pre wire-normalization: the bridged SSE now always carries
             // zero-default detail objects, so provenance must come from here (cache_detail_missing).
-            observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, runTurnAdapter.name, parsed._responseModelId ?? parsed.modelId, usage);
             logCtx.usageFromBridge = true;
             if (usage) {
               logCtx.usage = usage;
@@ -7130,6 +7304,7 @@ async function handleResponsesInner(
                 responseStateOptions(adapterNeedsForcedContinuation(adapter.name)),
               );
             }
+            notifyResponseComplete(response);
           },
         },
       );
@@ -7171,7 +7346,6 @@ async function handleResponsesInner(
       }
     }
     let providerState: OcxProviderContinuationState | undefined;
-    const benchmarkUsageGate = { done: false };
     const json = buildResponseJSON(events, parsed._responseModelId ?? parsed.modelId, {
       translatorBudget,
       replayCacheScope: parsed._reasoningReplayScope,
@@ -7184,7 +7358,6 @@ async function handleResponsesInner(
       ...(routedCompaction ? { compaction: true } : {}),
       onProviderState: state => { providerState = state; },
       onUsage: usage => {
-        observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, runTurnAdapter.name, parsed._responseModelId ?? parsed.modelId, usage);
         logCtx.usageFromBridge = true;
         if (usage) {
           logCtx.usage = usage;
@@ -7208,6 +7381,7 @@ async function handleResponsesInner(
     if (adapterResponseReachedServingTerminal(events, json)) {
       commitReasoningReplayServingRoute();
     }
+    notifyResponseComplete(json);
     return new Response(JSON.stringify(json), { headers: { "Content-Type": "application/json" } });
   }
 
@@ -7255,10 +7429,11 @@ async function handleResponsesInner(
         toolBridgeMaps.toolNsMap,
         toolBridgeMaps.freeformToolNames,
         toolBridgeMaps.toolSearchToolNames,
-        undefined,
+        cancelResponseCompletion,
         2_000,
         {
           translatorBudget,
+          onCompletedResponse: notifyResponseComplete,
           ...(options.forceEmptyResponseId ? { responseId: "" } : {}),
           ...(options.onFirstOutput ? { onFirstOutput: options.onFirstOutput } : {}),
         },
@@ -7279,12 +7454,9 @@ async function handleResponsesInner(
         },
       );
     }
-    return new Response(
-      JSON.stringify(buildResponseJSON(terminalEvents, parsed._responseModelId ?? parsed.modelId, {
-        translatorBudget,
-      })),
-      { headers: { "Content-Type": "application/json" } },
-    );
+    const json = buildResponseJSON(terminalEvents, parsed._responseModelId ?? parsed.modelId, { translatorBudget });
+    notifyResponseComplete(json);
+    return new Response(JSON.stringify(json), { headers: { "Content-Type": "application/json" } });
   }
   // One request-scoped transient-retry budget owner, declared here so BOTH the initial send
   // and the later recovery refetches (429, key/account rotation, OAuth replay) share it. A
@@ -7294,12 +7466,8 @@ async function handleResponsesInner(
   const remainingTransientSendBudget = (budget: number): number =>
     Math.max(1, budget - transientSendsUsed);
   try {
-    initialRequest = await activeAdapter.buildRequest(parsed, {
-      headers: selectedForwardHeaders,
-      translatorBudget,
-      ...(observeAntigravityProviderError ? { onProviderError: observeAntigravityProviderError } : {}),
-    });
-    refreshRoutedNamespaceToolAliases(initialRequest);
+    initialRequest = await activeAdapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
+    refreshRequestToolAliases(initialRequest);
     recordAdapterReasoning(logCtx, initialRequest);
     recordAdapterTier(logCtx, initialRequest);
     inputTokenEstimate = typeof initialRequest.usageLog?.inputTokens === "number"
@@ -7332,7 +7500,6 @@ async function handleResponsesInner(
    */
 
   let upstreamResponse: Response;
-  const replayBudget = route.provider.replayTransientFailures ? { remaining: 2 } : undefined;
   try {
     if (activeAdapter.fetchResponse) {
       noteAttemptSend(logCtx.activeAttempt, inputTokenEstimate);
@@ -7342,13 +7509,10 @@ async function handleResponsesInner(
         timeoutMs: connectMs,
         stream: parsed.stream,
         executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
-          dispatchOverride: oauthDispatch(builtInitialRequest),
+              dispatchOverride: oauthDispatch(builtInitialRequest),
           providerName: route.providerName,
           modelId: route.modelId,
-          pacingSlotAcquired: true,
         }),
-        replayBudget,
-        ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
       });
     } else {
       // #1851 scope guard: transient-5xx retry on this generic adapter path is opt-in for
@@ -7379,8 +7543,6 @@ async function handleResponsesInner(
         {
           abortSignal: upstream.signal,
           label: safeHostLabel(builtInitialRequest.url),
-          replayTransientFailures: route.provider.replayTransientFailures,
-          replayBudget,
           ...(transientPolicy
             ? { attempts: transientPolicy.attempts, onSendsConsumed: noteTransientSends }
             : {}),
@@ -7391,9 +7553,7 @@ async function handleResponsesInner(
     cleanupUpstreamAbort();
     upstream.abort();
     if (options.abortSignal?.aborted) return clientCancelledResponse();
-    const msg = route.provider.googleMode === "ai-studio-web" && err instanceof UpstreamRedirectError
-      ? "Google AI Studio session expired — re-authentication required"
-      : describeUpstreamConnectFailure(err, connectMs);
+    const msg = describeUpstreamConnectFailure(err, connectMs);
     return formatErrorResponse(502, "upstream_error", msg);
   } finally {
     builtInitialRequest.releaseBodyObservation?.();
@@ -7416,7 +7576,14 @@ async function handleResponsesInner(
     // 413→429 rotation cannot silently undo the tightening.
     let imageRetryAttempted = false;
     const opaqueBlobRecoveryGuard: OpaqueBlobRecoveryGuard = { attempted: false };
+    // Console Go answers a transient 400 "Invalid upload request." for bodies it accepts
+    // moments later; at most one byte-identical replay is allowed per request.
+    const consoleGoUploadRetryGuard: { attempted: boolean } = { attempted: false };
     let oauth401ReplayAttempted = false;
+    // At most one reasoning-effort downgrade per request. This sits outside the recovery loop
+    // below for the same reason the two guards above do: a guard declared inside it is reset by
+    // every `continue recovery`, which would let one turn walk the whole ladder down.
+    const reasoningEffortDowngradeGuard: { attempted: boolean } = { attempted: false };
     /**
      * Rebuild the request from the current parsed input (and any image-tier bias) and refetch
      * it once, tagging the attempt with the given recovery kind. Rebuilds are deterministic
@@ -7425,13 +7592,6 @@ async function handleResponsesInner(
     const rebuildAndRefetch = async (
       recovery: AttemptRecoveryKind,
     ): Promise<Response | { failed: Response }> => {
-      try {
-        assertGoogleOptionsRoute(activeAdapter, route.provider);
-      } catch (err) {
-        cleanupUpstreamAbort();
-        upstream.abort();
-        return { failed: formatErrorResponse(400, "invalid_request_error", redactSecretString(err instanceof Error ? err.message : String(err))) };
-      }
       let retryRequest: AdapterRequest;
       if (sameTargetRequest !== undefined && sameTargetParsed === parsed && sameTargetToken === transportToken) {
         // Same target (key/adapter/parsed/tier unchanged): replay the exact cached request.
@@ -7442,7 +7602,6 @@ async function handleResponsesInner(
             headers: selectedForwardHeaders,
             translatorBudget,
             ...(imageTierBias > 0 ? { imageTierBias } : {}),
-            ...(observeAntigravityProviderError ? { onProviderError: observeAntigravityProviderError } : {}),
           });
           recordAdapterReasoning(logCtx, retryRequest);
           recordAdapterTier(logCtx, retryRequest);
@@ -7460,7 +7619,7 @@ async function handleResponsesInner(
         sameTargetParsed = parsed;
         sameTargetToken = transportToken;
       }
-      refreshRoutedNamespaceToolAliases(retryRequest);
+      refreshRequestToolAliases(retryRequest);
       const retryEstimate = typeof retryRequest.usageLog?.inputTokens === "number"
         ? retryRequest.usageLog.inputTokens
         : undefined;
@@ -7478,13 +7637,10 @@ async function handleResponsesInner(
               timeoutMs: connectMs,
               stream: parsed.stream,
               executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
-                dispatchOverride: oauthDispatch(retryRequest),
+              dispatchOverride: oauthDispatch(retryRequest),
                 providerName: route.providerName,
                 modelId: route.modelId,
-                pacingSlotAcquired: true,
               }),
-              replayBudget,
-              ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
             });
           }
           // #2643 review: this leg used to call fetchWithHeaderTimeout directly, so an
@@ -7510,8 +7666,6 @@ async function handleResponsesInner(
             {
               abortSignal: upstream.signal,
               label: safeHostLabel(retryRequest.url),
-              replayTransientFailures: route.provider.replayTransientFailures,
-              replayBudget,
               ...(refetchTransientPolicy
                 ? {
                   attempts: remainingTransientSendBudget(refetchTransientPolicy.attempts),
@@ -7550,19 +7704,9 @@ async function handleResponsesInner(
           cleanupUpstreamAbort();
           return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(err));
         }
-        if (isAntigravityOAuth && refreshed.accountId !== antigravityAccountId) {
-          cleanupUpstreamAbort();
-          return formatErrorResponse(401, "authentication_error", "Antigravity OAuth account changed during refresh");
-        }
         if (route.provider.googleMode === "cloud-code-assist" && !refreshed.projectId) {
           cleanupUpstreamAbort();
-          return formatErrorResponse(
-            401,
-            "authentication_error",
-            isAntigravityOAuth
-              ? "Antigravity project unavailable — re-run `ocx login google-antigravity`"
-              : publicOAuthAuthenticationErrorMessage(new Error("Cloud Code Assist project is required")),
-          );
+          return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(new Error("Cloud Code Assist project is required")));
         }
         sentOAuthSnapshot = refreshed;
         replayOAuthCredentialSnapshot = {
@@ -7742,151 +7886,6 @@ async function handleResponsesInner(
           break;
         }
       }
-
-      // Antigravity-specific recovery allows only one short, abort-aware replay on the same
-      // credential. The generic OAuth failover below may still rotate when another account exists.
-      if (upstreamResponse.status === 403 && isAntigravityOAuth && antigravityAccountId) {
-        recordAntigravityCooldown(antigravityAccountId, upstreamResponse.headers.get("retry-after"), Date.now(), "geoblock");
-      }
-      if (upstreamResponse.status === 429 && isAntigravityOAuth && antigravityAccountId) {
-        recordAntigravityCooldown(antigravityAccountId, upstreamResponse.headers.get("retry-after"));
-        const retryAfter = retryableAntigravity429DelayMs(upstreamResponse.headers.get("retry-after"));
-        if (!antigravity429RetryAttempted && retryAfter !== null) {
-          antigravity429RetryAttempted = true;
-          try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already closed */ }
-          try {
-            await sleepWithAbort(retryAfter, upstream.signal);
-          } catch {
-            cleanupUpstreamAbort();
-            upstream.abort();
-            return clientCancelledResponse();
-          }
-          if (options.abortSignal?.aborted || upstream.signal.aborted) {
-            cleanupUpstreamAbort();
-            upstream.abort();
-            return clientCancelledResponse();
-          }
-          const result = await rebuildAndRefetch("rate-limit-429");
-          if ("failed" in result) return result.failed;
-          upstreamResponse = result;
-          continue recovery;
-        }
-      }
-      if (
-        upstreamResponse.status === 402
-        && cursorPoolAccountId
-        && isCursorAccountPoolActive(config)
-      ) {
-        recordCursorAccountBillingCooldown(
-          cursorPoolAccountId,
-          upstreamResponse.headers.get("retry-after"),
-        );
-      }
-      while (
-        (upstreamResponse.status === 401 || upstreamResponse.status === 403)
-        && route.providerName === "cursor"
-        && route.provider.authMode === "oauth"
-        && cursorPoolAccountId
-        && isCursorAccountPoolActive(config)
-        && cursorPoolFailovers < CURSOR_POOL_MAX_FAILOVERS_PER_REQUEST
-      ) {
-        const nextAccountId = rotateCursorAccountOnAuth(
-          config,
-          cursorPoolAccountId,
-          cursorSessionKey,
-        );
-        if (!nextAccountId) break;
-        try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
-        try {
-          const snapshot = await getValidAccessSnapshotForAccount("cursor", nextAccountId, { requireUsableAccount: true });
-          const admitted = await commitResolvedOAuthSelection(snapshot);
-          if (!admitted) break;
-          cursorPoolAccountId = nextAccountId;
-          cursorPoolFailovers += 1;
-          parsed._cursorIdentityScope = nextAccountId;
-          route.provider = { ...route.provider, apiKey: admitted.accessToken };
-          replayOAuthCredentialSnapshot = {
-            accountId: admitted.accountId,
-            generation: admitted.generation,
-          };
-          invalidateSameTargetRequest();
-          activeAdapter = resolveSelectionAdapter(
-            resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
-            config.cacheRetention,
-          );
-          bindRouteReasoningReplayScope({
-            parsed,
-            providerName: route.providerName,
-            provider: route.provider,
-            adapterName: activeAdapter.name,
-            oauthCredentialSnapshot: replayOAuthCredentialSnapshot,
-            codexAuthContext: authCtx,
-            forwardHeaders: selectedForwardHeaders,
-          });
-          logCtx.provider = formatCursorProviderForLog("cursor", nextAccountId);
-          logCtx.accountLogLabel = nextAccountId;
-          sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
-          recordAttemptCredentialSource(logCtx.activeAttempt, route.providerName, route.provider, activeAdapter.name);
-          const result = await rebuildAndRefetch("cursor-oauth-auth");
-          if ("failed" in result) return result.failed;
-          upstreamResponse = result;
-        } catch {
-          break;
-        }
-      }
-      while (
-        upstreamResponse.status === 429
-        && route.providerName === "cursor"
-        && route.provider.authMode === "oauth"
-        && cursorPoolAccountId
-        && isCursorAccountPoolActive(config)
-        && cursorPoolFailovers < CURSOR_POOL_MAX_FAILOVERS_PER_REQUEST
-      ) {
-        const nextAccountId = rotateCursorAccountOn429(
-          config,
-          cursorPoolAccountId,
-          upstreamResponse.headers.get("retry-after"),
-          cursorSessionKey,
-        );
-        if (!nextAccountId) break;
-        try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
-        try {
-          const snapshot = await getValidAccessSnapshotForAccount("cursor", nextAccountId, { requireUsableAccount: true });
-          const admitted = await commitResolvedOAuthSelection(snapshot);
-          if (!admitted) break;
-          cursorPoolAccountId = nextAccountId;
-          cursorPoolFailovers += 1;
-          parsed._cursorIdentityScope = nextAccountId;
-          route.provider = { ...route.provider, apiKey: admitted.accessToken };
-          replayOAuthCredentialSnapshot = {
-            accountId: admitted.accountId,
-            generation: admitted.generation,
-          };
-          invalidateSameTargetRequest();
-          activeAdapter = resolveSelectionAdapter(
-            resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
-            config.cacheRetention,
-          );
-          bindRouteReasoningReplayScope({
-            parsed,
-            providerName: route.providerName,
-            provider: route.provider,
-            adapterName: activeAdapter.name,
-            oauthCredentialSnapshot: replayOAuthCredentialSnapshot,
-            codexAuthContext: authCtx,
-            forwardHeaders: selectedForwardHeaders,
-          });
-          logCtx.provider = formatCursorProviderForLog("cursor", nextAccountId);
-          logCtx.accountLogLabel = nextAccountId;
-          sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
-          recordAttemptCredentialSource(logCtx.activeAttempt, route.providerName, route.provider, activeAdapter.name);
-          const result = await rebuildAndRefetch("cursor-oauth-429");
-          if ("failed" in result) return result.failed;
-          upstreamResponse = result;
-        } catch {
-          break;
-        }
-      }
       // Generic OAuth account failover (#2568) for providers with no pool of their own.
       // Presence is consent since #2568d: rotation is ON by default once two or more eligible
       // accounts are stored for the provider, because a second deliberate login is read as the
@@ -7968,6 +7967,63 @@ async function handleResponsesInner(
         upstreamResponse = result;
         continue recovery;
       }
+      // Console Go (opencode-zen / opencode-go) intermittently rejects a body it accepts seconds
+      // later with 400 invalid_request_error / "Invalid upload request." Replay the
+      // byte-identical request once after the exact gateway rejection.
+      if (!consoleGoUploadRetryGuard.attempted) {
+        const uploadRejectionBody = await consoleGoUploadRejectionBody(
+          upstreamResponse,
+          consoleGoUploadRetryGuard.attempted,
+          upstream.signal,
+        );
+        if (uploadRejectionBody !== undefined
+          && isTransientConsoleGoUploadRejection({
+            status: upstreamResponse.status,
+            errorBody: uploadRejectionBody,
+            outboundUrl: sameTargetRequest?.url,
+          })) {
+          consoleGoUploadRetryGuard.attempted = true;
+          try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
+          if (!upstream.signal.aborted) {
+            try {
+              await sleepWithAbort(CONSOLE_GO_UPLOAD_RETRY_DELAY_MS, upstream.signal);
+            } catch { cleanupUpstreamAbort(); return clientCancelledResponse(); }
+          }
+          if (upstream.signal.aborted) { cleanupUpstreamAbort(); return clientCancelledResponse(); }
+          const result = await rebuildAndRefetch("console-go-upload-retry");
+          if ("failed" in result) return result.failed;
+          upstreamResponse = result;
+          continue recovery;
+        }
+      }
+      // Reasoning-effort downgrade, mirroring the passthroughRecovery loop above: learn the
+      // refused rung, then replay once at the next published one.
+      if (!reasoningEffortDowngradeGuard.attempted) {
+        const rejectionText = await reasoningEffortRejectionText(
+          upstreamResponse,
+          reasoningEffortDowngradeGuard.attempted,
+          upstream.signal,
+        );
+        const downgrade = rejectionText === undefined
+          ? undefined
+          : planReasoningEffortDowngrade({
+              provider: route.provider,
+              modelId: parsed.modelId,
+              requested: parsed.options.reasoning,
+              rejectionText,
+            });
+        if (downgrade) {
+          reasoningEffortDowngradeGuard.attempted = true;
+          parsed.options.reasoning = downgrade.effort;
+          // The same-target cache keys on parsed identity, so a mutated effort needs a token bump.
+          invalidateSameTargetRequest();
+          try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
+          const result = await rebuildAndRefetch("reasoning-effort-downgrade");
+          if ("failed" in result) return result.failed;
+          upstreamResponse = result;
+          continue recovery;
+        }
+      }
       break;
     }
     if (!upstreamResponse.ok) {
@@ -7991,11 +8047,10 @@ async function handleResponsesInner(
       } finally {
         cleanupUpstreamAbort();
       }
-      if (upstreamResponse.status === 413 && clientRequestedStream && !options.comboAttempt) {
-        return streamingContextOverflowResponse(
-          parsed._responseModelId ?? parsed.modelId,
-          translatorBudget,
-        );
+      if (upstreamResponse.status === 413) {
+        return clientRequestedStream
+          ? streamingContextOverflowResponse(parsed._responseModelId ?? parsed.modelId, translatorBudget)
+          : jsonContextOverflowResponse();
       }
       if (!isFixedCodexAccount(authCtx)) {
         recordSubagentQuotaFailureForThreadSpawn(
@@ -8015,7 +8070,7 @@ async function handleResponsesInner(
       const message = normalized.cyberPolicy
         ? normalized.message
           ?? (isCyberPolicyCode(normalized.code) ? CYBER_POLICY_FALLBACK_MESSAGE : normalized.safeText)
-        : enrichOpenCodeZenRateLimitMessage(
+        : enrichOpenCodeZenUpstreamMessage(
           `Provider error ${upstreamResponse.status}: ${normalized.safeText}`,
           {
             status: upstreamResponse.status,
@@ -8026,7 +8081,7 @@ async function handleResponsesInner(
             hasApiKey: Boolean(route.provider.apiKey?.trim()),
             upstreamRetryAfter,
             // This recovery path is the HTTP Responses wire; custom runTurn transports
-            // never reach enrichOpenCodeZenRateLimitMessage here.
+            // never reach enrichOpenCodeZenUpstreamMessage here.
             supportsHttpSameKeyRetry: true,
           },
         );
@@ -8068,16 +8123,6 @@ async function handleResponsesInner(
     nextParsed: OcxParsedRequest,
     initialRecoveryKind?: AttemptRecoveryKind,
   ): AsyncGenerator<AdapterEvent> {
-    const requestValidationEvent = (error: unknown): AdapterEvent | undefined => {
-      if (!(error instanceof OcxRequestValidationError)) return undefined;
-      return {
-        type: "error",
-        status: error.status,
-        errorType: "invalid_request_error",
-        code: "invalid_request_error",
-        message: error.message,
-      };
-    };
     let response: Response | undefined;
     // One-shot recovery label for the next top-of-loop continuation send after a failover rotation.
     let nextContinuationRecoveryKind: AttemptRecoveryKind | undefined = initialRecoveryKind;
@@ -8090,7 +8135,6 @@ async function handleResponsesInner(
      */
     const fetchContinuation = async (recoveryKind?: AttemptRecoveryKind): Promise<Response> => {
       let continuationRequest: AdapterRequest | undefined;
-      assertGoogleOptionsRoute(activeAdapter, route.provider, nextParsed);
       if (sameTargetRequest !== undefined && sameTargetParsed === nextParsed && sameTargetToken === transportToken) {
         // Same target (key/adapter/parsed/tier unchanged): replay the exact cached request.
         continuationRequest = sameTargetRequest;
@@ -8125,13 +8169,8 @@ async function handleResponsesInner(
       // Optional recovery label for same-target / failover continuation sends.
       const replayKind: AttemptRecoveryKind | undefined = recoveryKind;
       try {
-        if (diagnosticContext) {
-          diagnosticContext.recovery = replayKind;
-          diagnosticContext.attempt = logCtx.activeAttempt?.ordinal;
-          diagnosticContext.adapterName = activeAdapter.name;
-        }
         if (activeAdapter.fetchResponse) {
-          noteDiagnosticAttempt(logCtx.activeAttempt, continuationEstimate, replayKind, activeAdapter.name);
+          noteAttemptSend(logCtx.activeAttempt, continuationEstimate, replayKind);
           await waitForProviderRequestSlot(route.providerName, route.provider, nextParsed.modelId, upstream.signal);
           return await activeAdapter.fetchResponse(builtContinuationRequest, {
             abortSignal: upstream.signal,
@@ -8141,10 +8180,7 @@ async function handleResponsesInner(
               dispatchOverride: oauthDispatch(builtContinuationRequest, nextParsed),
               providerName: route.providerName,
               modelId: nextParsed.modelId,
-              pacingSlotAcquired: true,
             }),
-            replayBudget,
-            ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
           });
         }
         // Same #1851 scope guard as the initial send: transient-5xx retry only for direct
@@ -8155,7 +8191,7 @@ async function handleResponsesInner(
           : fetchWithResetRetry;
         return await fetchContinuationWithRetryPolicy(
           recovery => {
-            noteDiagnosticAttempt(logCtx.activeAttempt, continuationEstimate, recovery ?? replayKind, activeAdapter.name);
+            noteAttemptSend(logCtx.activeAttempt, continuationEstimate, recovery ?? replayKind);
             return fetchWithHeaderTimeout(
               builtContinuationRequest.url,
               applyUpstreamRecoveryInit({
@@ -8176,8 +8212,6 @@ async function handleResponsesInner(
           {
             abortSignal: upstream.signal,
             label: safeHostLabel(builtContinuationRequest.url),
-            replayTransientFailures: route.provider.replayTransientFailures,
-            replayBudget,
             // Same request-scoped budget as the initial send and the 429/rotation refetches:
             // a terminal-guard continuation is another leg of ONE request, so handing it a
             // fresh `attempts` would let one request exceed the configured total-send ceiling.
@@ -8199,10 +8233,7 @@ async function handleResponsesInner(
         nextContinuationRecoveryKind = undefined;
         response = await fetchContinuation(recoveryKind);
       } catch (error) {
-        const validationEvent = requestValidationEvent(error);
-        if (validationEvent) {
-          yield validationEvent;
-        } else if (options.abortSignal?.aborted || upstream.signal.aborted) {
+        if (options.abortSignal?.aborted || upstream.signal.aborted) {
           yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
         } else {
           yield { type: "error", message: `Provider continuation failed: ${redactSecretString(error instanceof Error ? error.message : String(error))}` };
@@ -8248,10 +8279,7 @@ async function handleResponsesInner(
         try {
           response = await fetchContinuation("rate-limit-429");
         } catch (error) {
-          const validationEvent = requestValidationEvent(error);
-          if (validationEvent) {
-            yield validationEvent;
-          } else if (options.abortSignal?.aborted || upstream.signal.aborted) {
+          if (options.abortSignal?.aborted || upstream.signal.aborted) {
             yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
           } else {
             yield { type: "error", message: `Provider continuation failed: ${redactSecretString(error instanceof Error ? error.message : String(error))}` };
@@ -8323,154 +8351,6 @@ async function handleResponsesInner(
             sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
             recordAttemptCredentialSource(logCtx.activeAttempt, route.providerName, route.provider, activeAdapter.name);
             nextContinuationRecoveryKind = "anthropic-oauth-429";
-            continue;
-          } catch {
-            // fall through to emit continuation error below
-          }
-        }
-      }
-      if (response.status === 403 && isAntigravityOAuth && antigravityAccountId) {
-        recordAntigravityCooldown(antigravityAccountId, response.headers.get("retry-after"), Date.now(), "geoblock");
-      }
-      if (response.status === 429 && isAntigravityOAuth && antigravityAccountId) {
-        recordAntigravityCooldown(antigravityAccountId, response.headers.get("retry-after"));
-        const retryAfter = retryableAntigravity429DelayMs(response.headers.get("retry-after"));
-        if (!antigravity429RetryAttempted && retryAfter !== null) {
-          antigravity429RetryAttempted = true;
-          try { void response.body?.cancel().catch(() => {}); } catch { /* already closed */ }
-          try {
-            await sleepWithAbort(retryAfter, upstream.signal);
-          } catch {
-            yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
-            return;
-          }
-          if (options.abortSignal?.aborted || upstream.signal.aborted) {
-            yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
-            return;
-          }
-          nextContinuationRecoveryKind = "rate-limit-429";
-          continue;
-        }
-      }
-      if (
-        response.status === 402
-        && cursorPoolAccountId
-        && isCursorAccountPoolActive(config)
-      ) {
-        recordCursorAccountBillingCooldown(
-          cursorPoolAccountId,
-          response.headers.get("retry-after"),
-        );
-      }
-      while (
-        (response.status === 401 || response.status === 403)
-        && route.providerName === "cursor"
-        && route.provider.authMode === "oauth"
-        && cursorPoolAccountId
-        && isCursorAccountPoolActive(config)
-        && cursorPoolFailovers < CURSOR_POOL_MAX_FAILOVERS_PER_REQUEST
-      ) {
-        const nextAccountId = rotateCursorAccountOnAuth(
-          config,
-          cursorPoolAccountId,
-          cursorSessionKey,
-        );
-        if (nextAccountId) {
-          try { void response.body?.cancel().catch(() => {}); } catch { /* already closed */ }
-          try {
-            const snapshot = await getValidAccessSnapshotForAccount("cursor", nextAccountId, { requireUsableAccount: true });
-            const admitted = await commitResolvedOAuthSelection(snapshot);
-            if (!admitted) break;
-            cursorPoolAccountId = nextAccountId;
-            cursorPoolFailovers += 1;
-            parsed._cursorIdentityScope = nextAccountId;
-            route.provider = { ...route.provider, apiKey: admitted.accessToken };
-            replayOAuthCredentialSnapshot = {
-              accountId: admitted.accountId,
-              generation: admitted.generation,
-            };
-            invalidateSameTargetRequest();
-            activeAdapter = resolveSelectionAdapter(
-              resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
-              config.cacheRetention,
-            );
-            bindRouteReasoningReplayScope({
-              parsed: nextParsed,
-              providerName: route.providerName,
-              provider: route.provider,
-              adapterName: activeAdapter.name,
-              oauthCredentialSnapshot: replayOAuthCredentialSnapshot,
-            });
-            bindRouteReasoningReplayScope({
-              parsed,
-              providerName: route.providerName,
-              provider: route.provider,
-              adapterName: activeAdapter.name,
-              oauthCredentialSnapshot: replayOAuthCredentialSnapshot,
-            });
-            logCtx.provider = formatCursorProviderForLog("cursor", nextAccountId);
-            logCtx.accountLogLabel = nextAccountId;
-            sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
-            recordAttemptCredentialSource(logCtx.activeAttempt, route.providerName, route.provider, activeAdapter.name);
-            nextContinuationRecoveryKind = "cursor-oauth-auth";
-            continue;
-          } catch {
-            // fall through to emit continuation error below
-          }
-        }
-      }
-      while (
-        response.status === 429
-        && route.providerName === "cursor"
-        && route.provider.authMode === "oauth"
-        && cursorPoolAccountId
-        && isCursorAccountPoolActive(config)
-        && cursorPoolFailovers < CURSOR_POOL_MAX_FAILOVERS_PER_REQUEST
-      ) {
-        const nextAccountId = rotateCursorAccountOn429(
-          config,
-          cursorPoolAccountId,
-          response.headers.get("retry-after"),
-          cursorSessionKey,
-        );
-        if (nextAccountId) {
-          try { void response.body?.cancel().catch(() => {}); } catch { /* already closed */ }
-          try {
-            const snapshot = await getValidAccessSnapshotForAccount("cursor", nextAccountId, { requireUsableAccount: true });
-            const admitted = await commitResolvedOAuthSelection(snapshot);
-            if (!admitted) break;
-            cursorPoolAccountId = nextAccountId;
-            cursorPoolFailovers += 1;
-            parsed._cursorIdentityScope = nextAccountId;
-            route.provider = { ...route.provider, apiKey: admitted.accessToken };
-            replayOAuthCredentialSnapshot = {
-              accountId: admitted.accountId,
-              generation: admitted.generation,
-            };
-            invalidateSameTargetRequest();
-            activeAdapter = resolveSelectionAdapter(
-              resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
-              config.cacheRetention,
-            );
-            bindRouteReasoningReplayScope({
-              parsed: nextParsed,
-              providerName: route.providerName,
-              provider: route.provider,
-              adapterName: activeAdapter.name,
-              oauthCredentialSnapshot: replayOAuthCredentialSnapshot,
-            });
-            bindRouteReasoningReplayScope({
-              parsed,
-              providerName: route.providerName,
-              provider: route.provider,
-              adapterName: activeAdapter.name,
-              oauthCredentialSnapshot: replayOAuthCredentialSnapshot,
-            });
-            logCtx.provider = formatCursorProviderForLog("cursor", nextAccountId);
-            logCtx.accountLogLabel = nextAccountId;
-            sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
-            recordAttemptCredentialSource(logCtx.activeAttempt, route.providerName, route.provider, activeAdapter.name);
-            nextContinuationRecoveryKind = "cursor-oauth-429";
             continue;
           } catch {
             // fall through to emit continuation error below
@@ -8562,13 +8442,7 @@ async function handleResponsesInner(
       const detachContinuationBodyGuard = cancelBodyOnAbort(response.body, upstream.signal);
       try {
         if (nextParsed.stream) {
-          yield* diagnoseAdapterEvents(
-            activeAdapter.parseStream(response, translatorBudget, logCtx.activeTierMetadata),
-            activeAdapter.name,
-            diagnosticRequestId,
-            logCtx,
-            adapterDiagnosticState,
-          );
+          yield* activeAdapter.parseStream(response, translatorBudget, logCtx.activeTierMetadata);
         } else if (activeAdapter.parseResponse) {
           yield* await activeAdapter.parseResponse(response, translatorBudget, logCtx.activeTierMetadata);
         } else {
@@ -8578,10 +8452,7 @@ async function handleResponsesInner(
         detachContinuationBodyGuard();
       }
     } catch (error) {
-      const validationEvent = requestValidationEvent(error);
-      if (validationEvent) {
-        yield validationEvent;
-      } else if (options.abortSignal?.aborted) {
+      if (options.abortSignal?.aborted) {
         yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
       } else {
         yield { type: "error", message: `Provider continuation parse failed: ${redactSecretString(error instanceof Error ? error.message : String(error))}` };
@@ -8603,18 +8474,11 @@ async function handleResponsesInner(
   };
 
   if (parsed.stream) {
-    const initialEventStream = diagnoseAdapterEvents(
-      activeAdapter.parseStream(upstreamResponse, translatorBudget, logCtx.activeTierMetadata),
-      activeAdapter.name,
-      diagnosticRequestId,
-      logCtx,
-      adapterDiagnosticState,
+    const initialEventStream = activeAdapter.parseStream(
+      upstreamResponse,
+      translatorBudget,
+      logCtx.activeTierMetadata,
     );
-    if (diagnosticContext) {
-      diagnosticContext.adapterName = activeAdapter.name;
-      diagnosticContext.attempt = logCtx.activeAttempt?.ordinal;
-      diagnosticContext.recovery = logCtx.activeAttempt?.recoveryKinds.at(-1);
-    }
     const eventStream = terminalGuardEnabled
       ? guardTerminalEventStream({
           parsed,
@@ -8635,10 +8499,9 @@ async function handleResponsesInner(
         })
       : eventStream;
     const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, toolSearchToolNames } = toolBridgeMaps;
-    const benchmarkUsageGate = { done: false };
     const sseStream = bridgeToResponsesSSE(
       guardedEventStream, parsed._responseModelId ?? parsed.modelId, toolNsMap, freeformToolNames, toolSearchToolNames,
-      () => upstream.abort(), 2_000,
+      () => { cancelResponseCompletion(); upstream.abort(); }, 2_000,
       {
         translatorBudget,
         replayCacheScope: parsed._reasoningReplayScope,
@@ -8651,10 +8514,8 @@ async function handleResponsesInner(
         ...(routedCompaction ? { compaction: true } : {}),
         // Same grok-surface split as the runTurn branch above.
         ...(logCtx.surface === "grok" ? { heartbeatStyle: "comment" as const } : {}),
-        ...(diagnosticContext ? { diagnostic: diagnosticContext } : {}),
         onUsage: usage => {
           // Raw adapter usage, pre wire-normalization (see the runTurn branch above).
-          observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, activeAdapter.name, parsed._responseModelId ?? parsed.modelId, usage);
           logCtx.usageFromBridge = true;
           if (usage) {
             logCtx.usage = usage;
@@ -8675,6 +8536,7 @@ async function handleResponsesInner(
               responseStateOptions(activeAdapter.name === "kiro"),
             );
           }
+          notifyResponseComplete(response);
         },
       },
     );
@@ -8720,7 +8582,6 @@ async function handleResponsesInner(
     }
     const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, toolSearchToolNames } = toolBridgeMaps;
     let providerState: OcxProviderContinuationState | undefined;
-    const benchmarkUsageGate = { done: false };
     const json = buildResponseJSON(events, parsed._responseModelId ?? parsed.modelId, {
       translatorBudget,
       replayCacheScope: parsed._reasoningReplayScope,
@@ -8733,7 +8594,6 @@ async function handleResponsesInner(
       ...(routedCompaction ? { compaction: true } : {}),
       onProviderState: state => { providerState = state; },
       onUsage: usage => {
-        observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, activeAdapter.name, parsed._responseModelId ?? parsed.modelId, usage);
         logCtx.usageFromBridge = true;
         if (usage) {
           logCtx.usage = usage;
@@ -8756,6 +8616,7 @@ async function handleResponsesInner(
     if (adapterResponseReachedServingTerminal(events, json)) {
       commitReasoningReplayServingRoute();
     }
+    notifyResponseComplete(json);
     return new Response(JSON.stringify(json), { headers: { "Content-Type": "application/json" } });
   }
 

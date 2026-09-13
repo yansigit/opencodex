@@ -1,3 +1,4 @@
+import { hasUnreadableEncryptedAgentTask, sanitizeEncryptedContentInPlace } from "../../src/server/responses/encrypted-payload";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { createTranslatorBudget } from "../../src/lib/translator-budget";
 import { warnAgentTaskRecoveryStartup } from "../../src/server";
@@ -856,5 +857,261 @@ describe("agent task recovery (opt-in, default off)", () => {
     expect(await response.json()).toMatchObject({
       error: { code: "unreadable_encrypted_agent_task", recovery_reason: "recovery_transport_error" },
     });
+  });
+});
+
+/**
+ * #4089. A live Codex thread switched from a native ChatGPT model to a routed provider replays a
+ * backend-minted encrypted agent message on every later turn. That turn is not a thread spawn, so
+ * the direct recovery gate skipped it entirely and the thread was unusable on that provider
+ * forever -- the workaround in the report was "start a new thread".
+ *
+ * `recovery_reason` is the discriminator. `unreadableEncryptedAgentTaskResponse` attaches the
+ * field only when a recovery attempt produced a refusal reason, so its absence proves recovery
+ * never ran. The first test is the reporter's loopback pair: identical bodies, one differing
+ * header.
+ */
+describe("mid-thread encrypted agent task recovery (#4089)", () => {
+  beforeEach(() => {
+    resetAgentTaskRecoveryState();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    resetAgentTaskRecoveryState();
+  });
+
+  /** A mid-thread model switch: same Codex caller, same credentials, no spawn markers. */
+  const midThreadHeaders = (accountId = "acct-caller"): Headers => {
+    const headers = codexHeaders(accountId);
+    headers.delete("x-openai-subagent");
+    return headers;
+  };
+
+  test("a mid-thread switch attempts recovery exactly like the spawn it is not", async () => {
+    const attempts: string[] = [];
+    globalThis.fetch = (async (input) => {
+      attempts.push(String(input));
+      return new Response("event: error\ndata: {}\n\n", { status: 200 });
+    }) as typeof fetch;
+
+    const errors: Array<Record<string, unknown>> = [];
+    for (const headers of [midThreadHeaders(), codexHeaders()]) {
+      const response = await post(routedConfig(), "xai/grok-4.5", encryptedInput(), headers);
+      expect(response.status).toBe(400);
+      errors.push((await response.json() as { error?: Record<string, unknown> }).error ?? {});
+      resetAgentTaskRecoveryState();
+    }
+
+    // Before the gate change the mid-thread body carried no `recovery_reason` key at all.
+    expect(errors[0]).toMatchObject({
+      code: "unreadable_encrypted_agent_task",
+      recovery_reason: "recovery_invalid_output",
+    });
+    expect(errors[0]).toEqual(errors[1]!);
+    expect(attempts).toHaveLength(2);
+    for (const url of attempts) expect(url).toContain("chatgpt.com/backend-api/codex");
+  });
+
+  test("a recovered mid-thread turn reaches the routed provider as plaintext", async () => {
+    const urls: string[] = [];
+    let providerBody = "";
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.includes("chatgpt.com")) return new Response(recoverySse("Continue the migration."));
+      providerBody = typeof init?.body === "string" ? init.body : "";
+      return providerResponse();
+    }) as typeof fetch;
+
+    const response = await post(routedConfig(), "xai/grok-4.5", encryptedInput(), midThreadHeaders());
+
+    expect(response.status).toBe(200);
+    expect(urls).toHaveLength(2);
+    expect(urls[0]).toContain("chatgpt.com/backend-api/codex");
+    expect(urls[1]).toContain("api.x.ai");
+    expect(providerBody).toContain("Continue the migration.");
+    expect(providerBody).not.toContain(FERNET_TASK);
+  });
+
+  test("a mid-thread replay reuses the cached plaintext instead of recovering again", async () => {
+    // The report's third observation: the cache restore sits inside the same gate, so a
+    // mid-thread turn could never reuse a plaintext this proxy had already paid for.
+    const headers = midThreadHeaders();
+    let recoveries = 0;
+    let providerCalls = 0;
+    globalThis.fetch = (async (input) => {
+      if (String(input).includes("chatgpt.com")) {
+        recoveries += 1;
+        return new Response(recoverySse("Continue the migration."));
+      }
+      providerCalls += 1;
+      return providerResponse();
+    }) as typeof fetch;
+
+    expect((await post(routedConfig(), "xai/grok-4.5", encryptedInput(), headers)).status).toBe(200);
+    expect((await post(routedConfig(), "xai/grok-4.5", [
+      ...encryptedInput(),
+      { type: "message", role: "user", content: "And now the follow-up turn." },
+    ], headers)).status).toBe(200);
+
+    expect(recoveries).toBe(1);
+    expect(providerCalls).toBe(2);
+  });
+
+  test("a mid-thread switch without matching native credentials never spends a session", async () => {
+    // The widened entry point is still bounded by recoveryAdmission(): the account id inside the
+    // bearer must equal the chatgpt-account-id header, so this one is refused before any I/O.
+    let fetches = 0;
+    globalThis.fetch = (async () => {
+      fetches += 1;
+      throw new Error("recovery must not dispatch for a denied caller");
+    }) as typeof fetch;
+
+    const headers = midThreadHeaders();
+    headers.set("chatgpt-account-id", "mismatched-account-sentinel");
+    const response = await post(routedConfig(), "xai/grok-4.5", encryptedInput(), headers);
+    const raw = await response.text();
+
+    expect(response.status).toBe(400);
+    expect(JSON.parse(raw)).toMatchObject({
+      error: { code: "unreadable_encrypted_agent_task", recovery_reason: "admission_denied" },
+    });
+    expect(fetches).toBe(0);
+    expect(raw).not.toContain(FERNET_TASK);
+  });
+});
+
+
+describe("bounded multipart encrypted task recovery", () => {
+  beforeEach(() => resetAgentTaskRecoveryState());
+  afterEach(() => { globalThis.fetch = originalFetch; resetAgentTaskRecoveryState(); });
+  const multipart = (tokens: string[] = [FERNET_TASK, SECOND_FERNET_TASK]) => agentMessage([
+    { type: "input_text", text: ROUTING_ENVELOPE },
+    ...tokens.map(encrypted_content => ({ type: "encrypted_content", encrypted_content })),
+  ]);
+
+  test.each(["NEW_TASK", "MESSAGE"] as const)("recovers ordered %s parts in one request and isolates sequence caches", async messageType => {
+    let sends = 0;
+    const sent: Array<{ input: Array<{ content: Array<{ encrypted_content?: string }> }> }> = [];
+    globalThis.fetch = (async (_url, init) => {
+      sends++;
+      sent.push(JSON.parse(String(init?.body)));
+      return new Response(recoverySse("Complete multipart assignment."));
+    }) as typeof fetch;
+    const input = () => {
+      const value = multipart();
+      const item = value[0] as { content: Array<Record<string, unknown>> };
+      item.content[0]!.text = ROUTING_ENVELOPE.replace("NEW_TASK", messageType);
+      return value;
+    };
+    const req = new Request("http://localhost/v1/responses", { headers: codexHeaders() });
+    const current = input();
+    expect(await recoverEncryptedAgentTaskWithResult(req, current, {}, routedConfig())).toEqual({ recovered: true });
+    expect(sent[0]!.input[0]!.content.slice(1).map(part => part.encrypted_content)).toEqual([FERNET_TASK, SECOND_FERNET_TASK]);
+    expect(current).toEqual([{ type: "message", role: "user", content: [
+      { type: "input_text", text: ROUTING_ENVELOPE.replace("NEW_TASK", messageType) },
+      { type: "input_text", text: "Complete multipart assignment." },
+    ] }]);
+    expect(restoreCachedEncryptedAgentTasks(req, input(), routedConfig())).toBe(1);
+    const reversed = input();
+    (reversed[0] as { content: unknown[] }).content.splice(1, 2,
+      { type: "encrypted_content", encrypted_content: SECOND_FERNET_TASK },
+      { type: "encrypted_content", encrypted_content: FERNET_TASK });
+    expect(restoreCachedEncryptedAgentTasks(req, reversed, routedConfig())).toBe(0);
+    expect(await recoverEncryptedAgentTaskWithResult(req, reversed, {}, routedConfig())).toEqual({ recovered: true });
+    expect(sends).toBe(2);
+    discardEncryptedAgentTaskRecovery(req, input(), routedConfig());
+    expect(restoreCachedEncryptedAgentTasks(req, input(), routedConfig())).toBe(0);
+  });
+
+  test("accepts exactly 32 whole parts without deduplicating ciphertext", async () => {
+    let sends = 0;
+    let forwarded: string[] = [];
+    globalThis.fetch = (async (_url, init) => {
+      sends++;
+      const body = JSON.parse(String(init?.body));
+      forwarded = body.input[0].content.slice(1).map((part: { encrypted_content: string }) => part.encrypted_content);
+      return new Response(recoverySse("All repeated parts retained."));
+    }) as typeof fetch;
+    const tokens = Array.from({ length: 32 }, () => FERNET_TASK);
+    expect(await recoverEncryptedAgentTaskWithResult(new Request("http://localhost/v1/responses", { headers: codexHeaders() }), multipart(tokens), {}, routedConfig())).toEqual({ recovered: true });
+    expect(forwarded).toEqual(tokens);
+    expect(sends).toBe(1);
+  });
+
+  test("refuses malformed slots, nonconsecutive runs, and count/byte overflow without a fetch", async () => {
+    let sends = 0;
+    globalThis.fetch = (async () => { sends++; return new Response(recoverySse("must not run")); }) as typeof fetch;
+    const req = new Request("http://localhost/v1/responses", { headers: codexHeaders() });
+    const tooLargeRaw = Buffer.alloc(57 + 16 * 131072, 0x5a);
+    tooLargeRaw[0] = 0x80;
+    const token = tooLargeRaw.toString("base64").replaceAll("+", "-").replaceAll("/", "_");
+    const boundedRaw = Buffer.alloc(57 + 16 * 50000, 0x5a);
+    boundedRaw[0] = 0x80;
+    const boundedToken = boundedRaw.toString("base64").replaceAll("+", "-").replaceAll("/", "_");
+    const cases = [multipart(Array.from({ length: 33 }, () => FERNET_TASK)), multipart([token]), multipart([boundedToken, boundedToken]),
+      agentMessage([{ type: "input_text", text: ROUTING_ENVELOPE }, { type: "encrypted_content", encrypted_content: FERNET_TASK }, { type: "encrypted_content", encrypted_content: 123 }]),
+      agentMessage([{ type: "input_text", text: ROUTING_ENVELOPE }, { type: "encrypted_content", encrypted_content: FERNET_TASK }, { type: "input_text", text: "" }, { type: "encrypted_content", encrypted_content: SECOND_FERNET_TASK }]),
+    ];
+    for (const input of cases) {
+      const before = structuredClone(input);
+      expect(await recoverEncryptedAgentTaskWithResult(req, input, {}, routedConfig())).toEqual({ recovered: false, reason: "unsupported_envelope" });
+      expect(input).toEqual(before);
+    }
+    expect(sends).toBe(0);
+  });
+
+  test.each(["author", "header", "later-token"] as const)("revalidates %s after asynchronous recovery", async mutation => {
+    let release!: (response: Response) => void;
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    globalThis.fetch = (() => { started(); return new Promise<Response>(resolve => { release = resolve; }); }) as typeof fetch;
+    const req = new Request("http://localhost/v1/responses", { headers: codexHeaders() });
+    const input = multipart();
+    const pending = recoverEncryptedAgentTaskWithResult(req, input, {}, routedConfig());
+    await ready;
+    const item = input[0] as { author: string; content: Array<Record<string, unknown>> };
+    if (mutation === "author") item.author = "changed-author";
+    else if (mutation === "header") item.content[0]!.text = ROUTING_ENVELOPE.replace("NEW_TASK", "MESSAGE");
+    else item.content[2]!.encrypted_content = FERNET_TASK;
+    release(new Response(recoverySse("Must not replace changed task.")));
+    expect(await pending).toEqual({ recovered: false, reason: "input_changed" });
+    expect((input[0] as { type: string }).type).toBe("agent_message");
+    expect(restoreCachedEncryptedAgentTasks(req, multipart(), routedConfig())).toBe(0);
+  });
+
+  test("split tokens remain unreadable through sanitization and never trigger recovery", async () => {
+    const input = multipart([FERNET_TASK.slice(0, 50), FERNET_TASK.slice(50)]);
+    const before = structuredClone(input);
+    expect(hasUnreadableEncryptedAgentTask(input)).toBe(true);
+    expect(sanitizeEncryptedContentInPlace(input)).toBe(0);
+    expect(input).toEqual(before);
+    expect(hasUnreadableEncryptedAgentTask(input)).toBe(true);
+    let sends = 0;
+    globalThis.fetch = (async () => { sends++; return providerResponse(); }) as typeof fetch;
+    const response = await post(routedConfig(), "xai/grok-4.5", input, codexHeaders());
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain("unreadable_encrypted_agent_task");
+    expect(sends).toBe(0);
+  });
+
+  test("identified fragments do not prevent independent plaintext-slot normalization", () => {
+    const input = multipart([FERNET_TASK.slice(0, 50), FERNET_TASK.slice(50)]);
+    const content = (input[0] as { content: Array<Record<string, unknown>> }).content;
+    content.push({ type: "input_text", text: "Readable task." }, { type: "encrypted_content", encrypted_content: "Independent plaintext." });
+    const fragments = structuredClone(content.slice(1, 3));
+    expect(hasUnreadableEncryptedAgentTask(input)).toBe(false);
+    expect(sanitizeEncryptedContentInPlace(input)).toBe(1);
+    expect(content.slice(1, 3)).toEqual(fragments);
+    expect(content.at(-1)).toEqual({ type: "input_text", text: "Independent plaintext." });
+  });
+
+  test("multipart backend 503 is still one attempt with bounded diagnostics", async () => {
+    let sends = 0;
+    globalThis.fetch = (async () => { sends++; return new Response("private failure", { status: 503 }); }) as typeof fetch;
+    const result = await recoverEncryptedAgentTaskWithResult(new Request("http://localhost/v1/responses", { headers: codexHeaders() }), multipart(), {}, routedConfig());
+    expect(result).toEqual({ recovered: false, reason: "recovery_http_rejected" });
+    expect(sends).toBe(1);
   });
 });
