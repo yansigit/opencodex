@@ -467,6 +467,24 @@ export function hasLegacyClinePassReasoningEfforts(name: string, prov: OcxProvid
     && prov.reasoningEfforts[0] === "low";
 }
 
+const LEGACY_GOOGLE_AISTUDIO_MODELS = [
+  "gemini-3.7-flash",
+  "gemini-3.1-pro-preview",
+  "gemini-2.5-pro",
+  "gemini-2.5-flash",
+  "gemini-3.5-flash",
+] as const;
+
+function refreshLegacyGoogleAiStudioModels(name: string, prov: OcxProviderConfig, seed: OcxProviderConfig): void {
+  if (name !== "google-aistudio"
+    || prov.googleMode !== "ai-studio-web"
+    || prov.liveModels !== false
+    || prov.defaultModel !== "gemini-3.7-flash"
+    || JSON.stringify(prov.models) !== JSON.stringify(LEGACY_GOOGLE_AISTUDIO_MODELS)
+    || !seed.models) return;
+  prov.models = [...seed.models];
+}
+
 export function enrichProviderFromRegistry(name: string, prov: OcxProviderConfig): void {
   const entry = PROVIDER_REGISTRY.find(row => row.id === name);
   if (!entry || !providerMatchesRegistryTransportWithStaticGuards(name, prov)) {
@@ -488,9 +506,11 @@ export function enrichProviderFromRegistry(name: string, prov: OcxProviderConfig
     modelReasoningEffortMap: prov.modelReasoningEffortMap,
   };
   const seed = providerConfigSeed(entry);
+  refreshLegacyGoogleAiStudioModels(name, prov, seed);
   repairStaticModelCatalogProvider(name, prov);
   if (prov.apiKeyTransport === undefined && seed.apiKeyTransport !== undefined) prov.apiKeyTransport = seed.apiKeyTransport;
   if (!prov.defaultModel && seed.defaultModel) prov.defaultModel = seed.defaultModel;
+  if (prov.requestPacing === undefined && seed.requestPacing) prov.requestPacing = structuredClone(seed.requestPacing);
   if (prov.responsesPath === undefined && seed.responsesPath !== undefined) prov.responsesPath = seed.responsesPath;
   if (prov.chatCompletionsPath === undefined && seed.chatCompletionsPath !== undefined) prov.chatCompletionsPath = seed.chatCompletionsPath;
   // Fill mode only when absent: an explicit persisted `direct` must never be overwritten.
