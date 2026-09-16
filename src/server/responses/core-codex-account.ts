@@ -60,13 +60,14 @@ import { bindRouteReasoningReplayScope } from "./core-replay";
 import {
   conversationStateBindingFromAuth,
   applyAccountChangeConversationStateScrub,
+  conversationCarriesUploadedFiles,
 } from "./account-change-state";
 import {
   recordAdapterReasoning,
   recordAdapterTier,
   sealRequestAttemptIdentity,
   recordAttemptCredentialSource,
-  noteAttemptSend,
+  noteProviderAttemptSend,
 } from "../request-log";
 import { codexAuthContextLogLabel } from "../../codex/account-label";
 import { chargeWorkflowSends } from "../../lib/workflow-budget";
@@ -221,7 +222,17 @@ export async function shouldRetryCodexPoolAccountQuota(
   // A post-send WebSocket gateway status must not become a second account's send; the
   // body carries no quota evidence either, but the marker is the contract, not the prose.
   if (isNonReplayableResponse(response)) return false;
-  if (response.status === 402 || response.status === 429) return true;
+  if (response.status === 402 || response.status === 429) {
+    // Status alone used to authorize the move, which is right for a limit the ACCOUNT owns and
+    // wrong for one it merely belongs to. An organization- or project-scoped exhaustion refuses
+    // every credential inside that organization, so the second account meets the same counter
+    // and the only thing the rotation buys is a second cold prompt prefix (#4546). Positive
+    // evidence is required to withhold it: the helper fails closed, so an unreadable or
+    // ambiguous body keeps the broad #584 behaviour unchanged, and `rate_limit_exceeded`,
+    // `slow_down` and plan-level exhaustion still rotate exactly as before.
+    const { codexScopedExhaustionCode } = await import("../../codex/quota-rejection");
+    return await codexScopedExhaustionCode(response, { signal }) === undefined;
+  }
   if (response.status < 500 || response.status >= 600) return false;
   try {
     // Reject malformed UTF-8 instead of matching quota words around replacement characters.
@@ -489,6 +500,17 @@ export async function retryCodexPoolOnAlternateAccount(
     recordUnmovedTransientOutcome();
     return { kind: "no-alternate" };
   }
+  // An uploaded file is readable only by the account it was sent to, so NO alternate can serve
+  // this body. Which account would be chosen does not change that, which is why this asks before
+  // the resolution rather than after it: refusing here reserves no send, cancels no response, and
+  // leaves the caller holding the first account's rejection to return unchanged (#4710). The
+  // initial-dispatch sites answer with a 400 instead, because there is no earlier response there
+  // to fall back to. A same-account replay -- the gated-model 400 ladder above -- is unaffected,
+  // since it never leaves the issuing account.
+  if (!retryAuthCtx && conversationCarriesUploadedFiles(parsed._rawBody)) {
+    recordUnmovedTransientOutcome();
+    return { kind: "no-alternate" };
+  }
   // An account move is the guarded profile's fourth send and draws the single shared
   // final-recovery reserve. Nothing bounded it per request before: `excludeAccountId` excludes
   // only the account that just failed, and the caller's recovery loop can return here after the
@@ -702,7 +724,7 @@ export async function retryCodexPoolOnAlternateAccount(
         // The move is a physical send like any other, so the root workflow is charged too.
         chargeWorkflowSends(args.options.workflowRootId, 1);
       }
-      noteAttemptSend(logCtx.activeAttempt, passthroughEstimate);
+      noteProviderAttemptSend(logCtx, route.providerName, route.provider, passthroughEstimate);
       try {
         upstreamResponse = await fetchWithHeaderTimeout(
           request.url,

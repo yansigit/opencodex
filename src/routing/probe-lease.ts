@@ -349,7 +349,14 @@ export function resolveHeldAccountDispatch(input: {
     kind: "withheld",
     boundAccountId: input.boundAccountId,
     ...(input.detourAccountId !== undefined ? { detourAccountId: input.detourAccountId } : {}),
-    retryAt: nextProbeAt(input.boundAccountId, now, input.minProbeIntervalMs),
+    // Both bounds, not just the probe pacing. A request refused by the RATIO has no probe state
+    // of its own yet, so `nextProbeAt` answered `now` and the refusal told the caller to try
+    // again immediately -- a withheld dispatch that busy-loops is the same load as the dispatch
+    // it refused. The limiter is the only thing that knows when its window moves.
+    retryAt: Math.max(
+      nextProbeAt(input.boundAccountId, now, input.minProbeIntervalMs),
+      limiter.nextRecoveryAt(now),
+    ),
   };
 }
 
@@ -408,6 +415,16 @@ export interface PoolBackpressureLimiter {
   tryPermitRetryDispatch(now?: number): boolean;
   /** Admit one probe dispatch under the same shared recovery budget. */
   tryPermitProbeDispatch(now?: number): boolean;
+  /**
+   * Earliest moment this limiter could admit another recovery dispatch.
+   *
+   * A refusal has to hand back a time, or the caller has nothing to wait on and busy-loops
+   * against a pool that is already failing -- which is the load this limiter exists to remove.
+   * `now` when the allowance is not spent; otherwise the moment the oldest bucket still inside
+   * the window falls out of it, which is strictly in the future and is a real change point
+   * rather than a guess.
+   */
+  nextRecoveryAt(now?: number): number;
   state(now?: number): PoolBackpressureState;
 }
 
@@ -461,6 +478,19 @@ export function createPoolBackpressureLimiter(
     return true;
   }
 
+  function nextRecoveryAt(now: number): number {
+    const { initials, recoveries } = totals(now);
+    if (recoveries + 1 <= allowanceFor(initials)) return now;
+    // The window has to move before another recovery fits. The earliest that can happen is the
+    // moment the oldest bucket still inside it leaves, and every such bucket started after
+    // `now - windowMs`, so the answer is always strictly in the future.
+    for (const bucket of buckets) {
+      if (bucket.start <= now - policy.windowMs) continue;
+      return bucket.start + policy.windowMs;
+    }
+    return now + policy.windowMs;
+  }
+
   return {
     recordInitialSend(now = Date.now()): void {
       bucketFor(now).initials += 1;
@@ -470,6 +500,9 @@ export function createPoolBackpressureLimiter(
     },
     tryPermitProbeDispatch(now = Date.now()): boolean {
       return tryPermit(now);
+    },
+    nextRecoveryAt(now = Date.now()): number {
+      return nextRecoveryAt(now);
     },
     state(now = Date.now()): PoolBackpressureState {
       const { initials, recoveries } = totals(now);

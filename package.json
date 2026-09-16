@@ -1,6 +1,6 @@
 {
   "name": "@bitkyc08/opencodex",
-  "version": "2.56.0",
+  "version": "2.57.0",
   "description": "Universal provider proxy for OpenAI Codex & Claude Code — use any LLM with Codex CLI/App/SDK and Claude Code",
   "type": "module",
   "main": "./bin/package-main.mjs",
@@ -82,6 +82,9 @@
   "devDependencies": {
     "@types/bun": "1.4.2",
     "typescript": "7.0.2"
+  },
+  "optionalDependencies": {
+    "wreq-js": "2.3.1"
   },
   "overrides": {
     "@hono/node-server": "2.1.0",
